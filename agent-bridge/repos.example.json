@@ -1,0 +1,7 @@
+{
+  "_comment": "Allowlist of repos this bridge may spawn agents in. The dashboard sends a repo KEY (e.g. \"my-project\"); the bridge maps it here to a docker container + the repo path INSIDE that container. A key not listed here is REJECTED — this is the spawn security boundary. Copy to repos.json and edit. `worktreeBase` is optional and defaults to `<path>/.agent-worktrees` (inside the repo, if the exec user can write it); override it otherwise. `appPort` is optional and defaults to 8501: the BASE of this container's per-session live-app band [appPort, appPort+BRIDGE_APP_SPAN) — each agent gets its own port so one container can serve many live apps. By default the bridge reaches each app by the CONTAINER'S OWN IP (native Linux bridge — nothing to publish). Set BRIDGE_APP_ROUTING=published to use already-published host ports (`docker port <container>` — e.g. Docker Desktop) and publish the band, e.g. `-p 8501-8516:8501-8516`. To make a key spawnable from an Atlas orchestrator's list_agents, also add it to AGENT_BRIDGE_REPOS in the box .env.",
+  "my-project": {
+    "container": "my-project-dev",
+    "path": "/workspace"
+  }
+}

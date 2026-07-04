@@ -1,0 +1,13 @@
+{
+  "name": "atlas-kit",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Atlas Kit — a self-hosted runtime that drives an Atlas knowledge vault with Claude Code agents: dev + knowledge agents in tmux, a KB-coupled Kanban, and a glass-HUD dashboard.",
+  "type": "module",
+  "scripts": {
+    "install:all": "cd api && npm install && cd ../web && npm install",
+    "dev": "bash scripts/dev.sh",
+    "build": "cd web && npm run build"
+  },
+  "license": "MIT"
+}

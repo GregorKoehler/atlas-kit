@@ -1,0 +1,14 @@
+{
+  "_comment": "Root MCP config: point a `claude` session started in this repo at the Atlas Kit MCP server (query_vault / query_atlas + the wiki reads). The agent-orchestrator control tools are NOT enabled here — only the Atlas orchestrator's control.mcp.json sets ATLAS_AGENT_CONTROL=1. Paths assume the kit is checked out at /workspace; adjust if you clone elsewhere.",
+  "mcpServers": {
+    "atlas-kit": {
+      "type": "stdio",
+      "command": "node",
+      "args": [
+        "--env-file=/workspace/.env",
+        "/workspace/api/src/mcp/server.mjs"
+      ],
+      "env": {}
+    }
+  }
+}

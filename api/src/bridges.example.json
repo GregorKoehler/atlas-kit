@@ -1,0 +1,11 @@
+{
+  "_comment": "OPTIONAL extra remote agent bridges, read by api/src/agent-routes.mjs + agent-app-proxy.mjs. A repo KEY listed in a bridge's `repos` routes that repo's dev agents to that bridge (the BRIDGE bearer is injected server-side; the card degrades to 'offline' when the bridge is unreachable). The AGENT_BRIDGE_URL/AGENT_BRIDGE_TOKEN env vars define the DEFAULT bridge, which is the CATCH-ALL for any repo no bridge here claims. Copy to bridges.json (gitignored) and edit. `label` = card name; `url` = the bridge base URL on your tailnet; `token` = its BRIDGE_TOKEN; `repos` = the repo keys this bridge owns (empty list = catch-all). Don't list one repo on two bridges (first match wins).",
+  "bridges": [
+    {
+      "label": "my-box",
+      "url": "http://my-box:7878",
+      "token": "REPLACE_WITH_MY_BOX_BRIDGE_TOKEN",
+      "repos": ["my-remote-project"]
+    }
+  ]
+}

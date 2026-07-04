@@ -1,0 +1,14 @@
+.env
+node_modules
+web/dist/
+api/.state/
+# Operator-local config (see the *.example.json templates):
+#   which repos a box-local dev agent may spawn on (the spawn boundary)
+api/src/agent-local-repos.json
+#   extra remote agent bridges (multi-bridge routing)
+api/src/bridges.json
+#   multi-vault registry (a single VAULT_PATH works without this file)
+api/src/vaults.json
+# agent-bridge operator-local config
+agent-bridge/repos.json
+agent-bridge/bridge.env

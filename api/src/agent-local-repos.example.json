@@ -1,0 +1,6 @@
+{
+  "_comment": "Box-LOCAL dev-agent allowlist, read by api/src/agent-local.mjs. The dashboard sends a repo KEY; a key listed here runs ON THE BOX (git worktree + tmux + claude directly, no docker); a key NOT here is forwarded to a remote agent-bridge instead (see bridges.example.json). This IS execution on the control-plane box, so keep it to repos you have checked out here and trust. Copy to agent-local-repos.json (gitignored) and edit. `path` defaults to WORKSPACE_DIR; `worktreeBase` defaults to <AGENT_LOCAL_DIR>/worktrees/<key> (OUTSIDE the repo, so its checkout stays clean).",
+  "my-project": {
+    "path": "/srv/my-project"
+  }
+}

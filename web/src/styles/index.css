@@ -1,0 +1,6862 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ================================================================= *
+ * Base
+ * ================================================================= */
+@layer base {
+  html,
+  body,
+  #app {
+    height: 100%;
+  }
+
+  body {
+    margin: 0;
+    font-family: var(--font-body);
+    font-weight: 400;
+    color: var(--text);
+    background-color: var(--bg-850);
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    text-rendering: optimizeLegibility;
+  }
+
+  ::selection {
+    background: var(--glow-cyan-strong);
+    color: var(--text-bright);
+  }
+}
+
+/* ================================================================= *
+ * Components
+ * ================================================================= */
+@layer components {
+  /* Layered, depth-y background — radial pools of cyan/teal over a
+     vertical blue-black gradient. Never flat black. */
+  .app-bg {
+    background-color: var(--bg-850);
+    background-image:
+      radial-gradient(
+        1100px 760px at 72% -12%,
+        rgba(34, 211, 238, 0.07),
+        transparent 60%
+      ),
+      radial-gradient(
+        900px 680px at 6% 112%,
+        rgba(45, 212, 191, 0.05),
+        transparent 55%
+      ),
+      radial-gradient(
+        700px 700px at 50% 50%,
+        rgba(18, 30, 44, 0.5),
+        transparent 70%
+      ),
+      linear-gradient(180deg, #0a0e14 0%, #080c12 55%, #070b11 100%);
+    background-attachment: fixed;
+  }
+
+  /* Barely-perceptible static scan-line texture. No animation. */
+  .scanlines::before {
+    content: '';
+    position: fixed;
+    inset: 0;
+    pointer-events: none;
+    z-index: 0;
+    background-image: repeating-linear-gradient(
+      to bottom,
+      rgba(120, 200, 220, 0.018) 0px,
+      rgba(120, 200, 220, 0.018) 1px,
+      transparent 1px,
+      transparent 3px
+    );
+    mix-blend-mode: overlay;
+  }
+
+  /* Cursor-reactive ASCII texture (jarvis only — see AsciiBackdrop.tsx). Sits
+     above the gradient/scanlines, below the corner brackets (z-index:1) and the
+     z-10 content. Additive blend so the cyan glow reads over the dark bg. */
+  .ascii-backdrop {
+    position: fixed;
+    inset: 0;
+    width: 100vw;
+    height: 100vh;
+    z-index: 0;
+    pointer-events: none;
+    mix-blend-mode: screen;
+  }
+  /* On the paper backdrop (Jarvis Claude) the field is warm ink, so it darkens
+     the page instead of glowing — multiply, not screen. */
+  [data-backdrop='paper'] .ascii-backdrop {
+    mix-blend-mode: multiply;
+  }
+
+  /* Translucent dark glass panel: faint lightening, cyan hairline,
+     soft inner highlight + low outer shadow. */
+  .glass {
+    position: relative;
+    background: var(--surface);
+    backdrop-filter: blur(var(--glass-blur)) saturate(125%);
+    -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(125%);
+    border: 1px solid var(--hairline);
+    border-radius: var(--radius-panel);
+    box-shadow:
+      inset 0 1px 0 rgba(255, 255, 255, 0.04),
+      0 10px 40px rgba(0, 0, 0, 0.45);
+  }
+
+  /* HUD chrome label — uppercase, tracked-out display type. */
+  .hud-label {
+    font-family: var(--font-display);
+    font-weight: 600;
+    letter-spacing: var(--hud-tracking);
+    text-transform: uppercase;
+  }
+
+  /* Tabular numerics for clocks/stats. */
+  .tnum {
+    font-family: var(--font-mono);
+    font-variant-numeric: tabular-nums;
+    font-feature-settings: 'tnum' 1;
+  }
+
+  .glow-text {
+    text-shadow: 0 0 18px var(--glow-cyan-strong);
+  }
+
+  /* --- Tab bar items --------------------------------------------- */
+  .hud-tab {
+    position: relative;
+    font-family: var(--font-display);
+    font-weight: 500;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    font-size: 0.78rem;
+    color: var(--text-dim);
+    padding: 0.5rem 0.25rem;
+    background: transparent;
+    border: 0;
+    cursor: pointer;
+    transition: color 160ms ease, text-shadow 160ms ease;
+  }
+  .hud-tab:hover {
+    color: var(--text);
+  }
+  .hud-tab::after {
+    content: '';
+    position: absolute;
+    left: 0;
+    right: 0;
+    bottom: -1px;
+    height: 2px;
+    border-radius: 2px;
+    background: linear-gradient(90deg, transparent, var(--accent), transparent);
+    opacity: 0;
+    transform: scaleX(0.4);
+    transition: opacity 200ms ease, transform 200ms ease;
+  }
+  .hud-tab--active {
+    color: var(--text-bright);
+    text-shadow: 0 0 16px var(--glow-cyan-strong);
+  }
+  .hud-tab--active::after {
+    opacity: 1;
+    transform: scaleX(1);
+    box-shadow: 0 0 12px var(--glow-cyan-strong);
+  }
+
+  /* --- Decorative corner brackets (static HUD framing) ----------- */
+  .corner {
+    position: fixed;
+    width: 26px;
+    height: 26px;
+    border-color: var(--hairline-strong);
+    opacity: 0.5;
+    pointer-events: none;
+    z-index: 1;
+  }
+  .corner--tl { top: 18px; left: 18px; border-top: 1px solid; border-left: 1px solid; }
+  .corner--tr { top: 18px; right: 18px; border-top: 1px solid; border-right: 1px solid; }
+  .corner--bl { bottom: 18px; left: 18px; border-bottom: 1px solid; border-left: 1px solid; }
+  .corner--br { bottom: 18px; right: 18px; border-bottom: 1px solid; border-right: 1px solid; }
+}
+
+/* ================================================================= *
+ * Command Center cards (plain CSS — kept out of @layer so Tailwind
+ * never purges runtime-built class names like .eng__health--amber).
+ * ================================================================= */
+
+.cc-grid {
+  max-width: 2200px;
+  margin: 0 auto;
+  width: 100%;
+}
+
+/* --- Shared card shell ------------------------------------------- */
+.card {
+  display: flex;
+  flex-direction: column;
+  padding: 1.15rem 1.25rem;
+  transition: border-color 180ms ease, transform 180ms ease, box-shadow 180ms ease;
+}
+.card:hover {
+  transform: translateY(-2px);
+  border-color: var(--hairline-strong);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.05), 0 14px 46px rgba(0, 0, 0, 0.5),
+    0 0 22px var(--glow-cyan);
+}
+.card__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.8rem;
+  padding-bottom: 0.7rem;
+  margin-bottom: 0.95rem;
+  border-bottom: 1px solid var(--hairline);
+}
+/* Header action buttons — center them so an icon-btn lines up with a text btn. */
+.card__actions {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+.card__title {
+  font-size: 0.72rem;
+  color: var(--text-dim);
+}
+.card__title-link {
+  color: inherit;
+  text-decoration: none;
+  transition: color 150ms ease;
+}
+.card__title-link:hover {
+  color: var(--accent);
+}
+.card__body {
+  flex: 1;
+  min-width: 0;
+}
+.empty-state {
+  padding: 1.4rem 1rem;
+  text-align: center;
+  color: var(--text-faint);
+  font-size: 0.85rem;
+  border: 1px dashed var(--hairline);
+  border-radius: 10px;
+}
+
+/* --- Hero -------------------------------------------------------- */
+.hero {
+  position: relative;
+  overflow: hidden;
+  min-height: 180px;
+  padding: 1.5rem 1.7rem;
+  display: flex;
+  align-items: center;
+}
+.hero__bg {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  opacity: 0.7;
+  background-image: radial-gradient(720px 240px at 82% -50%, rgba(34, 211, 238, 0.1), transparent 70%),
+    linear-gradient(transparent 95%, rgba(120, 220, 235, 0.05) 95%),
+    linear-gradient(90deg, transparent 95%, rgba(120, 220, 235, 0.05) 95%);
+  background-size: 100% 100%, 30px 30px, 30px 30px;
+}
+.hero__inner {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  width: 100%;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1.2rem;
+  flex-wrap: wrap;
+}
+.hero__name {
+  font-family: var(--font-display);
+  font-weight: 700;
+  font-size: clamp(2rem, 4vw, 3.2rem);
+  line-height: 1;
+  color: var(--text-bright);
+  margin: 0.3rem 0 0.55rem;
+}
+/* Claude budget meters under the operator name (5-hour + weekly). */
+.hero__usage {
+  display: flex;
+  flex-direction: column;
+  gap: 0.32rem;
+  margin-top: 0.4rem;
+}
+.usage-meter {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.6rem;
+  color: var(--text-dim);
+}
+.usage-meter__label {
+  width: 2.6rem;
+  letter-spacing: 0.18em;
+  color: var(--text-faint);
+}
+.usage-meter__bar {
+  position: relative;
+  width: 88px;
+  height: 5px;
+  border-radius: 999px;
+  background: var(--hairline);
+  overflow: hidden;
+}
+.usage-meter__fill {
+  position: absolute;
+  inset: 0 auto 0 0;
+  border-radius: 999px;
+  transition: width 0.6s ease;
+}
+.usage-meter__fill--green {
+  background: var(--status-green);
+  box-shadow: 0 0 6px rgba(63, 178, 127, 0.5);
+}
+.usage-meter__fill--amber {
+  background: var(--status-amber);
+}
+.usage-meter__fill--red {
+  background: var(--status-red);
+}
+.usage-meter__pct {
+  width: 2.3rem;
+  color: var(--text-dim);
+}
+.usage-meter__reset {
+  color: var(--text-faint);
+}
+.hero__clock {
+  text-align: right;
+}
+.hero__time {
+  font-size: clamp(2.2rem, 5vw, 3.4rem);
+  font-weight: 500;
+  line-height: 1;
+  color: var(--text-bright);
+}
+.hero__date {
+  margin-top: 0.5rem;
+  font-size: 0.62rem;
+}
+
+/* Cross-project agent counter in the hero (replaces the global Dev Agents card). */
+.agents-ov {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  align-items: center;
+  min-width: 0;
+}
+.agents-ov__label {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.56rem;
+  color: var(--text-dim);
+}
+.agents-ov__total {
+  font-family: var(--font-mono);
+  font-size: 0.6rem;
+  font-weight: 600;
+  line-height: 1;
+  color: var(--accent-teal);
+}
+.agents-ov__dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+}
+.agents-ov__dot--ok {
+  background: var(--status-green);
+  box-shadow: 0 0 6px rgba(63, 178, 127, 0.6);
+}
+.agents-ov__dot--down {
+  background: var(--status-red);
+}
+.agents-ov__chip {
+  font-family: var(--font-mono);
+  font-size: 0.62rem;
+  color: var(--text-dim);
+  padding: 0.15rem 0.45rem;
+  border: 1px solid var(--hairline);
+  border-radius: 999px;
+  white-space: nowrap;
+}
+.agents-ov__n {
+  color: var(--accent-teal);
+}
+.agents-ov__queued {
+  color: var(--status-amber);
+}
+.agents-ov__chip--err {
+  color: var(--status-red);
+  border-color: var(--status-red);
+}
+/* A repo with an agent waiting on you — amber border + amber needs marker. */
+.agents-ov__chip--need {
+  border-color: var(--status-amber);
+}
+.agents-ov__need {
+  color: var(--status-amber);
+}
+.agents-ov__idle {
+  font-size: 0.62rem;
+  color: var(--text-faint);
+}
+/* Per-project lanes (left→right): the project's count chip fans out to its
+   individual agents, each fanning out to its sub-agents. A two-column grid so
+   the chips right-align and every lane's connector starts at the same x. */
+.agents-ov__lanes {
+  display: grid;
+  /* Body column may shrink below its content (minmax floor 0) so the node-task
+     label ellipsizes to the viewport instead of overflowing on narrow screens. */
+  grid-template-columns: max-content minmax(0, max-content);
+  align-items: center;
+  justify-content: center;
+  row-gap: 0.3rem;
+  max-width: 100%;
+}
+.agents-ov__lane-chip {
+  justify-self: end;
+}
+.agents-ov__lane-body {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+}
+.agents-ov__lane-svg,
+.agents-ov__fan-svg {
+  display: block;
+  overflow: visible;
+}
+/* The lane's agents, stacked; each row's height is set inline so the lane
+   connector's SVG edges hit the row centers exactly. */
+.agents-ov__nodes {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+.agents-ov__node {
+  display: flex;
+  align-items: center;
+  gap: 0.3rem;
+  min-width: 0;
+}
+.agents-ov__node-task {
+  font-family: var(--font-mono);
+  font-size: 0.58rem;
+  color: var(--text-dim);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  /* Desktop sanity cap; the mobile breakpoint tightens this to a vw share so a
+     long fallback label can't push the lane past the viewport. */
+  max-width: 13rem;
+}
+.agents-ov__edge {
+  fill: none;
+  stroke: var(--accent-teal);
+  stroke-width: 1;
+  opacity: 0.5;
+}
+/* An agent node on a lane — amber when that session is waiting on your input. */
+.agents-ov__anode {
+  fill: var(--accent-teal);
+  filter: drop-shadow(0 0 3px var(--glow-cyan));
+}
+.agents-ov__anode--need {
+  fill: var(--status-amber);
+  filter: none;
+}
+.agents-ov__cnode {
+  fill: var(--accent-teal);
+  filter: drop-shadow(0 0 3px var(--glow-cyan));
+}
+/* Finished sub-agent — node + edge dim to grey (no glow), kept in the fan. */
+.agents-ov__edge--done {
+  stroke: var(--text-faint);
+  opacity: 0.3;
+}
+.agents-ov__cnode--done {
+  fill: var(--text-faint);
+  filter: none;
+}
+/* Labeled delegation-fan rows — each sub-agent / background job beside its dot,
+   aligned to the connector. Colours echo the Dev Agents card pills: a running
+   sub-agent teal, a failed job red, finished items struck through and faded.
+   Titles ellipsize so the compact hero stays tidy; overflow is a muted row. */
+.agents-ov__fan-rows {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+.agents-ov__fan-row {
+  display: block;
+  font-family: var(--font-mono);
+  font-size: 0.52rem;
+  color: var(--text-dim);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 11rem;
+}
+.agents-ov__fan-row--active {
+  color: var(--accent-teal);
+}
+.agents-ov__fan-row--done {
+  text-decoration: line-through;
+  color: var(--text-faint);
+}
+.agents-ov__fan-row--failed {
+  color: var(--status-red);
+}
+.agents-ov__fan-row--more {
+  color: var(--text-faint);
+  font-style: italic;
+}
+/* Background-job fan rows — square nodes on dashed connectors from the agent,
+ * sharing the sub-agents' single labeled column. Green while running, grey
+ * once done, red on failure. */
+.agents-ov__edge--job {
+  stroke: var(--status-green);
+  stroke-dasharray: 3 2;
+}
+.agents-ov__edge--job.agents-ov__edge--done {
+  stroke: var(--text-faint);
+}
+.agents-ov__jnode {
+  fill: var(--status-green);
+  filter: drop-shadow(0 0 3px rgba(63, 178, 127, 0.5));
+}
+.agents-ov__jnode--done {
+  fill: var(--text-faint);
+  filter: none;
+}
+.agents-ov__jnode--failed {
+  fill: var(--status-red);
+  filter: none;
+}
+/* Spawned-agent fan rows — a full dev/knowledge agent the Atlas chat launched,
+   drawn as a lineage child (circle on a GOLD connector) beside its title, so it
+   reads as descending from that chat rather than floating in its own lane. The
+   gold EDGE marks descent from Atlas regardless of run state; the NODE + label
+   carry the agent's live STATUS — green while working, amber-orange when it
+   needs you — mirroring the constellation and the per-agent cards. */
+.agents-ov__edge--spawn {
+  stroke: #d2a64f;
+  opacity: 0.75;
+}
+.agents-ov__snode {
+  fill: var(--status-green);
+  filter: drop-shadow(0 0 3px rgba(63, 178, 127, 0.5));
+}
+.agents-ov__snode--need {
+  fill: var(--status-amber);
+  filter: none;
+}
+.agents-ov__fan-row--spawn {
+  color: var(--status-green);
+}
+.agents-ov__fan-row--spawn-need {
+  color: var(--status-amber);
+}
+/* Clickable agent nodes — dev agents and vault chats (not background research/
+   ingest/pass runs, sub-agents or jobs) click through to that agent's full-
+   screen split view, from the hero overview and the full-screen switcher strip
+   alike. The buttons keep the plain node/row look (their shared classes carry
+   font + colour); hover lights the affordance. */
+.agents-ov__node-btn,
+.agents-ov__fan-btn {
+  appearance: none;
+  background: none;
+  border: none;
+  margin: 0;
+  padding: 0;
+  text-align: left;
+  cursor: pointer;
+}
+.agents-ov__node-btn:hover {
+  color: var(--accent-teal);
+  text-decoration: underline;
+}
+/* Spawned-agent rows keep their status colour (green/amber) — underline only. */
+.agents-ov__fan-btn:hover {
+  text-decoration: underline;
+}
+/* The agent whose full screen you're IN (switcher strip) — marked bright. */
+.agents-ov__open--current {
+  color: var(--text-bright);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+/* The project (repo) a spawned agent belongs to — a tiny hairline tag ahead of
+   its title, carrying the grouping the standalone lane chip used to show. */
+.agents-ov__fan-tag {
+  font-family: var(--font-mono);
+  font-size: 0.46rem;
+  color: var(--text-faint);
+  border: 1px solid var(--hairline);
+  border-radius: 3px;
+  padding: 0 0.18rem;
+  margin-right: 0.26rem;
+  vertical-align: middle;
+}
+/* Atlas anchor: the Atlas-originated lanes (chats · passes · research) fan off a
+   single gold ◆ "Atlas" node on the left — a gold spine groups them so they read
+   as one source. The project lanes sit below, unchanged. */
+.agents-ov__tree {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  row-gap: 0.35rem;
+  min-width: 0;
+  max-width: 100%;
+}
+.agents-ov__atlas {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  min-width: 0;
+  max-width: 100%;
+}
+.agents-ov__atlas-node {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 1px;
+  flex: none;
+  color: #d2a64f;
+}
+.agents-ov__atlas-diamond {
+  font-size: 0.72rem;
+  line-height: 1;
+}
+.agents-ov__atlas-name {
+  font-family: var(--font-mono);
+  font-size: 0.5rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+.agents-ov__atlas-lanes {
+  display: grid;
+  grid-template-columns: max-content minmax(0, max-content);
+  align-items: center;
+  row-gap: 0.3rem;
+  border-left: 1.5px solid #d2a64f;
+  padding-left: 0.4rem;
+  min-width: 0;
+}
+/* With a live chat, the gold ◆ ATLAS pill is the source itself: it heads the
+   group (no spine of its own) and the remaining Atlas lanes hang off it on a
+   gold spine that drops from just under the pill. */
+.agents-ov__atlas-rooted {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  row-gap: 0.3rem;
+  min-width: 0;
+  max-width: 100%;
+}
+.agents-ov__atlas-head {
+  display: grid;
+  grid-template-columns: max-content minmax(0, max-content);
+  align-items: center;
+  min-width: 0;
+}
+.agents-ov__atlas-lanes--under {
+  margin-left: 0.55rem;
+}
+/* The Atlas chats lane reads as the Atlas source itself: a gold ◆ ATLAS pill
+   matching the anchor's diamond + gold. The amber "needs input" border still
+   wins when an Atlas chat is waiting on you. */
+.agents-ov__chip--atlas {
+  color: #d2a64f;
+}
+.agents-ov__chip--atlas:not(.agents-ov__chip--need) {
+  border-color: rgba(210, 166, 79, 0.5);
+}
+.agents-ov__chip-diamond {
+  color: #d2a64f;
+  font-size: 0.66rem;
+}
+/* Full-screen switcher strip — the same overview, agents only, pinned above
+   the full-screen head so you can hop straight from one agent's full screen to
+   another's. Lanes flow horizontally and wrap; past a few rows the strip
+   scrolls internally so a big fleet can't squeeze the transcript away. */
+.agent__switch {
+  flex: none;
+  border-bottom: 1px solid var(--hairline);
+  padding-bottom: 0.45rem;
+  max-height: 7.5rem;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+.agents-ov--switch {
+  flex-direction: row;
+  align-items: flex-start;
+  gap: 0.9rem;
+}
+.agents-ov--switch .agents-ov__tree {
+  flex-direction: row;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  column-gap: 1.2rem;
+  row-gap: 0.3rem;
+}
+.agents-ov--switch .agents-ov__lanes {
+  justify-content: start;
+}
+
+/* On phones the lane label is the micro tag already; cap the node-task to a
+   share of the viewport so even a long fallback (raw task) ellipsizes cleanly
+   rather than pushing the fan off-screen, and tighten the chip a touch. */
+@media (max-width: 640px) {
+  .agents-ov__node-task {
+    max-width: 42vw;
+  }
+  .agents-ov__fan-row {
+    max-width: 34vw;
+  }
+  .agents-ov__chip {
+    font-size: 0.58rem;
+    padding: 0.12rem 0.38rem;
+  }
+}
+/* Labeled sub-agent strip on a Dev Agents card row. Wraps, but a very active
+ * agent can spawn enough sub-agents to push the transcript/TUI off-screen, so
+ * the strip is capped to a few rows and scrolls internally past that. */
+.agent__subs {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.3rem;
+  padding: 0.2rem 0 0.1rem;
+  max-height: 4.5rem;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+.agent__subs-label {
+  font-size: 0.54rem;
+  color: var(--text-faint);
+}
+.agent__sub {
+  font-family: var(--font-mono);
+  font-size: 0.58rem;
+  color: var(--text-dim);
+  padding: 0.05rem 0.35rem;
+  border: 1px solid var(--hairline);
+  border-radius: 999px;
+  white-space: nowrap;
+}
+.agent__sub--active {
+  color: var(--accent-teal);
+  border-color: var(--accent-teal);
+}
+/* Finished sub-agent — kept in the list for the session, struck through. */
+.agent__sub--done {
+  text-decoration: line-through;
+  opacity: 0.5;
+}
+/* Same strip on a research-queue row — wrap to its own full-width line,
+ * indented past the status dot like the warning block. */
+.capture-job__subs {
+  flex-basis: 100%;
+  margin-left: 1.05rem;
+}
+/* Background-job strip — sibling of the sub-agent strip, but these are
+ * detached processes, not delegated agents: squared chips with a dashed
+ * border (vs the subs' solid pills) and a status dot speaking the card's dot
+ * language — pulsing green while running, struck through grey once finished
+ * (like a finished sub-agent), red and unstruck on a non-zero exit so a
+ * failure keeps demanding attention. */
+.agent__jobs {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.3rem;
+  padding: 0.2rem 0 0.1rem;
+  max-height: 4.5rem;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+.agent__jobs-label {
+  font-size: 0.54rem;
+  color: var(--text-faint);
+}
+.agent__job {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.28rem;
+  font-family: var(--font-mono);
+  font-size: 0.58rem;
+  color: var(--text-dim);
+  padding: 0.05rem 0.35rem;
+  border: 1px dashed var(--hairline);
+  border-radius: 4px;
+  white-space: nowrap;
+}
+.agent__job-dot {
+  flex: none;
+  width: 0.32rem;
+  height: 0.32rem;
+  border-radius: 50%;
+  background: var(--text-faint);
+}
+.agent__job--running {
+  border-color: var(--status-green);
+}
+.agent__job--running .agent__job-dot {
+  background: var(--status-green);
+  animation: agent-dot-pulse 1.6s ease-in-out infinite;
+}
+.agent__job--done {
+  text-decoration: line-through;
+  opacity: 0.5;
+}
+.agent__job--done .agent__job-dot {
+  background: var(--accent-teal);
+}
+.agent__job--failed {
+  border-color: var(--status-red);
+}
+.agent__job--failed .agent__job-dot {
+  background: var(--status-red);
+}
+/* Live-stats strip — mini tiles the agent publishes itself while it works:
+ * counters with a shrunk cumulative-contributions sparkline (the scorecard's
+ * .spark__line/.spark__dot styling on a chip-sized svg) and [done,total]
+ * completion bars (the context meter's fill bar, slightly wider). Like the
+ * sub-agent/job strips it wraps, and an agent publishing the full six tiles can
+ * wrap to enough rows to push the transcript/TUI off-screen on a phone — so it
+ * gets the same row cap with internal scroll past it. */
+.agent__stats {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 0.3rem 0.9rem;
+  padding: 0.25rem 0 0.15rem;
+  max-height: 5.5rem;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+.agent__stat {
+  display: inline-flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  min-width: 3.4rem;
+}
+.agent__stat-value {
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  line-height: 1;
+  color: var(--text-bright);
+}
+/* Trend arrow on a grouped scorecard stat chip — scaled down from the big
+ * .stat tile's arrow to sit beside the compact mono value. */
+.agent__stat-value .stat__trend {
+  margin-left: 0.15rem;
+  font-size: 0.62rem;
+}
+.agent__stat-max {
+  color: var(--text-dim);
+}
+.agent__stat-label {
+  font-size: 0.54rem;
+  color: var(--text-faint);
+  white-space: nowrap;
+}
+.agent__stat-spark {
+  width: 4.2rem;
+  height: 1rem;
+  display: block;
+  overflow: visible;
+}
+.agent__stat-bar {
+  width: 4.2rem;
+  height: 4px;
+  border-radius: 2px;
+  background: var(--surface-2);
+  overflow: hidden;
+}
+.agent__stat-fill {
+  display: block;
+  height: 100%;
+  border-radius: 2px;
+  background: var(--accent-teal);
+  transition: width 0.4s ease;
+}
+
+/* --- Scorecard --------------------------------------------------- */
+.stat__trend {
+  font-size: 0.85rem;
+}
+.stat__trend--up {
+  color: var(--status-green);
+}
+.stat__trend--down {
+  color: var(--status-red);
+}
+.stat__trend--flat {
+  color: var(--text-faint);
+}
+.spark__line {
+  fill: none;
+  stroke: var(--accent, rgba(34, 211, 238, 0.85));
+  stroke-width: 1.5;
+  stroke-linejoin: round;
+  stroke-linecap: round;
+  vector-effect: non-scaling-stroke;
+  filter: drop-shadow(0 0 4px var(--glow-cyan));
+}
+.spark__dot {
+  fill: var(--text-bright);
+  filter: drop-shadow(0 0 5px var(--glow-cyan));
+}
+/* Live-agent plot frames — the plots each running dev/knowledge agent is
+ * publishing, mirrored onto the scorecard. One bordered frame per agent, its
+ * header naming the project (repo) + agent so a plot traces back to its source;
+ * the tiles inside reuse the agent card's .agent__stats strip. */
+/* All group frames (static stat groups + live-agent plots) share one grid so
+ * they sit beside each other at EQUAL width (1fr tracks). auto-fill (not
+ * auto-fit) keeps the empty tracks, so a lone group stays one track wide instead
+ * of stretching across the whole card; extra groups wrap to the next row.
+ * `min(26rem, 100%)` caps the track minimum to the card width on a phone (where
+ * the card is narrower than 26rem) — without it the 26rem floor forces the lone
+ * column wider than the card and the frame spills off-screen instead of wrapping
+ * to a single full-width column. */
+.stat-frames {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(26rem, 100%), 1fr));
+  align-items: start;
+  gap: 0.9rem;
+  margin-top: 0.9rem;
+}
+/* First .stat-frames block leads the card, so it doesn't need the top gap. */
+.stat-frames:first-child {
+  margin-top: 0;
+}
+.stat-frame {
+  padding: 0.65rem 0.85rem 0.55rem;
+  border: 1px solid var(--hairline);
+  border-radius: 10px;
+  background: var(--surface);
+}
+.stat-frame__head {
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+  margin-bottom: 0.4rem;
+}
+.stat-frame__repo {
+  flex: none;
+  font-size: 0.54rem;
+  color: var(--accent-teal);
+}
+.stat-frame__name {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: 0.7rem;
+  color: var(--text-dim);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* "Agent work" group — a peer group frame (.stat-frame) holding per-day
+   working-time bars + estimate-accuracy-over-time graph, plus a compact per
+   kind·model·effort table (run-count · median · est). The two charts sit side by
+   side and fill the frame. */
+.agent-work__charts {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 0.9rem;
+  margin-top: 0.5rem;
+}
+.agent-work__chart {
+  border: 1px solid var(--hairline);
+  border-radius: 10px;
+  background: var(--surface);
+  padding: 0.5rem 0.6rem 0.4rem;
+}
+.agent-work__chart-title {
+  font-size: 0.54rem;
+  color: var(--text-faint);
+  margin-bottom: 0.35rem;
+}
+/* Per-day working-time bars — HTML (not SVG) so each bar can carry a crisp,
+   undistorted duration label. Columns share the row width; the label floats
+   just above each bar (absolute, so it never shifts the layout). */
+.agent-work__bars {
+  position: relative;
+  display: flex;
+  align-items: flex-end;
+  gap: 4px;
+  height: 56px;
+  margin-top: 14px; /* headroom for the label above a full-height bar */
+}
+.agent-work__col {
+  position: relative;
+  flex: 1 1 0;
+  min-width: 0;
+  height: 100%;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+}
+.agent-work__col-bar {
+  width: 70%;
+  min-height: 1px;
+  background: var(--accent-teal);
+  opacity: 0.55;
+  border-radius: 2px 2px 0 0;
+  transition: height 0.6s ease;
+}
+.agent-work__col-bar--today {
+  background: var(--status-green);
+  opacity: 1;
+}
+.agent-work__col-val {
+  position: absolute;
+  left: 50%;
+  transform: translateX(-50%);
+  font-size: 0.5rem;
+  line-height: 1;
+  color: var(--text-faint);
+  white-space: nowrap;
+}
+.agent-work__acc {
+  display: block;
+  flex: 1;
+  height: 56px;
+}
+.agent-work__acc-mid {
+  stroke: var(--text-faint);
+  stroke-width: 0.5;
+  stroke-dasharray: 3 3;
+  opacity: 0.7;
+}
+.agent-work__acc-line {
+  fill: none;
+  stroke: var(--text-faint);
+  stroke-width: 0.6;
+  opacity: 0.5;
+}
+.agent-work__acc-dot--over {
+  fill: var(--status-amber);
+}
+.agent-work__acc-dot--under {
+  fill: var(--accent-teal);
+}
+/* Vertical axis for the accuracy chart: longer (top) · 1× (middle) · shorter
+   (bottom), matched to the svg height so the labels line up with the dots. */
+.agent-work__acc-row {
+  display: flex;
+  align-items: stretch;
+  gap: 0.4rem;
+}
+.agent-work__acc-yaxis {
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  height: 56px;
+  font-size: 0.5rem;
+  color: var(--text-faint);
+  text-align: right;
+}
+.agent-work__acc-axis-mid {
+  color: var(--text-dim);
+}
+
+/* --- Calendar ---------------------------------------------------- */
+.day-rail {
+  display: flex;
+  gap: 0.4rem;
+  overflow-x: auto;
+  padding-bottom: 0.5rem;
+  margin-bottom: 0.95rem;
+}
+.day-pill {
+  position: relative;
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.15rem;
+  min-width: 46px;
+  padding: 0.5rem 0.35rem;
+  border: 1px solid var(--hairline);
+  border-radius: 9px;
+  background: var(--surface);
+  color: var(--text-dim);
+  cursor: pointer;
+  transition: color 150ms ease, border-color 150ms ease, background 150ms ease;
+}
+.day-pill:hover {
+  color: var(--text);
+  border-color: var(--hairline-strong);
+}
+.day-pill--active {
+  color: var(--text-bright);
+  border-color: var(--hairline-strong);
+  background: var(--surface-2);
+  box-shadow: 0 0 12px var(--glow-cyan);
+}
+.day-pill__dow {
+  font-size: 0.5rem;
+}
+.day-pill__num {
+  font-size: 1.05rem;
+}
+.day-pill__dot {
+  position: absolute;
+  bottom: 3px;
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 6px var(--glow-cyan-strong);
+}
+.agenda {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+}
+.agenda__row {
+  display: flex;
+  align-items: baseline;
+  gap: 0.8rem;
+  padding-bottom: 0.6rem;
+  border-bottom: 1px solid var(--hairline);
+}
+.agenda__time {
+  flex: 0 0 auto;
+  min-width: 64px;
+  font-size: 0.68rem;
+  color: var(--accent);
+}
+.agenda__body {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+}
+.agenda__title {
+  color: var(--text-bright);
+  font-size: 0.9rem;
+}
+.agenda__loc {
+  font-size: 0.7rem;
+  color: var(--text-dim);
+}
+.agenda__cal {
+  font-size: 0.5rem;
+  color: var(--text-faint);
+}
+.briefs {
+  margin-top: 1rem;
+  padding-top: 0.85rem;
+  border-top: 1px solid var(--hairline);
+}
+.briefs__head {
+  font-size: 0.56rem;
+  margin-bottom: 0.5rem;
+}
+.briefs__item {
+  margin-bottom: 0.4rem;
+}
+.briefs__toggle {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0;
+  background: none;
+  border: 0;
+  color: var(--text);
+  font-family: var(--font-body);
+  font-size: 0.85rem;
+  cursor: pointer;
+}
+.briefs__caret {
+  color: var(--accent);
+}
+.briefs__content {
+  margin: 0.5rem 0 0.8rem;
+  padding-left: 0.8rem;
+  border-left: 1px solid var(--hairline);
+}
+
+/* --- Engagements ------------------------------------------------- */
+.eng-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.eng {
+  border-bottom: 1px solid var(--hairline);
+}
+.eng__row {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 0.7rem;
+  padding: 0.6rem 0;
+  background: none;
+  border: 0;
+  color: var(--text);
+  font-family: var(--font-body);
+  text-align: left;
+  cursor: pointer;
+}
+.eng__health {
+  flex: 0 0 auto;
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+}
+.eng__health--green {
+  background: var(--status-green);
+  box-shadow: 0 0 7px rgba(63, 178, 127, 0.6);
+}
+.eng__health--amber {
+  background: var(--status-amber);
+  box-shadow: 0 0 7px rgba(210, 166, 79, 0.6);
+}
+.eng__health--red {
+  background: var(--status-red);
+  box-shadow: 0 0 7px rgba(213, 107, 96, 0.6);
+}
+.eng__name {
+  flex: 1;
+  color: var(--text-bright);
+  font-size: 0.92rem;
+}
+.eng__blocked {
+  font-size: 0.5rem;
+  color: var(--status-red);
+  border: 1px solid rgba(213, 107, 96, 0.5);
+  padding: 0.1rem 0.35rem;
+  border-radius: 4px;
+}
+.eng__stage {
+  font-size: 0.55rem;
+  color: var(--text-dim);
+}
+.eng__caret {
+  color: var(--accent);
+  font-size: 0.7rem;
+}
+.eng__detail {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  padding: 0 0 0.85rem 1.65rem;
+}
+.eng__kv {
+  display: flex;
+  gap: 0.8rem;
+  font-size: 0.82rem;
+}
+.eng__kv > span:first-child {
+  min-width: 96px;
+}
+.eng__blocker-text {
+  color: var(--status-red);
+}
+
+/* --- Heatmap ----------------------------------------------------- */
+.heatmap-wrap {
+  overflow-x: auto;
+  padding-bottom: 0.5rem;
+}
+.heatmap {
+  display: flex;
+  gap: 3px;
+  min-width: max-content;
+}
+.heat-col {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.heat-cell {
+  display: block;
+  width: 12px;
+  height: 12px;
+  border-radius: 2px;
+  background: rgba(90, 160, 180, 0.08);
+}
+.heat-cell--0 {
+  background: rgba(90, 160, 180, 0.08);
+}
+.heat-cell--1 {
+  background: rgba(34, 211, 238, 0.22);
+}
+.heat-cell--2 {
+  background: rgba(34, 211, 238, 0.42);
+}
+.heat-cell--3 {
+  background: rgba(34, 211, 238, 0.62);
+}
+.heat-cell--4 {
+  background: rgba(34, 211, 238, 0.85);
+  box-shadow: 0 0 6px var(--glow-cyan);
+}
+.heat-cell--future {
+  background: transparent;
+}
+.heat-legend {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-top: 0.7rem;
+}
+.heat-legend__scale {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.heat-legend__scale .heat-cell {
+  display: inline-block;
+}
+.heat-tip {
+  position: fixed;
+  z-index: 60;
+  transform: translate(-50%, calc(-100% - 12px));
+  padding: 0.3rem 0.55rem;
+  border-radius: 7px;
+  background: var(--bg-750);
+  border: 1px solid var(--hairline-strong);
+  box-shadow: 0 6px 22px rgba(0, 0, 0, 0.5), 0 0 12px var(--glow-cyan);
+  color: var(--text-bright);
+  font-size: 0.68rem;
+  white-space: nowrap;
+  pointer-events: none;
+}
+
+/* --- Action Queue ----------------------------------------------- */
+.queue {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+}
+.queue__row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding-bottom: 0.6rem;
+  border-bottom: 1px solid var(--hairline);
+}
+.queue__text {
+  flex: 1;
+  color: var(--text);
+  font-size: 0.9rem;
+}
+.queue__actions {
+  flex: 0 0 auto;
+  display: flex;
+  gap: 0.5rem;
+}
+.btn {
+  font-family: var(--font-display);
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  font-size: 0.58rem;
+  padding: 0.4rem 0.7rem;
+  border-radius: 7px;
+  border: 1px solid var(--hairline);
+  background: var(--surface);
+  color: var(--text-dim);
+  cursor: pointer;
+  transition: color 150ms ease, border-color 150ms ease;
+}
+.btn:hover:not(:disabled) {
+  color: var(--text-bright);
+  border-color: var(--hairline-strong);
+}
+.btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+.btn--approve {
+  color: var(--accent-teal);
+  border-color: rgba(45, 212, 191, 0.35);
+}
+.btn--dismiss:hover:not(:disabled) {
+  color: var(--status-red);
+  border-color: rgba(213, 107, 96, 0.4);
+}
+
+/* --- Capture card ----------------------------------------------- */
+.capture {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+}
+/* Link/Text segmented toggle on the recipes capture card (reuses .wiki-cat chips). */
+.capture__modes {
+  display: flex;
+  gap: 0.4rem;
+}
+.capture__input {
+  width: 100%;
+  background: var(--surface-2);
+  border: 1px solid var(--hairline);
+  border-radius: 8px;
+  padding: 0.6rem 0.8rem;
+  color: var(--text-bright);
+  font-family: var(--font-body);
+  font-size: 0.9rem;
+  outline: 0;
+  transition: border-color 160ms ease, box-shadow 160ms ease;
+}
+.capture__input:focus {
+  border-color: var(--hairline-strong);
+  box-shadow: 0 0 16px var(--glow-cyan);
+}
+.capture__input::placeholder {
+  color: var(--text-faint);
+}
+.capture__row {
+  display: flex;
+  gap: 0.6rem;
+}
+.capture__row .capture__input {
+  flex: 1;
+}
+.capture__input--sm {
+  font-size: 0.82rem;
+}
+.capture__textarea {
+  resize: vertical;
+  min-height: 5.5rem;
+  line-height: 1.5;
+}
+.capture__file {
+  display: block;
+  cursor: pointer;
+}
+.capture__file input[type='file'] {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  pointer-events: none;
+}
+.capture__file-label {
+  display: block;
+  width: 100%;
+  background: var(--surface-2);
+  border: 1px dashed var(--hairline-strong);
+  border-radius: 8px;
+  padding: 0.9rem 0.8rem;
+  color: var(--text-faint);
+  font-family: var(--font-body);
+  font-size: 0.85rem;
+  text-align: center;
+  transition: border-color 160ms ease, color 160ms ease;
+}
+.capture__file:hover .capture__file-label {
+  border-color: var(--accent-cyan, var(--hairline-strong));
+  color: var(--text-bright);
+}
+/* Dictation mic overlaid in a text field's corner (components/MicField.tsx). The
+   wrapped <input>/<textarea> keeps its own box; the mic floats at the right so it
+   never disturbs layout, and the field reserves right padding so text clears it. */
+.micfield {
+  position: relative;
+  width: 100%;
+}
+.micfield > input,
+.micfield > textarea {
+  width: 100%;
+  padding-right: 2.5rem; /* clear the overlaid mic */
+}
+.mic-btn {
+  position: absolute;
+  top: 0.4rem;
+  right: 0.4rem;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.7rem;
+  height: 1.7rem;
+  padding: 0;
+  background: transparent;
+  border: 1px solid var(--hairline);
+  border-radius: 6px;
+  color: var(--text-dim);
+  font-family: inherit;
+  font-size: 0.95rem;
+  line-height: 1;
+  cursor: pointer;
+  user-select: none;
+  transition: border-color 160ms ease, color 160ms ease;
+}
+.mic-btn:hover {
+  border-color: var(--hairline-strong);
+  color: var(--text-bright);
+}
+.mic-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+/* Recording: turn red so it's obvious the mic is live. */
+.mic-btn--rec {
+  border-color: var(--status-red);
+  color: var(--status-red);
+}
+/* Single-line inputs: centre the mic vertically. Textareas keep it at the top corner. */
+.micfield:not(.micfield--multiline) .mic-btn {
+  top: 50%;
+  transform: translateY(-50%);
+}
+/* Inside flex rows the wrapper replaces the input as the growing child. */
+.agents__spawn .micfield,
+.capture__row .micfield,
+.gmail-compose__row .micfield,
+.news-item__ingest .micfield,
+.kanban__new .micfield {
+  flex: 1;
+  min-width: 0;
+}
+.capture__foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.8rem;
+}
+.capture__status {
+  flex: 1;
+  min-width: 0;
+  font-size: 0.8rem;
+  color: var(--text-dim);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.capture__ok {
+  color: var(--accent-teal);
+}
+.capture__err {
+  color: var(--status-red);
+}
+@media (max-width: 640px) {
+  .capture__row {
+    flex-direction: column;
+  }
+}
+
+/* Live capture queue */
+.capture__queue {
+  margin-top: 0.9rem;
+  padding-top: 0.7rem;
+  border-top: 1px solid var(--hairline);
+}
+.capture__queue-head {
+  margin-bottom: 0.5rem;
+}
+.capture__jobs {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+.capture-job {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.55rem;
+  font-size: 0.82rem;
+  color: var(--text-dim);
+}
+.capture-job__dot {
+  flex: 0 0 auto;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--text-faint);
+}
+.capture-job--queued .capture-job__dot {
+  background: var(--text-faint);
+}
+.capture-job--processing .capture-job__dot {
+  background: var(--accent);
+  box-shadow: 0 0 8px var(--glow-cyan-strong);
+  animation: capture-pulse 1.2s ease-in-out infinite;
+}
+.capture-job--done .capture-job__dot {
+  background: var(--accent-teal);
+}
+.capture-job--failed .capture-job__dot {
+  background: var(--status-red);
+}
+.capture-job__title {
+  flex: 1;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--text-bright);
+}
+button.capture-job__title--link {
+  background: none;
+  border: 0;
+  padding: 0;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.capture-job__title--link:hover {
+  color: var(--accent);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.capture-job__state {
+  flex: 0 0 auto;
+}
+.capture-job--processing .capture-job__state {
+  color: var(--accent);
+}
+.capture-job--failed .capture-job__state {
+  color: var(--status-red);
+}
+/* Status becomes a button when there's a reason to reveal. */
+.capture-job__state--btn {
+  background: none;
+  border: 0;
+  padding: 0;
+  font: inherit;
+  cursor: pointer;
+}
+.capture-job--done .capture-job__state--btn {
+  color: var(--status-amber);
+}
+.capture-job__state--btn:hover {
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+/* Refresh-circle retry, shown only on failed runs — re-runs from stored inputs. */
+.capture-job__retry {
+  flex: 0 0 auto;
+  background: none;
+  border: 0;
+  padding: 0;
+  font-size: 0.95rem;
+  line-height: 1;
+  cursor: pointer;
+  color: var(--text-faint);
+  transition: color 0.15s ease;
+}
+.capture-job__retry:hover {
+  color: var(--accent);
+}
+/* Dismiss link inside a revealed warning — clears a stale reason on a done job. */
+.capture-job__dismiss {
+  background: none;
+  border: 0;
+  padding: 0;
+  margin-left: 0.5rem;
+  font-size: 0.68rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  cursor: pointer;
+  color: var(--text-faint);
+  transition: color 0.15s ease;
+}
+.capture-job__dismiss:hover {
+  color: var(--accent);
+}
+/* The revealed reason, wrapped onto its own line below the row. */
+.capture-job__warning {
+  flex-basis: 100%;
+  margin: 0.1rem 0 0.15rem 1.05rem;
+  font-size: 0.72rem;
+  line-height: 1.4;
+  color: var(--text-dim);
+  white-space: normal;
+  word-break: break-word;
+}
+@keyframes capture-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
+}
+
+/* Amend receipt — click a done request to see what the agent did */
+.amend-receipt {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1rem;
+  background: rgba(0, 0, 0, 0.55);
+  backdrop-filter: blur(2px);
+}
+.amend-receipt__panel {
+  width: min(560px, 100%);
+  max-height: 82vh;
+  overflow-y: auto;
+  border-radius: 14px;
+  padding: 1.1rem 1.2rem 1.3rem;
+}
+.amend-receipt__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 0.3rem;
+}
+.amend-receipt__close {
+  background: none;
+  border: 0;
+  color: var(--text-dim);
+  font-size: 0.95rem;
+  cursor: pointer;
+  line-height: 1;
+}
+.amend-receipt__close:hover {
+  color: var(--text-bright);
+}
+.amend-receipt__section {
+  margin-top: 0.95rem;
+}
+.amend-receipt__label {
+  margin-bottom: 0.3rem;
+}
+.amend-receipt__target {
+  color: var(--text-bright);
+  font-weight: 600;
+}
+.amend-receipt__snippet {
+  margin-top: 0.45rem;
+  max-height: 9rem;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  background: var(--surface-2);
+  border: 1px solid var(--hairline);
+  border-radius: 8px;
+  padding: 0.55rem 0.7rem;
+  font-size: 0.8rem;
+  line-height: 1.5;
+  color: var(--text-dim);
+}
+.amend-receipt__message {
+  margin: 0;
+  color: var(--text-bright);
+  line-height: 1.55;
+}
+.amend-receipt__message--muted {
+  color: var(--text-dim);
+}
+.amend-receipt__pages {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+.amend-receipt__page {
+  background: none;
+  border: 0;
+  padding: 0;
+  font: inherit;
+  text-align: left;
+  color: var(--accent);
+  cursor: pointer;
+}
+.amend-receipt__page:hover {
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+/* --- News & Signals (Hacker News feed) -------------------------- */
+.news-sort {
+  display: flex;
+  gap: 0.4rem;
+}
+.news-sort__btn {
+  font-family: var(--font-display);
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  font-size: 0.56rem;
+  padding: 0.28rem 0.6rem;
+  border-radius: 999px;
+  border: 1px solid var(--hairline);
+  background: none;
+  color: var(--text-dim);
+  cursor: pointer;
+}
+.news-sort__btn:hover {
+  color: var(--text-bright);
+  border-color: var(--hairline-strong);
+}
+.news-sort__btn--active {
+  color: var(--accent);
+  border-color: var(--hairline-strong);
+  background: var(--surface);
+}
+.news-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  counter-reset: news;
+  display: flex;
+  flex-direction: column;
+}
+.news-item {
+  padding: 0.5rem 0;
+  border-bottom: 1px solid var(--hairline);
+}
+.news-item:last-child {
+  border-bottom: 0;
+}
+.news-item__row {
+  display: flex;
+  align-items: baseline;
+  gap: 0.7rem;
+}
+.news-item__points {
+  flex: 0 0 2.6rem;
+  text-align: right;
+  font-size: 0.82rem;
+  color: var(--accent-teal);
+}
+.news-item__date {
+  flex: 0 0 2.6rem;
+  text-align: right;
+  font-size: 0.7rem;
+  color: var(--text-faint);
+  white-space: nowrap;
+}
+.news-item__time {
+  display: block;
+  font-size: 0.62rem;
+  opacity: 0.7;
+}
+.news-item__title {
+  flex: 1;
+  min-width: 0;
+  color: var(--text-bright);
+  text-decoration: none;
+  font-size: 0.92rem;
+  line-height: 1.35;
+}
+.news-item__title:hover {
+  text-decoration: underline;
+}
+.news-item__meta {
+  flex: 0 0 auto;
+  font-size: 0.58rem;
+  color: var(--text-faint);
+  text-decoration: none;
+  white-space: nowrap;
+}
+.news-item__meta:hover {
+  color: var(--text-dim);
+}
+/* Row action cluster (Gmail Reply/Delete · delete-confirm). Grouped so the
+   buttons keep the same spot on every row regardless of which sender/account
+   chips precede them. On desktop the title's flex:1 already packs them at the
+   right edge (no auto-margin here — that would steal the title's grow space);
+   on mobile the row wraps and a margin-left:auto right-aligns the group on its
+   own line (see the ≤640px block). */
+.news-item__actions {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+}
+/* Inline reply/draft form, expanded directly under the email row it answers. */
+.gmail-reply {
+  margin-top: 0.6rem;
+  padding-top: 0.7rem;
+  border-top: 1px dashed var(--hairline);
+}
+.gmail-item__snippet {
+  margin: 0.2rem 0 0 3.3rem;
+  font-size: 0.78rem;
+  line-height: 1.4;
+  color: var(--text-faint);
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.gmail-compose__row {
+  display: flex;
+  gap: 0.5rem;
+}
+.gmail-compose__account {
+  flex: 0 0 8rem;
+}
+.gmail-saved {
+  display: flex;
+  align-items: baseline;
+  gap: 0.7rem;
+  margin-bottom: 0.6rem;
+}
+.gmail-search {
+  display: flex;
+  gap: 0.5rem;
+  margin-bottom: 0.6rem;
+}
+.gmail-search__input {
+  flex: 1;
+  min-width: 0;
+}
+.gmail-pager {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.9rem;
+  padding-top: 0.7rem;
+  margin-top: 0.4rem;
+  border-top: 1px solid var(--hairline);
+}
+/* Icon-only action button (e.g. card refresh) — sits in card__actions. */
+.icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0.25rem;
+  font-size: 0.95rem;
+  border: 0;
+  background: transparent;
+  color: var(--text-faint);
+  cursor: pointer;
+  border-radius: 6px;
+  transition: color 150ms ease;
+}
+.icon-btn:hover:not(:disabled) {
+  color: var(--text-bright);
+}
+.icon-btn:disabled {
+  cursor: default;
+}
+.icon-spin {
+  animation: icon-spin 0.8s linear infinite;
+}
+@keyframes icon-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+.news-item__done {
+  flex: 0 0 auto;
+  font-size: 0.58rem;
+  color: var(--accent-teal);
+  white-space: nowrap;
+}
+.news-item__ingest {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  margin: 0.55rem 0 0.2rem 3.3rem;
+}
+.news-item__ingest .capture__input {
+  flex: 1;
+}
+@media (max-width: 640px) {
+  .news-item__ingest {
+    margin-left: 0;
+    flex-wrap: wrap;
+  }
+}
+
+/* --- Skill tiles ------------------------------------------------- */
+.skill-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(130px, 1fr));
+  gap: 0.8rem;
+}
+.skill-tile {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.5rem;
+  padding: 1rem;
+  border: 1px solid var(--hairline);
+  border-radius: 10px;
+  background: var(--surface);
+  color: var(--text);
+  cursor: pointer;
+  transition: border-color 150ms ease, transform 150ms ease;
+}
+.skill-tile:hover:not(:disabled) {
+  border-color: var(--hairline-strong);
+  transform: translateY(-2px);
+}
+.skill-tile:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+.skill-tile__icon {
+  color: var(--accent);
+}
+.skill-tile__label {
+  font-size: 0.85rem;
+  color: var(--text-bright);
+}
+.skill-tile__type {
+  font-size: 0.5rem;
+  color: var(--text-faint);
+}
+
+/* --- Knowledge / Wiki ------------------------------------------- */
+.wiki {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 1.5rem;
+}
+@media (min-width: 900px) {
+  .wiki {
+    grid-template-columns: 1.3fr 1fr;
+  }
+}
+.wiki__col {
+  min-width: 0;
+}
+.wiki__subhead {
+  font-size: 0.56rem;
+  margin-bottom: 0.7rem;
+}
+.wiki-group {
+  margin-bottom: 1rem;
+}
+.wiki-group__head {
+  font-size: 0.58rem;
+  color: var(--accent-teal);
+  margin-bottom: 0.4rem;
+}
+.wiki-group__list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+}
+.wiki-entry {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+  padding: 0.35rem 0.5rem;
+  background: none;
+  border: 0;
+  border-radius: 7px;
+  text-align: left;
+  cursor: pointer;
+  transition: background 140ms ease;
+}
+.wiki-entry:hover {
+  background: var(--surface-2);
+}
+.wiki-entry__name {
+  color: var(--text-bright);
+  font-size: 0.88rem;
+}
+.wiki-entry__summary {
+  color: var(--text-dim);
+  font-size: 0.72rem;
+}
+.wiki-log {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+}
+/* Bounded, scrollable variant (Atlas tab): keep the card compact even as the
+   log grows. Sized to comfortably show the most-recent handful of entries. */
+.wiki-log--scroll {
+  max-height: 15rem;
+  overflow-y: auto;
+  padding-right: 0.35rem;
+}
+.wiki-log__row {
+  padding-bottom: 0.55rem;
+  border-bottom: 1px solid var(--hairline);
+}
+.wiki-log__meta {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  margin-bottom: 0.2rem;
+}
+.wiki-log__date {
+  font-size: 0.62rem;
+  color: var(--text-dim);
+}
+.wiki-log__op {
+  font-family: var(--font-display);
+  text-transform: uppercase;
+  font-size: 0.5rem;
+  letter-spacing: 0.1em;
+  padding: 0.08rem 0.35rem;
+  border-radius: 4px;
+  border: 1px solid var(--hairline);
+  color: var(--text-dim);
+}
+.wiki-log__op--ingest {
+  color: var(--accent);
+  border-color: var(--hairline-strong);
+}
+.wiki-log__op--init {
+  color: var(--accent-teal);
+}
+.wiki-log__title {
+  color: var(--text);
+  font-size: 0.85rem;
+}
+.wiki__back {
+  background: none;
+  border: 1px solid var(--hairline);
+  color: var(--text-dim);
+  font-family: var(--font-display);
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  font-size: 0.56rem;
+  padding: 0.3rem 0.6rem;
+  border-radius: 6px;
+  cursor: pointer;
+}
+.wiki__back:hover {
+  color: var(--text-bright);
+  border-color: var(--hairline-strong);
+}
+.wiki-page {
+  max-height: 62vh;
+  overflow-y: auto;
+  padding-right: 0.5rem;
+}
+.note-status {
+  padding: 1rem;
+  font-size: 0.7rem;
+  color: var(--text-faint);
+}
+
+/* --- Knowledge graph -------------------------------------------- */
+.wiki-graph__svg {
+  width: 100%;
+  height: min(64vh, 640px);
+  display: block;
+  touch-action: none;
+  cursor: grab;
+}
+.wiki-graph__edge {
+  stroke: var(--hairline);
+  stroke-width: 1;
+}
+.wiki-graph__edge.is-lit {
+  stroke: var(--hairline-strong);
+  stroke-width: 1.6;
+}
+.wiki-graph__edge.is-dim {
+  stroke-opacity: 0.12;
+}
+/* Out of the active lens — ghost it so the structure stays for context. */
+.wiki-graph__edge--off {
+  stroke-opacity: 0.05;
+}
+.wiki-graph__node {
+  cursor: pointer;
+  transition: opacity 140ms ease;
+}
+.wiki-graph__node.is-dim {
+  opacity: 0.22;
+}
+.wiki-graph__circle {
+  stroke: rgba(5, 12, 16, 0.6);
+  stroke-width: 1;
+}
+.wiki-graph__node:hover .wiki-graph__circle {
+  stroke: var(--text-bright);
+  stroke-width: 1.5;
+}
+.wiki-graph__node.is-selected .wiki-graph__circle {
+  stroke: var(--text-bright);
+  stroke-width: 2.5;
+}
+.wiki-graph__node.is-selected .wiki-graph__label,
+.wiki-graph__node.is-active .wiki-graph__label {
+  fill: var(--text-bright);
+}
+.wiki-graph__node.is-active .wiki-graph__circle {
+  stroke: var(--text-bright);
+  stroke-width: 2;
+}
+.wiki-graph__label {
+  fill: var(--text);
+  font-family: var(--font-body);
+  font-size: 11.5px;
+  font-weight: 500;
+  letter-spacing: 0.01em;
+  pointer-events: none;
+  paint-order: stroke;
+  stroke: var(--graph-label-halo);
+  stroke-width: 3px;
+  stroke-linejoin: round;
+}
+.wiki-graph__node:hover .wiki-graph__label {
+  fill: var(--text-bright);
+}
+.wiki-graph__legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.7rem;
+}
+.wiki-graph__lk {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  font-size: 0.56rem;
+  color: var(--text-dim);
+}
+.wiki-graph__dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+}
+/* Task lifecycle on graph nodes: done recedes; an overdue task gets an amber ring. */
+.wiki-graph__node--done {
+  opacity: 0.4;
+}
+.wiki-graph__node--off {
+  opacity: 0.12;
+}
+.wiki-graph__overdue {
+  fill: none;
+  stroke: var(--status-amber);
+  stroke-width: 2;
+  pointer-events: none;
+}
+/* Typed-edge control bar: lens switcher (reuses .wiki-cat chips) + edge legend. */
+.wiki-graph__bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem 0.9rem;
+  margin-bottom: 0.7rem;
+}
+.wiki-graph__lenses {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+}
+.wiki-graph__edge-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.6rem;
+}
+.wiki-graph__elk {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  font-size: 0.56rem;
+  color: var(--text-dim);
+}
+.wiki-graph__eline {
+  width: 13px;
+  height: 2px;
+  border-radius: 1px;
+}
+
+/* Subgraph isolation row: a project/cluster picker + ego-focus, and the active
+ * "Showing X ✕" chip. Sits under the lens bar; carves the graph into meaningful
+ * subgraphs (membership closures, emergent clusters, k-hop neighbourhoods). */
+.wiki-graph__bar--sub {
+  margin-top: -0.2rem;
+}
+.wiki-graph__isolate {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.4rem;
+}
+.wiki-graph__sub-label {
+  font-family: var(--font-display);
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  font-size: 0.56rem;
+  color: var(--text-faint);
+}
+.wiki-graph__select {
+  font-family: var(--font-body);
+  font-size: 0.62rem;
+  padding: 0.26rem 0.5rem;
+  border-radius: 999px;
+  border: 1px solid var(--hairline);
+  background: var(--surface-2);
+  color: var(--text);
+  cursor: pointer;
+  max-width: 16rem;
+}
+.wiki-graph__select:hover {
+  border-color: var(--hairline-strong);
+}
+.wiki-cat:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+.wiki-graph__depth {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+}
+.wiki-graph__depth button {
+  width: 1.3rem;
+  height: 1.3rem;
+  line-height: 1;
+  border-radius: 999px;
+  border: 1px solid var(--hairline);
+  background: none;
+  color: var(--text-dim);
+  cursor: pointer;
+}
+.wiki-graph__depth button:hover:not(:disabled) {
+  color: var(--text-bright);
+  border-color: var(--hairline-strong);
+}
+.wiki-graph__depth button:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+.wiki-graph__depth-n {
+  font-size: 0.58rem;
+  color: var(--text-dim);
+  min-width: 3.2rem;
+  text-align: center;
+}
+.wiki-graph__clear {
+  font-family: var(--font-display);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  font-size: 0.56rem;
+  padding: 0.28rem 0.6rem;
+  border-radius: 999px;
+  border: 1px solid var(--accent);
+  background: var(--surface);
+  color: var(--accent);
+  cursor: pointer;
+}
+.wiki-graph__clear span {
+  margin-left: 0.2rem;
+  opacity: 0.8;
+}
+
+/* --- Knowledge Base: browse ------------------------------------- */
+.wiki-browse__bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+  margin-bottom: 0.8rem;
+}
+.wiki-browse__cats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+}
+.wiki-cat {
+  font-family: var(--font-display);
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  font-size: 0.56rem;
+  padding: 0.28rem 0.6rem;
+  border-radius: 999px;
+  border: 1px solid var(--hairline);
+  background: none;
+  color: var(--text-dim);
+  cursor: pointer;
+}
+.wiki-cat:hover {
+  color: var(--text-bright);
+  border-color: var(--hairline-strong);
+}
+.wiki-cat--active {
+  color: var(--accent);
+  border-color: var(--hairline-strong);
+  background: var(--surface);
+}
+.wiki-cat__n {
+  color: var(--text-faint);
+  margin-left: 0.3rem;
+}
+.wiki-browse__filter {
+  flex: 1;
+  min-width: 120px;
+  background: var(--surface-2);
+  border: 1px solid var(--hairline);
+  border-radius: 8px;
+  padding: 0.4rem 0.7rem;
+  color: var(--text-bright);
+  font-family: var(--font-body);
+  font-size: 0.8rem;
+  outline: 0;
+}
+.wiki-browse__filter:focus {
+  border-color: var(--hairline-strong);
+}
+.wiki-browse__list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: 0.3rem 1rem;
+  max-height: 52vh;
+  overflow-y: auto;
+}
+.wiki-browse__item {
+  width: 100%;
+  text-align: left;
+  background: none;
+  border: 0;
+  border-bottom: 1px solid var(--hairline);
+  color: var(--text);
+  font-family: var(--font-body);
+  font-size: 0.85rem;
+  padding: 0.4rem 0.2rem;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+.wiki-browse__item:hover {
+  color: var(--text-bright);
+}
+.wiki-browse__swatch {
+  flex: 0 0 auto;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+}
+
+/* --- Atlas Type Registry ----------------------------------------- */
+/* A live list, by category, of the typed vocabulary in use — flaggable for
+   suspected duplicates. */
+.atlas-types__actions {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+.atlas-types__caption {
+  margin: 0 0 0.9rem;
+  font-size: 0.72rem;
+  line-height: 1.5;
+  color: var(--text-dim);
+}
+.atlas-types__caption em {
+  font-style: normal;
+  color: var(--status-amber);
+}
+.atlas-types__section {
+  margin-bottom: 1.1rem;
+}
+.atlas-types__section-head {
+  display: flex;
+  align-items: baseline;
+  gap: 0.4rem;
+  margin-bottom: 0.5rem;
+}
+.atlas-types__section-n {
+  color: var(--text-faint);
+}
+.atlas-types__list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(248px, 1fr));
+  gap: 0.3rem 1rem;
+}
+.atlas-types__entry {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.5rem;
+  padding: 0.4rem 0.45rem;
+  border-radius: 7px;
+  border: 1px solid transparent;
+  border-bottom-color: var(--hairline);
+}
+.atlas-types__entry--flagged {
+  border-color: var(--status-amber);
+  background: color-mix(in srgb, var(--status-amber) 9%, transparent);
+}
+.atlas-types__flag {
+  flex: 0 0 auto;
+  background: none;
+  border: 0;
+  padding: 0.05rem 0.1rem;
+  margin-top: 0.05rem;
+  font-size: 0.85rem;
+  line-height: 1;
+  color: var(--text-faint);
+  cursor: pointer;
+}
+.atlas-types__flag:hover {
+  color: var(--status-amber);
+}
+.atlas-types__entry--flagged .atlas-types__flag {
+  color: var(--status-amber);
+}
+.atlas-types__main {
+  min-width: 0;
+  flex: 1;
+}
+.atlas-types__top {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+}
+.atlas-types__name {
+  font-family: var(--font-mono, var(--font-body));
+  font-size: 0.82rem;
+  color: var(--text-bright);
+}
+.atlas-types__count {
+  margin-left: auto;
+  font-size: 0.72rem;
+  color: var(--text-dim);
+}
+.atlas-types__badge {
+  font-family: var(--font-display);
+  text-transform: uppercase;
+  font-size: 0.48rem;
+  letter-spacing: 0.09em;
+  padding: 0.05rem 0.3rem;
+  border-radius: 999px;
+  border: 1px solid var(--hairline);
+  color: var(--text-dim);
+}
+.atlas-types__badge--core {
+  color: var(--accent);
+  border-color: var(--hairline-strong);
+}
+.atlas-types__badge--unreg {
+  color: var(--status-amber);
+  border-color: color-mix(in srgb, var(--status-amber) 45%, transparent);
+}
+.atlas-types__badge--unused {
+  color: var(--text-faint);
+}
+.atlas-types__desc {
+  margin-top: 0.15rem;
+  font-size: 0.68rem;
+  line-height: 1.35;
+  color: var(--text-dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* --- Atlas Daily Pass -------------------------------------------- */
+/* The once-a-day triage of the Tasks board: each row is a proposed action
+   (spawn a dev agent · research · nudge) the operator approves, schedules, or
+   dismisses. Sits under the Kanban. */
+.dpass {
+  display: flex;
+  flex-direction: column;
+  gap: 0.7rem;
+}
+.dpass__sub {
+  font-size: 0.6rem;
+}
+.dpass__list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+}
+.dpass-item {
+  border: 1px solid var(--hairline);
+  border-left: 2px solid var(--hairline-strong);
+  border-radius: 8px;
+  padding: 0.6rem 0.75rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+.dpass-item--spawn {
+  border-left-color: var(--accent-teal);
+}
+.dpass-item--research {
+  border-left-color: var(--accent-cyan);
+}
+.dpass-item--note {
+  border-left-color: var(--status-amber);
+}
+.dpass-item__head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.5rem;
+}
+.dpass-item__chip {
+  font-family: var(--font-display);
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  font-size: 0.55rem;
+  white-space: nowrap;
+  color: var(--text-dim);
+}
+.dpass-item__chip--spawn {
+  color: var(--accent-teal);
+}
+.dpass-item__chip--research {
+  color: var(--accent-cyan);
+}
+.dpass-item__chip--note {
+  color: var(--status-amber);
+}
+.dpass-item__task {
+  font-size: 0.85rem;
+  color: var(--text-bright);
+  font-weight: 500;
+}
+.dpass-item__task--link {
+  background: none;
+  border: none;
+  padding: 0;
+  margin: 0;
+  cursor: pointer;
+  text-align: left;
+  transition: color 150ms ease;
+}
+.dpass-item__task--link:hover {
+  color: var(--accent-cyan);
+}
+.dpass-item__conf {
+  font-family: var(--font-display);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  font-size: 0.5rem;
+  color: var(--text-faint);
+  margin-left: auto;
+}
+.dpass-item__conf--high {
+  color: var(--status-green);
+}
+.dpass-item__conf--med {
+  color: var(--status-amber);
+}
+.dpass-item__conf--low {
+  color: var(--text-faint);
+}
+.dpass-item__detail {
+  font-size: 0.78rem;
+  color: var(--text-dim);
+  line-height: 1.45;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.dpass-item__why {
+  font-size: 0.72rem;
+  color: var(--text-faint);
+  font-style: italic;
+}
+.dpass-item__foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  margin-top: 0.1rem;
+}
+.dpass-item__btns {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  margin-left: auto;
+}
+
+/* --- Atlas Relational Lenses ------------------------------------- */
+/* Canned typed queries (edges · dates · status) over the typed layer; results
+   list below the lens chips. */
+.atlas-lens__bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+  margin-bottom: 0.8rem;
+}
+.atlas-lens__lenses {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+}
+.atlas-lens__count {
+  font-size: 0.72rem;
+  color: var(--text-dim);
+}
+.atlas-lens__list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+  gap: 0.2rem 1rem;
+  max-height: 56vh;
+  overflow-y: auto;
+}
+.atlas-lens__row {
+  padding: 0.45rem 0.3rem;
+  border-bottom: 1px solid var(--hairline);
+  cursor: pointer;
+}
+.atlas-lens__row:hover {
+  background: var(--surface);
+}
+.atlas-lens__row-main {
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+}
+.atlas-lens__done {
+  align-self: center;
+  flex: none;
+  width: 0.85rem;
+  height: 0.85rem;
+  margin: 0;
+  cursor: pointer;
+  accent-color: var(--status-green);
+}
+.atlas-lens__title {
+  color: var(--text);
+  font-size: 0.85rem;
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.atlas-lens__row:hover .atlas-lens__title {
+  color: var(--text-bright);
+}
+.atlas-lens__status {
+  font-family: var(--font-display);
+  text-transform: uppercase;
+  font-size: 0.48rem;
+  letter-spacing: 0.09em;
+  padding: 0.05rem 0.32rem;
+  border-radius: 999px;
+  border: 1px solid var(--hairline);
+  color: var(--text-dim);
+}
+.atlas-lens__status--doing {
+  color: var(--accent);
+  border-color: var(--hairline-strong);
+}
+.atlas-lens__status--next {
+  color: var(--accent-teal);
+}
+.atlas-lens__status--waiting {
+  color: var(--status-amber);
+}
+.atlas-lens__status--done {
+  color: var(--status-green);
+}
+.atlas-lens__due {
+  font-size: 0.68rem;
+  color: var(--text-dim);
+}
+.atlas-lens__due--over {
+  color: var(--status-amber);
+}
+.atlas-lens__row-meta {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.3rem 0.5rem;
+  margin-top: 0.15rem;
+}
+.atlas-lens__type {
+  font-family: var(--font-display);
+  text-transform: uppercase;
+  font-size: 0.48rem;
+  letter-spacing: 0.09em;
+  color: var(--text-faint);
+}
+.atlas-lens__edges {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 0.3rem;
+}
+.atlas-lens__edge {
+  font-size: 0.62rem;
+  color: var(--text-dim);
+  border: 1px solid var(--hairline);
+  border-radius: 5px;
+  padding: 0.02rem 0.34rem;
+}
+.atlas-lens__edge-key {
+  font-family: var(--font-mono, var(--font-body));
+  color: var(--text-faint);
+  margin-right: 0.3rem;
+}
+
+/* --- Shopping List (Recipes tab) --------------------------------- */
+/* A derived grocery checklist (from the week's cook-tasks) + manual items, in
+   two sections; rows are a round check toggle, the item name, and (derived)
+   recipe chips. Mirrors the atlas-lens list look. */
+.shopping {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+.shopping__count {
+  font-size: 0.72rem;
+  color: var(--text-dim);
+}
+/* Header actions: the offline "pending sync" badge alongside the done/total count. */
+.shopping__actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+/* Pending-sync badge — N ops queued in the offline outbox, not yet flushed. Tap
+   to retry the flush now (e.g. on a flaky link). */
+.shopping__pending {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  padding: 0.1rem 0.45rem;
+  border: 1px solid var(--hairline-strong);
+  border-radius: 999px;
+  background: var(--surface-2);
+  color: var(--accent-teal);
+  font-size: 0.66rem;
+  line-height: 1.5;
+  cursor: pointer;
+  transition: border-color 140ms ease, color 140ms ease;
+}
+.shopping__pending:hover {
+  border-color: var(--accent-teal);
+  color: var(--accent);
+}
+/* The Cloudflare-Access re-auth state: the session expired while offline; the
+   queued ops are safe in IndexedDB — tapping reloads to sign in, then they flush. */
+.shopping__pending--auth {
+  color: var(--status-amber);
+  border-color: var(--status-amber);
+}
+.shopping__pending--auth:hover {
+  color: var(--status-amber);
+  border-color: var(--status-amber);
+}
+.shopping__section-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.5rem;
+  margin-bottom: 0.4rem;
+}
+.shopping__hint {
+  font-size: 0.66rem;
+  color: var(--text-faint);
+}
+.shopping__list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 0.1rem 1rem;
+}
+.shopping__row {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  padding: 0.4rem 0.25rem;
+  border-bottom: 1px solid var(--hairline);
+}
+.shopping__check {
+  flex: 0 0 auto;
+  width: 1.15rem;
+  height: 1.15rem;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--hairline-strong);
+  border-radius: 6px;
+  background: var(--surface-2);
+  color: transparent;
+  font-size: 0.7rem;
+  line-height: 1;
+  cursor: pointer;
+  transition: border-color 140ms ease, background 140ms ease, color 140ms ease;
+}
+.shopping__check:hover {
+  border-color: var(--accent-teal);
+}
+.shopping__check--on {
+  color: #fff;
+  background: var(--accent-teal);
+  border-color: var(--accent-teal);
+}
+/* Drag handle — press and drag a row onto another to merge them. */
+.shopping__grip {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 0.9rem;
+  align-self: stretch;
+  color: var(--text-dim);
+  font-size: 0.9rem;
+  line-height: 1;
+  cursor: grab;
+  opacity: 0.45;
+  user-select: none;
+  touch-action: none;
+}
+.shopping__grip:hover {
+  opacity: 1;
+}
+.shopping__grip:active {
+  cursor: grabbing;
+}
+.shopping__row--dragging {
+  opacity: 0.5;
+}
+.shopping__row--drop {
+  background: color-mix(in srgb, var(--accent-teal) 16%, transparent);
+  outline: 1px dashed var(--accent-teal);
+  outline-offset: -1px;
+  border-radius: 6px;
+}
+.shopping__unmerge {
+  border: 1px solid var(--hairline-strong);
+  border-radius: 6px;
+  background: var(--surface-2);
+  color: var(--text);
+  font-size: 0.8rem;
+  padding: 0.25rem 0.6rem;
+  cursor: pointer;
+}
+.shopping__unmerge:hover {
+  border-color: var(--accent-teal);
+  color: var(--text-bright);
+}
+.shopping__row-main {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 0.35rem 0.5rem;
+  flex: 1;
+  min-width: 0;
+}
+.shopping__name {
+  color: var(--text);
+  font-size: 0.85rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.shopping__name--link {
+  cursor: pointer;
+}
+.shopping__name--link:hover {
+  color: var(--text-bright);
+  text-decoration: underline;
+}
+.shopping__name--editing {
+  color: var(--accent-teal);
+}
+.shopping__row--checked .shopping__name {
+  color: var(--text-faint);
+  text-decoration: line-through;
+}
+/* Inline remembered quantity (before the name) + note (after it). */
+.shopping__qty {
+  flex: 0 0 auto;
+  font-size: 0.62rem;
+  font-variant-numeric: tabular-nums;
+  color: var(--accent-teal);
+  border: 1px solid rgba(45, 212, 191, 0.4);
+  border-radius: 5px;
+  padding: 0.02rem 0.32rem;
+  line-height: 1.3;
+}
+.shopping__note {
+  font-size: 0.66rem;
+  color: var(--text-faint);
+  font-style: italic;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 12rem;
+}
+.shopping__recipes {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 0.3rem;
+  min-width: 0;
+}
+.shopping__recipe {
+  font-size: 0.6rem;
+  color: var(--text-dim);
+  border: 1px solid var(--hairline);
+  border-radius: 5px;
+  padding: 0.02rem 0.34rem;
+  max-width: 14rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.shopping__recipe:hover {
+  color: var(--text-bright);
+  border-color: var(--hairline-strong);
+}
+.shopping__remove {
+  flex: 0 0 auto;
+  border: 0;
+  background: transparent;
+  color: var(--text-faint);
+  font-size: 0.72rem;
+  cursor: pointer;
+  padding: 0.1rem 0.3rem;
+  line-height: 1;
+}
+.shopping__remove:hover {
+  color: var(--status-amber);
+}
+.shopping__add {
+  display: flex;
+  gap: 0.5rem;
+  margin-top: 0.5rem;
+}
+.shopping__add-input {
+  flex: 1;
+  min-width: 0;
+  background: var(--surface-2);
+  border: 1px solid var(--hairline);
+  border-radius: 8px;
+  padding: 0.45rem 0.7rem;
+  color: var(--text-bright);
+  font-family: var(--font-body);
+  font-size: 0.82rem;
+  outline: 0;
+  transition: border-color 160ms ease, box-shadow 160ms ease;
+}
+.shopping__add-input:focus {
+  border-color: var(--hairline-strong);
+  box-shadow: 0 0 16px var(--glow-cyan);
+}
+.shopping__add-input::placeholder {
+  color: var(--text-faint);
+}
+.shopping__add-btn {
+  flex: 0 0 auto;
+  font-size: 0.62rem;
+  font-family: var(--font-display);
+  text-transform: uppercase;
+  letter-spacing: 0.09em;
+  padding: 0.42rem 0.95rem;
+  border: 1px solid rgba(45, 212, 191, 0.45);
+  border-radius: 8px;
+  color: var(--accent-teal);
+  background: rgba(45, 212, 191, 0.1);
+  cursor: pointer;
+  transition: color 140ms ease, border-color 140ms ease, background 140ms ease, box-shadow 140ms ease;
+}
+.shopping__add-btn:hover:not(:disabled) {
+  color: var(--text-bright);
+  border-color: var(--accent-teal);
+  background: rgba(45, 212, 191, 0.18);
+  box-shadow: 0 0 14px var(--glow-cyan);
+}
+.shopping__add-btn:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+/* --- Shop tags (a sibling vault Phase 3a) -------------------------- */
+/* Filter chips — one per shop, coloured from its page's `color`. Toggling a
+   chip filters the list (multi-select = union); unassigned items stay visible
+   (the "anywhere" bucket). Active = filled with the shop colour. */
+.shopping__chips {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.4rem;
+}
+.shopping__chip {
+  font-size: 0.66rem;
+  font-family: var(--font-display);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  padding: 0.28rem 0.7rem;
+  border: 1px solid var(--hairline-strong);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--text-dim);
+  cursor: pointer;
+  line-height: 1;
+  transition: background 140ms ease, color 140ms ease, border-color 140ms ease, box-shadow 140ms ease;
+}
+.shopping__chip:hover {
+  filter: brightness(1.15);
+}
+.shopping__chip--on {
+  color: #fff;
+  font-weight: 600;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.45);
+  box-shadow: 0 0 12px rgba(0, 0, 0, 0.25);
+}
+.shopping__chip-clear {
+  font-size: 0.62rem;
+  font-family: var(--font-display);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  padding: 0.28rem 0.6rem;
+  border: 0;
+  background: transparent;
+  color: var(--text-faint);
+  cursor: pointer;
+  line-height: 1;
+}
+.shopping__chip-clear:hover {
+  color: var(--text-bright);
+}
+/* Assigned-shop dots on a row */
+.shopping__dots {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.22rem;
+}
+.shopping__dot {
+  width: 0.5rem;
+  height: 0.5rem;
+  border-radius: 50%;
+  box-shadow: 0 0 0 1px var(--surface-1);
+}
+.shopping__anywhere {
+  font-size: 0.58rem;
+  color: var(--text-faint);
+  font-style: italic;
+}
+/* Edit CARD — a centred modal opened by tapping an item name. Sets the item's
+   durable data (shops, default quantity, note, manual rename) and can create a
+   new shop, all remembered for future re-adds. */
+.shopping__modal {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1rem;
+  background: rgba(4, 7, 12, 0.7);
+  backdrop-filter: blur(2px);
+}
+.shopping__card {
+  width: 100%;
+  max-width: 24rem;
+  max-height: 85vh;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+  padding: 0.9rem 1rem 1rem;
+  background: var(--surface-1);
+  border: 1px solid var(--hairline-strong);
+  border-radius: 14px;
+  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.55);
+}
+.shopping__card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.6rem;
+  margin-bottom: 0.15rem;
+}
+.shopping__card-title {
+  font-family: var(--font-display);
+  font-size: 1rem;
+  color: var(--text-bright);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.shopping__card-close {
+  flex: 0 0 auto;
+  border: 0;
+  background: transparent;
+  color: var(--text-faint);
+  font-size: 0.85rem;
+  cursor: pointer;
+  padding: 0.1rem 0.3rem;
+  line-height: 1;
+}
+.shopping__card-close:hover {
+  color: var(--text-bright);
+}
+.shopping__edit-field {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+}
+.shopping__edit-label {
+  flex: 0 0 3.2rem;
+  font-size: 0.6rem;
+  font-family: var(--font-display);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-faint);
+}
+/* The Shops row can wrap to several lines — top-align its label. */
+.shopping__edit-field--top {
+  align-items: flex-start;
+}
+.shopping__edit-field--top .shopping__edit-label {
+  padding-top: 0.34rem;
+}
+.shopping__edit-shops {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.3rem;
+  flex: 1;
+}
+.shopping__edit-input {
+  flex: 1;
+  min-width: 0;
+  background: var(--surface-2);
+  border: 1px solid var(--hairline);
+  border-radius: 7px;
+  padding: 0.34rem 0.55rem;
+  color: var(--text-bright);
+  font-family: var(--font-body);
+  font-size: 0.8rem;
+  outline: 0;
+  transition: border-color 160ms ease, box-shadow 160ms ease;
+}
+.shopping__edit-input:focus {
+  border-color: var(--hairline-strong);
+  box-shadow: 0 0 12px var(--glow-cyan);
+}
+.shopping__edit-input::placeholder {
+  color: var(--text-faint);
+}
+.shopping__edit-input--qty {
+  flex: 0 0 8rem;
+}
+.shopping__edit-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.5rem;
+}
+.shopping__edit-open,
+.shopping__edit-done {
+  font-size: 0.62rem;
+  font-family: var(--font-display);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  padding: 0.32rem 0.8rem;
+  border: 1px solid var(--hairline-strong);
+  border-radius: 7px;
+  background: transparent;
+  color: var(--text-dim);
+  cursor: pointer;
+  transition: color 140ms ease, border-color 140ms ease;
+}
+.shopping__edit-open:hover {
+  color: var(--text-bright);
+  border-color: var(--hairline-strong);
+}
+.shopping__edit-done {
+  color: var(--accent-teal);
+  border-color: rgba(45, 212, 191, 0.45);
+}
+.shopping__edit-done:hover {
+  color: var(--text-bright);
+  border-color: var(--accent-teal);
+}
+/* "＋ Add shop" — a dashed chip in the picker that reveals the create-shop form. */
+.shopping__addshop-chip {
+  font-size: 0.74rem;
+  padding: 0.3rem 0.55rem;
+  border: 1px dashed var(--hairline-strong);
+  border-radius: 7px;
+  background: transparent;
+  color: var(--text-dim);
+  cursor: pointer;
+  transition: color 140ms ease, border-color 140ms ease;
+}
+.shopping__addshop-chip:hover {
+  color: var(--text-bright);
+  border-color: var(--accent-teal);
+}
+.shopping__addshop {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+  margin-left: 3.8rem;
+  padding: 0.5rem 0.6rem;
+  background: var(--surface-2);
+  border: 1px solid var(--hairline);
+  border-radius: 9px;
+}
+.shopping__addshop .shopping__edit-input {
+  flex: 1 1 8rem;
+}
+.shopping__addshop-colors {
+  display: flex;
+  gap: 0.3rem;
+}
+.shopping__swatch {
+  width: 1.05rem;
+  height: 1.05rem;
+  border-radius: 50%;
+  border: 2px solid transparent;
+  padding: 0;
+  cursor: pointer;
+  box-shadow: 0 0 0 1px var(--surface-1);
+}
+.shopping__swatch--on {
+  border-color: var(--text-bright);
+}
+.shopping__addshop-go {
+  font-size: 0.62rem;
+  font-family: var(--font-display);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  padding: 0.34rem 0.85rem;
+  border: 1px solid rgba(45, 212, 191, 0.45);
+  border-radius: 7px;
+  background: rgba(45, 212, 191, 0.1);
+  color: var(--accent-teal);
+  cursor: pointer;
+  transition: color 140ms ease, border-color 140ms ease, background 140ms ease;
+}
+.shopping__addshop-go:hover:not(:disabled) {
+  color: var(--text-bright);
+  border-color: var(--accent-teal);
+  background: rgba(45, 212, 191, 0.18);
+}
+.shopping__addshop-go:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+.shopping__addshop-err {
+  flex-basis: 100%;
+  font-size: 0.66rem;
+  color: var(--status-amber);
+}
+.shopping__picker-chip {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.74rem;
+  text-align: left;
+  padding: 0.3rem 0.5rem;
+  border: 1px solid var(--hairline);
+  border-radius: 7px;
+  background: var(--surface-2);
+  color: var(--text);
+  cursor: pointer;
+  transition: filter 140ms ease, border-color 140ms ease;
+}
+.shopping__picker-chip:hover {
+  filter: brightness(1.12);
+}
+.shopping__picker-chip--on {
+  color: #fff;
+  font-weight: 600;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.45);
+}
+.shopping__picker-dot {
+  width: 0.55rem;
+  height: 0.55rem;
+  border-radius: 50%;
+  flex: 0 0 auto;
+  box-shadow: 0 0 0 1px var(--surface-1);
+}
+.shopping__picker-check {
+  margin-left: auto;
+  font-size: 0.72rem;
+}
+
+/* --- Finish shopping (a sibling vault Phase 3b) -------------------- */
+/* The flush action: log the checked items to a durable shopping-trip note, then
+   reset the list. Two-step (arm → confirm) so an in-store mis-tap can't wipe it. */
+.shopping__finish {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+  margin-top: 0.85rem;
+  padding-top: 0.75rem;
+  border-top: 1px solid var(--hairline);
+}
+.shopping__finish-btn,
+.shopping__finish-go,
+.shopping__finish-cancel {
+  font-size: 0.62rem;
+  font-family: var(--font-display);
+  text-transform: uppercase;
+  letter-spacing: 0.09em;
+  padding: 0.46rem 1.05rem;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: color 140ms ease, border-color 140ms ease, background 140ms ease, box-shadow 140ms ease;
+}
+.shopping__finish-btn {
+  border: 1px solid rgba(45, 212, 191, 0.45);
+  color: var(--accent-teal);
+  background: rgba(45, 212, 191, 0.1);
+}
+.shopping__finish-btn:hover {
+  color: var(--text-bright);
+  border-color: var(--accent-teal);
+  background: rgba(45, 212, 191, 0.18);
+  box-shadow: 0 0 14px var(--glow-cyan);
+}
+.shopping__finish-q {
+  flex: 1;
+  min-width: 0;
+  font-size: 0.78rem;
+  color: var(--text-dim);
+}
+.shopping__finish-go {
+  border: 1px solid var(--accent-teal);
+  color: var(--text-bright);
+  background: rgba(45, 212, 191, 0.22);
+}
+.shopping__finish-go:hover:not(:disabled) {
+  box-shadow: 0 0 14px var(--glow-cyan);
+}
+.shopping__finish-cancel {
+  border: 1px solid var(--hairline-strong);
+  color: var(--text-dim);
+  background: transparent;
+}
+.shopping__finish-cancel:hover:not(:disabled) {
+  color: var(--text-bright);
+  border-color: var(--text-dim);
+}
+.shopping__finish-go:disabled,
+.shopping__finish-cancel:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+/* --- Atlas Kanban ------------------------------------------------- */
+/* A horizontal row of status columns; scrolls sideways on narrow screens
+   rather than squashing the cards. */
+.kanban {
+  display: grid;
+  grid-auto-flow: column;
+  grid-auto-columns: minmax(210px, 1fr);
+  gap: 0.7rem;
+  overflow-x: auto;
+  padding-bottom: 0.35rem;
+}
+.kanban__col {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  background: var(--surface);
+  border: 1px solid var(--hairline);
+  border-radius: 10px;
+  padding: 0.6rem 0.55rem;
+}
+.kanban__col-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.5rem;
+  margin-bottom: 0.55rem;
+  padding-bottom: 0.4rem;
+  border-bottom: 1px solid var(--hairline);
+}
+.kanban__col-title {
+  font-family: var(--font-display);
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  font-size: 0.56rem;
+  color: var(--text-dim);
+}
+.kanban__col--inbox .kanban__col-title {
+  color: var(--text-faint);
+}
+.kanban__col--next .kanban__col-title {
+  color: var(--accent);
+}
+.kanban__col--doing .kanban__col-title {
+  color: #d2a64f;
+}
+.kanban__col--waiting .kanban__col-title {
+  color: #e0a34f;
+}
+.kanban__col--done .kanban__col-title {
+  color: var(--accent-teal);
+}
+.kanban__col-n {
+  font-size: 0.6rem;
+  color: var(--text-faint);
+}
+.kanban__col-body {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  min-height: 1.4rem;
+  max-height: 58vh;
+  overflow-y: auto;
+}
+.kanban__empty {
+  color: var(--text-faint);
+  font-size: 0.78rem;
+  text-align: center;
+  padding: 0.4rem 0;
+  opacity: 0.55;
+}
+.kanban__card {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  width: 100%;
+  text-align: left;
+  cursor: pointer;
+  background: var(--surface-2);
+  border: 1px solid var(--hairline);
+  border-left: 2px solid var(--hairline-strong);
+  border-radius: 8px;
+  padding: 0.5rem 0.6rem;
+  color: var(--text);
+  font-family: var(--font-body);
+  transition: border-color 150ms ease, color 150ms ease, transform 150ms ease;
+}
+.kanban__card:hover {
+  border-color: var(--hairline-strong);
+  color: var(--text-bright);
+  transform: translateY(-1px);
+}
+/* Category tint: a card's background is colored by its project (individual color)
+   or life area (--cat-h/s/l set inline by the Kanban). A translucent hue overlay
+   over the base surface composites correctly on both the dark and light themes;
+   status stays encoded on the left border + column. */
+.kanban__card--cat {
+  background-image: linear-gradient(
+    hsl(var(--cat-h) var(--cat-s) var(--cat-l) / 0.18),
+    hsl(var(--cat-h) var(--cat-s) var(--cat-l) / 0.18)
+  );
+}
+.kanban__card--cat:hover {
+  background-image: linear-gradient(
+    hsl(var(--cat-h) var(--cat-s) var(--cat-l) / 0.26),
+    hsl(var(--cat-h) var(--cat-s) var(--cat-l) / 0.26)
+  );
+}
+/* Drag-and-drop: cards are draggable between columns (status change). */
+.kanban__card {
+  cursor: grab;
+}
+.kanban__card:active {
+  cursor: grabbing;
+}
+.kanban__card.kanban__card--dragging {
+  opacity: 0.45;
+  cursor: grabbing;
+}
+.kanban__col--over {
+  border-color: var(--accent);
+  background: var(--surface-2);
+}
+.kanban__col--over .kanban__col-body {
+  outline: 1px dashed var(--accent);
+  outline-offset: 3px;
+  border-radius: 6px;
+}
+.kanban__col--next .kanban__card {
+  border-left-color: var(--accent);
+}
+.kanban__col--doing .kanban__card {
+  border-left-color: #d2a64f;
+}
+.kanban__col--waiting .kanban__card {
+  border-left-color: #e0a34f;
+}
+.kanban__col--done .kanban__card {
+  border-left-color: var(--accent-teal);
+  opacity: 0.7;
+}
+.kanban__card-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.4rem;
+}
+.kanban__card-title {
+  font-size: 0.82rem;
+  line-height: 1.32;
+}
+/* High-priority flame toggle: faint + desaturated when off so the board isn't a
+   sea of flames; full-color (with a warm glow) when on or hovered. Sits top-right
+   of the card title. */
+.kanban__flame {
+  flex: none;
+  background: transparent;
+  border: 0;
+  padding: 0;
+  margin: -0.05rem -0.1rem 0 0;
+  font-size: 0.82rem;
+  line-height: 1;
+  cursor: pointer;
+  opacity: 0.28;
+  filter: grayscale(1);
+  transition: opacity 150ms ease, filter 150ms ease, transform 150ms ease;
+}
+.kanban__flame:hover {
+  opacity: 0.9;
+  filter: grayscale(0);
+  transform: scale(1.12);
+}
+.kanban__flame--on {
+  opacity: 1;
+  filter: none;
+  text-shadow: 0 0 6px hsl(16 92% 56% / 0.6);
+}
+/* A flagged card carries a faint warm ring so it reads as hot at a glance,
+   without disturbing the status colour on the left border. */
+.kanban__card--high {
+  box-shadow: inset 0 0 0 1px hsl(8 85% 62% / 0.45);
+}
+.kanban__chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.3rem;
+}
+.kanban__chip {
+  font-family: var(--font-display);
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  font-size: 0.48rem;
+  padding: 0.1rem 0.32rem;
+  border-radius: 4px;
+  border: 1px solid var(--hairline);
+  color: var(--text-dim);
+  white-space: nowrap;
+}
+.kanban__chip--project {
+  color: var(--accent);
+}
+/* The category chip (project or area driving the card tint) inks to match. */
+.kanban__chip--cat {
+  color: hsl(var(--cat-h) var(--cat-s) var(--cat-l));
+  border-color: hsl(var(--cat-h) var(--cat-s) var(--cat-l) / 0.45);
+}
+.kanban__chip--owes {
+  color: #e0a34f;
+}
+.kanban__chip--overdue {
+  color: #fb7185;
+  border-color: #fb7185;
+}
+/* Editable due chip: the chip is a button driving a hidden native date input
+   (opened via showPicker()), with a small × to clear. */
+.kanban__due-edit {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.1rem;
+}
+.kanban__chip--due {
+  background: transparent;
+  cursor: pointer;
+  transition: color 150ms ease, border-color 150ms ease;
+}
+.kanban__chip--due:hover {
+  color: var(--text-bright);
+  border-color: var(--hairline-strong);
+}
+.kanban__chip--due-empty {
+  border-style: dashed;
+  color: var(--text-faint);
+}
+/* Hidden, but anchored to the chip so the date picker pops near it. */
+.kanban__due-input {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  border: 0;
+  opacity: 0;
+  pointer-events: none;
+  color-scheme: dark;
+}
+.kanban__due-clear {
+  background: transparent;
+  border: 0;
+  padding: 0 0.05rem;
+  color: var(--text-faint);
+  font-size: 0.72rem;
+  line-height: 1;
+  cursor: pointer;
+}
+.kanban__due-clear:hover {
+  color: #fb7185;
+}
+.kanban__count {
+  font-size: 0.6rem;
+  color: var(--text-faint);
+}
+.kanban__actions {
+  display: flex;
+  align-items: center;
+  gap: 0.7rem;
+}
+/* Card-color legend (project/area → swatch) — mirrors .wiki-graph__legend on the
+   Knowledge Graph's top bar. Wraps and yields so the count + New-task button stay
+   anchored at the far right. */
+.kanban__legend {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 0.5rem 0.7rem;
+  min-width: 0;
+}
+/* Each legend entry is a filter toggle: click to show only that category, click
+   the active one again to clear. Styled as a quiet chip that lights up when set. */
+.kanban__lk {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  font-size: 0.56rem;
+  color: var(--text-dim);
+  background: none;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  padding: 0.14rem 0.42rem;
+  font-family: inherit;
+  cursor: pointer;
+  transition: color 140ms ease, background 140ms ease, border-color 140ms ease,
+    opacity 140ms ease;
+}
+.kanban__lk:hover {
+  color: var(--text-bright);
+  background: var(--surface-2);
+}
+.kanban__lk--active {
+  color: var(--text-bright);
+  background: var(--surface-2);
+  border-color: var(--hairline-strong);
+}
+/* With a filter on, fade the unselected categories so the active one stands out. */
+.kanban__legend--filtering .kanban__lk:not(.kanban__lk--active) {
+  opacity: 0.4;
+}
+.kanban__legend--filtering .kanban__lk:not(.kanban__lk--active):hover {
+  opacity: 1;
+}
+.kanban__legend-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex: 0 0 auto;
+}
+/* Primary action of the board — teal-accented + tinted fill so it reads as a
+   button, not a faint header chip. */
+.kanban__new-btn {
+  font-size: 0.62rem;
+  padding: 0.42rem 0.85rem;
+  color: var(--accent-teal);
+  border-color: rgba(45, 212, 191, 0.45);
+  background: rgba(45, 212, 191, 0.1);
+}
+.kanban__new-btn:hover:not(:disabled) {
+  color: var(--text-bright);
+  border-color: var(--accent-teal);
+  background: rgba(45, 212, 191, 0.18);
+  box-shadow: 0 0 14px var(--glow-cyan);
+}
+/* "+ New task" composer — inline input + Add, above the board. */
+.kanban__new {
+  display: flex;
+  gap: 0.5rem;
+  margin-bottom: 0.7rem;
+}
+.kanban__new-input {
+  flex: 1;
+  min-width: 0;
+  background: var(--surface-2);
+  border: 1px solid var(--hairline);
+  border-radius: 8px;
+  padding: 0.5rem 0.7rem;
+  color: var(--text-bright);
+  font-family: var(--font-body);
+  font-size: 0.85rem;
+  outline: 0;
+  transition: border-color 160ms ease, box-shadow 160ms ease;
+}
+.kanban__new-input:focus {
+  border-color: var(--hairline-strong);
+  box-shadow: 0 0 16px var(--glow-cyan);
+}
+.kanban__new-input::placeholder {
+  color: var(--text-faint);
+}
+/* Optional due date in the composer — matches the title input, native picker. */
+.kanban__new-due {
+  flex: 0 0 auto;
+  background: var(--surface-2);
+  border: 1px solid var(--hairline);
+  border-radius: 8px;
+  padding: 0.5rem 0.6rem;
+  color: var(--text-bright);
+  font-family: var(--font-body);
+  font-size: 0.82rem;
+  outline: 0;
+  color-scheme: dark;
+  transition: border-color 160ms ease, box-shadow 160ms ease;
+}
+.kanban__new-due:focus {
+  border-color: var(--hairline-strong);
+  box-shadow: 0 0 16px var(--glow-cyan);
+}
+.kanban__new-error {
+  color: var(--status-red);
+  font-size: 0.74rem;
+  margin-bottom: 0.6rem;
+}
+/* Wrap so the title keeps a usable width once the category picker is added. */
+.kanban__new {
+  flex-wrap: wrap;
+}
+.kanban__new .catpick {
+  flex: 0 1 13rem;
+  min-width: 8rem;
+}
+/* The optional body sits on its own full-width row below the title. */
+.kanban__new .micfield--multiline {
+  flex: 1 0 100%;
+}
+.kanban__new-body {
+  width: 100%;
+  min-height: 3.6rem;
+  resize: vertical;
+  background: var(--surface-2);
+  border: 1px solid var(--hairline);
+  border-radius: 8px;
+  padding: 0.5rem 0.7rem;
+  color: var(--text-bright);
+  font-family: var(--font-body);
+  font-size: 0.85rem;
+  line-height: 1.45;
+  outline: 0;
+  transition: border-color 160ms ease, box-shadow 160ms ease;
+}
+.kanban__new-body:focus {
+  border-color: var(--hairline-strong);
+  box-shadow: 0 0 16px var(--glow-cyan);
+}
+.kanban__new-body::placeholder {
+  color: var(--text-faint);
+}
+
+/* --- Mobile: the Atlas Kanban board ------------------------------ *
+   On a phone the 5 columns can't sit side by side, and the colour legend (a
+   filter strip) sprawls across the header. Reflow for touch: the legend drops
+   to its own horizontally-scrollable row (count + New-task stay anchored on the
+   title line); the board becomes a snap-paged carousel (one column ~fills the
+   screen with a peek of the next); and each column's card list pans only
+   vertically, so scrolling a column never drags the whole board sideways.
+   Moving a card is the reader's status control (drag is mouse-only). Desktop
+   (>640px) is untouched. */
+@media (max-width: 640px) {
+  /* Header: flatten the action wrappers so the legend can become a full-width
+     row below the title / count / New-task line. */
+  .kanban-card .card__head {
+    flex-wrap: wrap;
+    justify-content: flex-start;
+    gap: 0.5rem 0.6rem;
+  }
+  .kanban-card .card__actions,
+  .kanban-card .kanban__actions {
+    display: contents;
+  }
+  .kanban-card .kanban__count {
+    order: 1;
+    margin-left: auto; /* push count + New-task to the right of the title */
+  }
+  .kanban-card .kanban__new-btn {
+    order: 2;
+  }
+  .kanban-card .kanban__legend {
+    order: 3;
+    flex: 1 0 100%; /* its own full-width row… */
+    flex-wrap: nowrap; /* …a single line… */
+    justify-content: flex-start;
+    overflow-x: auto; /* …that scrolls sideways */
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: none;
+    padding-bottom: 0.15rem;
+  }
+  .kanban-card .kanban__legend::-webkit-scrollbar {
+    display: none;
+  }
+  .kanban-card .kanban__lk {
+    flex: 0 0 auto; /* chips keep their size in the scroll strip */
+  }
+
+  /* Board: a snap-paged horizontal carousel — one column ~fills the screen with
+     a peek of the next, and each swipe clicks a column into place. */
+  .kanban {
+    grid-auto-columns: 84%;
+    scroll-snap-type: x mandatory;
+    gap: 0.5rem;
+  }
+  .kanban__col {
+    scroll-snap-align: start;
+  }
+  /* Decouple the axes: a vertical drag scrolls the column's cards; it no longer
+     leaks into a horizontal drag of the whole board (the logged scroll-axis bug). */
+  .kanban__col-body {
+    touch-action: pan-y;
+    max-height: 64vh;
+  }
+
+  /* Comfortable tap targets for the reader's status segments. */
+  .task__status-btn {
+    padding: 0.4rem 0.7rem;
+    font-size: 0.62rem;
+  }
+}
+
+/* --- Category picker (project/area combobox) --------------------- *
+   Shared by the Kanban composer and the reader's TaskView. A plain combobox
+   (input + datalist of existing projects/areas); free text becomes a new area. */
+.catpick {
+  display: inline-flex;
+  align-items: center;
+  min-width: 0;
+}
+.catpick__input {
+  width: 100%;
+  background: var(--surface-2);
+  border: 1px solid var(--hairline);
+  border-radius: 8px;
+  padding: 0.5rem 0.7rem;
+  color: var(--text-bright);
+  font-family: var(--font-body);
+  font-size: 0.82rem;
+  outline: 0;
+  transition: border-color 160ms ease, box-shadow 160ms ease;
+}
+.catpick__input:focus {
+  border-color: var(--hairline-strong);
+  box-shadow: 0 0 16px var(--glow-cyan);
+}
+.catpick__input::placeholder {
+  color: var(--text-faint);
+}
+.catpick__input:disabled {
+  opacity: 0.6;
+}
+/* Compact form for the reader's task meta row, sitting amongst the chips. */
+.task__catedit {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+.task__catedit .catpick__input {
+  width: auto;
+  min-width: 11rem;
+  padding: 0.2rem 0.45rem;
+  border-radius: 6px;
+  font-size: 0.72rem;
+}
+
+/* --- Search ------------------------------------------------------ */
+.search {
+  position: relative;
+  z-index: 40;
+}
+.glass-pill {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0.7rem 1.1rem;
+  border-radius: 999px;
+  background: var(--surface-2);
+  border: 1px solid var(--hairline);
+  backdrop-filter: blur(10px) saturate(125%);
+  -webkit-backdrop-filter: blur(10px) saturate(125%);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
+  transition: border-color 160ms ease, box-shadow 160ms ease;
+}
+.search__pill:focus-within {
+  border-color: var(--hairline-strong);
+  box-shadow: 0 0 16px var(--glow-cyan);
+}
+.search__icon {
+  flex: 0 0 auto;
+  color: var(--text-dim);
+}
+.search__input {
+  flex: 1;
+  background: transparent;
+  border: 0;
+  outline: 0;
+  color: var(--text-bright);
+  font-family: var(--font-body);
+  font-size: 0.95rem;
+}
+.search__input::placeholder {
+  color: var(--text-faint);
+}
+.search__results {
+  position: absolute;
+  top: calc(100% + 0.5rem);
+  left: 0;
+  right: 0;
+  z-index: 50;
+  max-height: 60vh;
+  overflow-y: auto;
+  margin: 0;
+  padding: 0.4rem;
+  list-style: none;
+}
+.search__hit {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 0.7rem;
+  padding: 0.5rem 0.6rem;
+  background: none;
+  border: 0;
+  border-radius: 8px;
+  text-align: left;
+  cursor: pointer;
+  transition: background 140ms ease;
+}
+.search__hit:hover:not(:disabled) {
+  background: var(--surface-2);
+}
+.search__hit:disabled {
+  cursor: default;
+  opacity: 0.85;
+}
+.search__hit-body {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+}
+.search__hit-title {
+  color: var(--text-bright);
+  font-size: 0.88rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.search__hit-snip {
+  color: var(--text-dim);
+  font-size: 0.72rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.search__hit-sub {
+  flex: 0 0 auto;
+  font-size: 0.5rem;
+  color: var(--text-faint);
+}
+.search__empty {
+  padding: 0.8rem;
+  text-align: center;
+  color: var(--text-faint);
+  font-size: 0.85rem;
+}
+.tag {
+  flex: 0 0 auto;
+  font-family: var(--font-display);
+  text-transform: uppercase;
+  font-size: 0.5rem;
+  letter-spacing: 0.1em;
+  padding: 0.12rem 0.4rem;
+  border-radius: 4px;
+  border: 1px solid var(--hairline);
+  color: var(--text-dim);
+}
+.tag--wiki {
+  color: var(--accent);
+  border-color: var(--hairline-strong);
+  background: rgba(34, 211, 238, 0.08);
+}
+
+/* --- Markdown prose --------------------------------------------- */
+.prose {
+  color: var(--text);
+  font-size: 0.9rem;
+  line-height: 1.6;
+}
+.prose > :first-child {
+  margin-top: 0;
+}
+.prose__h {
+  font-family: var(--font-display);
+  color: var(--text-bright);
+  line-height: 1.2;
+  margin: 1.1rem 0 0.5rem;
+}
+.prose__h1 {
+  font-size: 1.35rem;
+}
+.prose__h2 {
+  font-size: 1.15rem;
+}
+.prose__h3 {
+  font-size: 1rem;
+}
+.prose__h4,
+.prose__h5,
+.prose__h6 {
+  font-size: 0.85rem;
+}
+.prose__p {
+  margin: 0.5rem 0;
+}
+.prose__a {
+  color: var(--accent);
+  text-decoration: none;
+  border-bottom: 1px solid rgba(34, 211, 238, 0.3);
+}
+.prose__a:hover {
+  color: var(--accent-teal);
+}
+.prose__code {
+  font-family: var(--font-mono);
+  font-size: 0.82em;
+  background: rgba(120, 220, 235, 0.08);
+  padding: 0.08rem 0.3rem;
+  border-radius: 4px;
+  color: var(--text-bright);
+}
+.prose__pre {
+  margin: 0.6rem 0;
+  padding: 0.8rem 1rem;
+  background: var(--bg-800);
+  border: 1px solid var(--hairline);
+  border-radius: 8px;
+  overflow-x: auto;
+}
+.prose__pre code {
+  font-family: var(--font-mono);
+  font-size: 0.8rem;
+  color: var(--text);
+}
+.prose__hr {
+  border: 0;
+  border-top: 1px solid var(--hairline);
+  margin: 1rem 0;
+}
+.prose__img {
+  display: block;
+  max-width: 100%;
+  height: auto;
+  margin: 0.7rem 0;
+  border: 1px solid var(--hairline);
+  border-radius: 8px;
+}
+
+/* --- Projects ---------------------------------------------------- */
+.proj-card {
+  display: flex;
+  flex-direction: column;
+  gap: 0.85rem;
+}
+.proj-goals {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+.proj-kv {
+  display: grid;
+  grid-template-columns: 42px 1fr;
+  gap: 0.6rem;
+  align-items: baseline;
+}
+.proj-kv__k {
+  font-family: var(--font-display);
+  font-weight: 600;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  font-size: 0.52rem;
+}
+.proj-kv__k--now {
+  color: var(--accent);
+}
+.proj-kv__k--goal {
+  color: var(--text-faint);
+}
+.proj-kv__v {
+  font-size: 0.88rem;
+  line-height: 1.35;
+}
+.proj-kv__v--now {
+  color: var(--text-bright);
+}
+.proj-kv__v--goal {
+  color: var(--text-dim);
+}
+.proj-commit {
+  display: flex;
+  align-items: baseline;
+  gap: 0.55rem;
+  padding-top: 0.7rem;
+  border-top: 1px solid var(--hairline);
+}
+.proj-commit__hash {
+  flex: 0 0 auto;
+  font-size: 0.72rem;
+  color: var(--accent-teal);
+}
+.proj-commit__subject {
+  flex: 1;
+  min-width: 0;
+  color: var(--text);
+  font-size: 0.8rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.proj-commit__when {
+  flex: 0 0 auto;
+  font-size: 0.62rem;
+  color: var(--text-faint);
+  white-space: nowrap;
+}
+.proj-commit--down {
+  color: var(--status-amber);
+  font-size: 0.75rem;
+  border-top-color: rgba(210, 166, 79, 0.3);
+}
+.proj-dot {
+  display: inline-block;
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+}
+.proj-dot--ok {
+  background: var(--status-green);
+  box-shadow: 0 0 7px rgba(63, 178, 127, 0.6);
+}
+.proj-dot--warn {
+  background: var(--status-amber);
+  box-shadow: 0 0 7px rgba(210, 166, 79, 0.6);
+}
+.proj-dot--down {
+  background: var(--status-red);
+  box-shadow: 0 0 7px rgba(213, 107, 96, 0.6);
+}
+.proj-related {
+  display: flex;
+  align-items: baseline;
+  gap: 0.4rem;
+  margin-top: auto;
+  padding-top: 0.6rem;
+}
+.proj-related__n {
+  font-size: 0.9rem;
+  color: var(--accent-teal);
+}
+.proj-related__l {
+  font-size: 0.72rem;
+  color: var(--text-dim);
+}
+.proj-related__tag {
+  margin-left: auto;
+  font-family: var(--font-mono);
+  font-size: 0.62rem;
+  color: var(--text-faint);
+}
+
+/* Per-project dev-agent section: the global Dev Agents
+   card scoped to this project's repo — reuses the .agents/.agent__* styles. */
+/* Self-deploy button (unused in Atlas Kit) — pull master + build + restart on the box. */
+.proj-deploy {
+  margin-top: 0.7rem;
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+}
+.proj-deploy__btn {
+  font-size: 0.72rem;
+  max-width: 100%;
+  text-align: left;
+  line-height: 1.4;
+}
+.proj-deploy__btn--ahead {
+  border-color: var(--accent-teal);
+  color: var(--accent-teal);
+}
+/* Last deploy errored — the running build is stale despite behind:0, so flag the
+   button red (mirrors --ahead) rather than letting it read "up to date". */
+.proj-deploy__btn--err {
+  border-color: var(--status-red);
+  color: var(--status-red);
+}
+/* The pending-change keywords ride inside the button but read as secondary:
+   lower-case (the button label is uppercased) and dimmed. */
+.proj-deploy__changes {
+  margin-left: 0.45em;
+  text-transform: none;
+  letter-spacing: 0.01em;
+  color: var(--text-dim);
+}
+.proj-deploy__err {
+  font-size: 0.72rem;
+  color: var(--status-red);
+}
+
+.proj-agents {
+  margin-top: 0.7rem;
+  padding-top: 0.7rem;
+  border-top: 1px solid var(--hairline);
+}
+.proj-agents__head {
+  margin-bottom: 0.55rem;
+  color: var(--text-dim);
+}
+.proj-agents__key {
+  font-family: var(--font-mono);
+  color: var(--text-faint);
+}
+
+/* --- Dev Agents card ----------------------------------------------- */
+.agent-dot {
+  display: inline-block;
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+}
+.agent-dot--ok {
+  background: var(--status-green);
+  box-shadow: 0 0 7px rgba(63, 178, 127, 0.6);
+}
+.agent-dot--down {
+  background: var(--status-red);
+  box-shadow: 0 0 7px rgba(213, 107, 96, 0.6);
+}
+.agents {
+  display: flex;
+  flex-direction: column;
+  gap: 0.85rem;
+}
+.agents__spawn {
+  display: flex;
+  gap: 0.5rem;
+}
+.agents__spawn .capture__input--sm {
+  flex: 1;
+}
+/* Model/effort dropdowns: size to their label, don't compete with the task input. */
+.agents__spawn .agents__select {
+  flex: 0 0 auto;
+  width: auto;
+}
+.agents__err {
+  font-size: 0.75rem;
+  color: var(--status-red);
+}
+.agents__list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.7rem;
+}
+/* Knowledge-agent chat tabs — one per live vault chat (Knowledge Base tab).
+   Same chip language as the wiki browse categories; the dot mirrors the agent
+   row's status colours (amber pulse = the chat is waiting on you). */
+.kagents__tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+}
+.kagents__tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  max-width: 240px;
+  font-family: var(--font-display);
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  font-size: 0.56rem;
+  padding: 0.28rem 0.6rem;
+  border-radius: 999px;
+  border: 1px solid var(--hairline);
+  background: none;
+  color: var(--text-dim);
+  cursor: pointer;
+}
+.kagents__tab:hover {
+  color: var(--text-bright);
+  border-color: var(--hairline-strong);
+}
+.kagents__tab--active {
+  color: var(--accent);
+  border-color: var(--hairline-strong);
+  background: var(--surface);
+}
+.kagents__tab-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.kagents__tab-dot {
+  flex: 0 0 auto;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--text-faint);
+}
+.kagents__tab-dot--running {
+  background: var(--status-green);
+  box-shadow: 0 0 5px rgba(63, 178, 127, 0.6);
+}
+.kagents__tab-dot--idle {
+  background: var(--status-amber);
+  box-shadow: 0 0 5px rgba(210, 166, 79, 0.7);
+  animation: agent-dot-pulse 1.6s ease-in-out infinite;
+}
+.kagents__tab-dot--error {
+  background: var(--status-red);
+}
+.kagents__tab-dot--done {
+  background: var(--accent-teal);
+}
+/* The dev agents an Atlas orchestrator chat spawned — one row + ship button each,
+   surfaced under the chat so the operator can ship them without leaving the tab. */
+.kagents__spawned {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  margin-top: 0.6rem;
+  padding-top: 0.5rem;
+  border-top: 1px solid var(--hairline);
+}
+.kagents__spawned-head {
+  color: var(--text-faint);
+}
+.kagents__spawned-row {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+.kagents__spawned-open {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 0.28rem 0.5rem;
+  border-radius: 7px;
+  border: 1px solid var(--hairline);
+  background: none;
+  color: var(--text-dim);
+  cursor: pointer;
+  text-align: left;
+}
+.kagents__spawned-open:hover {
+  color: var(--text-bright);
+  border-color: var(--hairline-strong);
+  background: var(--surface);
+}
+.kagents__spawned-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.kagents__spawned-repo {
+  flex: 0 0 auto;
+  color: var(--text-faint);
+}
+.agent {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  padding: 0.7rem 0.8rem;
+  border: 1px solid var(--hairline);
+  border-radius: 8px;
+  background: var(--bg-800);
+}
+.agent__head {
+  display: flex;
+  align-items: baseline;
+  gap: 0.55rem;
+}
+.agent__dot {
+  flex: 0 0 auto;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--text-faint);
+  align-self: center;
+}
+.agent--running .agent__dot {
+  background: var(--status-green);
+  box-shadow: 0 0 6px rgba(63, 178, 127, 0.6);
+}
+/* Alive but waiting on you — amber, with a gentle pulse to catch the eye. */
+.agent--idle .agent__dot {
+  background: var(--status-amber);
+  box-shadow: 0 0 6px rgba(210, 166, 79, 0.7);
+  animation: agent-dot-pulse 1.6s ease-in-out infinite;
+}
+@keyframes agent-dot-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.35; }
+}
+.agent--error .agent__dot {
+  background: var(--status-red);
+}
+.agent--done .agent__dot {
+  background: var(--accent-teal);
+}
+/* Lost/interrupted: tmux torn down out from under the session. Source order beats
+   the .agent--done rule above (same specificity) since the class is also present.
+   Amber = attention (not red 'failed to start'); static, not idle's pulse. */
+.agent--interrupted .agent__dot {
+  background: var(--status-amber);
+  box-shadow: 0 0 6px rgba(210, 166, 79, 0.55);
+  animation: none;
+}
+.agent--interrupted .agent__status {
+  color: var(--status-amber);
+  font-weight: 600;
+}
+/* Dormant: parked by a tmux-server death (reboot/OOM) — worktree intact, awaiting
+   a Revive. A dim dot with a slow breathe flags "needs you", distinct from idle's
+   amber pulse and the teal 'done'. */
+.agent--dormant .agent__dot {
+  background: var(--text-dim);
+  box-shadow: 0 0 6px rgba(150, 160, 180, 0.45);
+  animation: agent-dot-pulse 2.8s ease-in-out infinite;
+}
+.agent--dormant .agent__status {
+  color: var(--text-dim);
+  font-weight: 600;
+}
+/* The Revive affordance reads as a positive/restorative action — tint it green
+   like running, both on the card and the bulk banner button. */
+.agent__revive {
+  color: var(--status-green);
+}
+.agents__reviveall-btn {
+  color: var(--status-green);
+  border-color: var(--status-green);
+}
+.agent__task {
+  font-weight: 600;
+  color: var(--text-bright);
+  font-size: 0.85rem;
+  line-height: 1.35;
+}
+/* A long spawn prompt shouldn't swallow the header — when the row measures it
+   past ~2 lines, clamp it and let the rest scroll in place (same treatment the
+   full-screen viewer uses). Only set on overflowing rows, so short prompts keep
+   the header's text baseline. */
+.agent__task--clamp {
+  max-height: 2.7em;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+}
+.agent__branch {
+  font-family: var(--font-mono);
+  font-size: 0.68rem;
+  color: var(--accent-teal);
+}
+.agent__repo {
+  font-size: 0.7rem;
+  color: var(--text-dim);
+}
+.agent__status {
+  margin-left: auto;
+  font-size: 0.55rem;
+  color: var(--text-faint);
+}
+.agent--running .agent__status {
+  color: var(--status-green);
+}
+.agent--idle .agent__status {
+  color: var(--status-amber);
+}
+/* A pending choice menu is a blocking DECISION, not just "your turn" — bolder
+   amber, a faster pulse, and a heavier status label so you spot it before
+   typing past it. Source order beats the .agent--idle rules above (same
+   specificity), since a decision row carries both classes. */
+.agent--decision .agent__dot {
+  background: var(--status-amber);
+  box-shadow: 0 0 9px rgba(210, 166, 79, 0.95);
+  animation: agent-dot-pulse 0.9s ease-in-out infinite;
+}
+.agent--decision .agent__status {
+  color: var(--status-amber);
+  font-weight: 700;
+  letter-spacing: 0.03em;
+}
+/* Spawn-time model + effort, stacked just above the context meter (the column
+ * keeps the label centred over the bar). */
+.agent__run {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.15rem;
+  align-self: center;
+}
+.agent__meta {
+  font-size: 0.55rem;
+  color: var(--text-faint);
+  white-space: nowrap;
+}
+/* Context-window meter — a thin fill bar + k-token readout sitting with the
+ * row's branch/repo metadata. */
+.agent__ctx {
+  display: flex;
+  align-items: center;
+  gap: 0.32rem;
+  align-self: center;
+}
+.agent__ctx-bar {
+  width: 44px;
+  height: 4px;
+  border-radius: 2px;
+  background: var(--surface-2);
+  overflow: hidden;
+}
+.agent__ctx-fill {
+  display: block;
+  height: 100%;
+  border-radius: 2px;
+  background: var(--accent-teal);
+  transition: width 0.4s ease;
+}
+.agent__ctx-fill--warn {
+  background: var(--status-amber);
+}
+.agent__ctx-fill--full {
+  background: var(--status-red);
+}
+.agent__ctx-label {
+  font-size: 0.55rem;
+  color: var(--text-faint);
+  font-family: var(--font-mono);
+}
+/* Per-row time readout — its own line under the head, indented past the status
+   dot: live run elapsed / rough estimate + a thin progress bar that warms amber
+   once over estimate (or the frozen "last run …"), plus the total alive clock. */
+.agent__timer {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  margin: 0.15rem 0 0 1.15rem;
+  font-size: 0.55rem;
+  color: var(--text-faint);
+}
+.agent__timer-run {
+  font-family: var(--font-mono);
+  color: var(--status-green);
+}
+.agent__timer-run--over {
+  color: var(--status-amber);
+}
+.agent__timer-bar {
+  position: relative;
+  width: 56px;
+  height: 4px;
+  border-radius: 2px;
+  background: var(--surface-2);
+  overflow: hidden;
+}
+.agent__timer-fill {
+  display: block;
+  height: 100%;
+  border-radius: 2px;
+  background: var(--status-green);
+  transition: width 0.9s linear;
+}
+.agent__timer-fill--over {
+  background: var(--status-amber);
+}
+/* Tick at the central (median) estimate inside the p25–p75 band bar. */
+.agent__timer-mark {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  background: var(--text-faint);
+  opacity: 0.7;
+}
+.agent__timer-alive {
+  font-family: var(--font-mono);
+  color: var(--text-faint);
+}
+.agent__kill {
+  flex: 0 0 auto;
+  border: none;
+  background: none;
+  color: var(--text-faint);
+  cursor: pointer;
+  font-size: 0.8rem;
+  line-height: 1;
+  padding: 0 0.1rem;
+}
+.agent__kill:hover:not(:disabled) {
+  color: var(--status-red);
+}
+.agent__kill:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+/* Per-row action cluster: PR link · sync · ship · speak · expand · cleanup · kill. */
+.agent__actions {
+  margin-left: 0.25rem;
+  display: flex;
+  align-items: center;
+  gap: 0.1rem;
+  flex: 0 0 auto;
+}
+.agent__act {
+  border: none;
+  background: none;
+  color: var(--text-faint);
+  cursor: pointer;
+  font-size: 0.8rem;
+  line-height: 1;
+  padding: 0 0.18rem;
+  text-decoration: none;
+}
+.agent__act:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+.agent__sync:hover:not(:disabled),
+.agent__pr:hover {
+  color: var(--accent-teal);
+}
+.agent__ship:hover:not(:disabled) {
+  color: var(--status-green);
+}
+/* The agent signaled ATLAS:READY-TO-SHIP — pulse the ship button green so the
+   eye lands on it; ATLAS:SHIPPED swaps it for a quiet check (action done). */
+.agent__ship--ready {
+  color: var(--status-green);
+  animation: ship-ready 1.6s ease-in-out infinite;
+}
+@keyframes ship-ready {
+  0%,
+  100% {
+    opacity: 1;
+    text-shadow: none;
+  }
+  50% {
+    opacity: 0.55;
+    text-shadow: 0 0 6px var(--status-green);
+  }
+}
+.agent__shipped {
+  color: var(--status-green);
+  cursor: default;
+}
+/* Waiting in the serial ship train: the ⤴ carries its 1-based queue position;
+   click cancels (removes it before it ships). */
+.agent__shipq {
+  color: var(--text-faint);
+}
+.agent__shipq:hover:not(:disabled) {
+  color: var(--status-red);
+}
+.agent__shipq-pos {
+  font-size: 0.6rem;
+  vertical-align: super;
+}
+/* At the front of the train, merging now — quiet green, no action. */
+.agent__ship--active {
+  color: var(--status-green);
+  cursor: default;
+}
+.agent__cleanup:hover:not(:disabled) {
+  color: var(--status-red);
+}
+/* While the graceful close runs (recap → Atlas ingest → merge), ⌦ becomes a
+   teal spinner — the "Atlas save in flight" tint, distinct from the destructive
+   red and the ship train's green. No action; the reaper drives it to done. */
+.agent__cleanup--saving {
+  color: var(--accent-teal);
+  cursor: default;
+}
+/* The abort-close ↩ — only shown while a graceful close runs. Tinted teal to
+   group with the in-flight spinner and stand out from the surrounding faint
+   icons (the operator needs to find it fast); the safe "keep it" direction, so
+   it brightens — not reddens — on hover. */
+.agent__abort {
+  color: var(--accent-teal);
+}
+.agent__abort:hover:not(:disabled) {
+  color: var(--text);
+}
+.agent__output {
+  font-size: 0.76rem;
+  line-height: 1.4;
+  color: var(--text-dim);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+/* Expand toggle (▸/▾) → the full transcript pane. */
+.agent__expand {
+  background: none;
+  border: none;
+  color: var(--text-faint);
+  cursor: pointer;
+  font-size: 0.72rem;
+  line-height: 1;
+  padding: 0 0.25rem;
+}
+.agent__expand:hover {
+  color: var(--accent-teal);
+}
+/* Full-screen toggle (⛶). Tinted teal while active so it reads as "on" / the
+   exit affordance (Esc also exits). */
+.agent__fs:hover:not(:disabled),
+.agent__fs--active {
+  color: var(--accent-teal);
+}
+/* Live-app pane toggle (◧) — shown in full-screen for any dev agent (the pane
+   explains the slot even when empty). Tinted teal while the pane is shown, like
+   the full-screen toggle; dimmed when nothing is serving yet. */
+.agent__appbtn:hover:not(:disabled),
+.agent__appbtn--active {
+  color: var(--accent-teal);
+}
+.agent__appbtn--empty:not(:hover) {
+  opacity: 0.55;
+}
+/* App-ONLY full-screen button (▣) — shown whenever the agent is serving an app. */
+.agent__appfull:hover:not(:disabled) {
+  color: var(--accent-teal);
+}
+/* App-only full-screen overlay: just the agent's live app + a slim bar. Portaled
+   to <body> (like the transcript full-screen). The primary way to use the app on
+   mobile, where the side-by-side split is too cramped; a focus mode on desktop.
+   z-index above the transcript full-screen (120) — though the two are swapped,
+   never stacked. */
+.agent-app-full {
+  position: fixed;
+  inset: 0;
+  z-index: 130;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-900);
+  padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom)
+    env(safe-area-inset-left);
+}
+.agent-app-full__bar {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.45rem 0.7rem;
+  border-bottom: 1px solid var(--hairline);
+}
+.agent-app-full__title {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 600;
+  font-size: 0.85rem;
+  color: var(--text-bright);
+}
+.agent-app-full__tag {
+  flex: 0 0 auto;
+  font-size: 0.62rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+.agent-app-full__btn {
+  flex: 0 0 auto;
+  background: none;
+  border: none;
+  color: var(--text-dim);
+  cursor: pointer;
+  font-size: 1rem;
+  line-height: 1;
+  padding: 0.2rem 0.4rem;
+  text-decoration: none;
+}
+.agent-app-full__btn:hover {
+  color: var(--accent-teal);
+}
+.agent-app-full__frame {
+  flex: 1 1 auto;
+  width: 100%;
+  border: none;
+  background: var(--bg-900);
+}
+/* Full-screen viewer: one agent's transcript + controls take over the whole
+   viewport. Portaled to <body> (the card's backdrop-filter would otherwise trap
+   a position:fixed child), so this is a true full-screen takeover — same on
+   mobile. The transcript flexes to fill, head pinned top, prompt pinned bottom;
+   safe-area insets keep it clear of the notch / home indicator. */
+.agent--fullscreen {
+  position: fixed;
+  inset: 0;
+  z-index: 120;
+  margin: 0;
+  border: none;
+  border-radius: 0;
+  background: var(--bg-900);
+  padding: calc(0.8rem + env(safe-area-inset-top)) calc(0.9rem + env(safe-area-inset-right))
+    calc(0.8rem + env(safe-area-inset-bottom)) calc(0.9rem + env(safe-area-inset-left));
+  overflow: hidden;
+}
+.agent--fullscreen .agent__transcript {
+  flex: 1 1 auto;
+  max-height: none;
+}
+/* Desktop full-screen only: the agent's terminal is a fixed 80-column grid
+   (tmux sessions spawn at the default 80 cols — see api/src/agent-local.mjs), so
+   the captured lines are hard-wrapped before they reach us; we can't add
+   characters per line here. What we CAN do is make that block a bit bigger and
+   pin it to the LEFT (at its natural ~80-col width, not stretched across the
+   pane), leaving the right side free for a future side-by-side surface (e.g. a
+   dev-agent-spawned Streamlit panel). The max-width keeps the border from ever
+   crossing the screen's midline: it hugs the 80-col terminal when that's
+   narrower than half (wide displays), and caps at half otherwise (smaller
+   windows, where the overflow then wraps inside the panel). Gated above the
+   640px mobile breakpoint — on a phone 80 cols already fills the screen, so
+   mobile full-screen is left untouched. */
+@media (min-width: 641px) {
+  .agent--fullscreen .agent__transcript {
+    align-self: flex-start;
+    max-width: 50%;
+    font-size: 0.8rem;
+  }
+  /* The head spans the whole viewport, so margin-left:auto on the status label
+     pushes the status + action bar to the far-RIGHT screen edge — visually
+     detached from the transcript pinned to the left half. Cap the head at the
+     same half-width as the transcript so the bar right-aligns to the
+     transcript's right edge (the screen midline) instead of floating across the
+     empty right half. */
+  .agent--fullscreen .agent__head {
+    max-width: 50%;
+  }
+}
+/* Full-screen split view: when the agent is serving a live app (Streamlit etc.)
+   and the app pane is shown, the transcript and the app iframe share the middle
+   row — head stays pinned above, prompt below (the wrap is one more flex child of
+   the .agent column). The wrap fills the freed vertical space. On mobile it
+   stacks (transcript on top, app below); on desktop it's side-by-side 50/50 —
+   the app finally occupies the right half the transcript was left-pinned away
+   from. The .agent__split-wrap selector out-specifies the left-pin cap above. */
+.agent--fullscreen .agent__split-wrap {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  gap: 0.6rem;
+  min-height: 0;
+}
+.agent--fullscreen .agent__split-wrap .agent__transcript {
+  min-width: 0;
+  min-height: 0;
+  max-width: none;
+}
+.agent--fullscreen .agent__app {
+  flex: 1 1 40%;
+  min-height: 0;
+  width: 100%;
+  border: 1px solid var(--hairline);
+  border-radius: 4px;
+  background: var(--bg-900);
+}
+/* Empty live-app slot: nothing is serving, so the pane explains where the app
+   must bind (port + base-path) instead of a broken iframe / silent absence. */
+.agent__app--empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1rem;
+}
+.agent__app-empty {
+  max-width: 30rem;
+  color: var(--text-dim);
+  font-size: 0.8rem;
+  line-height: 1.5;
+  text-align: center;
+}
+.agent__app-empty p {
+  margin: 0.4rem 0;
+}
+.agent__app-empty-title {
+  color: var(--text);
+  font-weight: 600;
+  margin-bottom: 0.5rem;
+}
+.agent__app-empty code {
+  font-family: var(--font-mono);
+  background: var(--bg-800);
+  border: 1px solid var(--hairline);
+  border-radius: 3px;
+  padding: 0 0.25rem;
+  color: var(--text);
+  white-space: nowrap;
+}
+.agent__app-empty-hint {
+  color: var(--text-faint);
+  font-style: italic;
+}
+@media (min-width: 641px) {
+  .agent--fullscreen .agent__split-wrap {
+    flex-direction: row;
+  }
+  .agent--fullscreen .agent__split-wrap .agent__transcript {
+    flex: 1 1 50%;
+    align-self: stretch;
+    font-size: 0.8rem;
+  }
+  .agent--fullscreen .agent__split-wrap .agent__app {
+    flex: 1 1 50%;
+    height: auto;
+  }
+}
+/* The collapse toggle (▾/▸) is meaningless full-screen — the transcript is
+   always shown there. */
+.agent--fullscreen .agent__expand {
+  display: none;
+}
+/* When a card is expanded inline, the transcript is what you opened it for — so
+   pull it directly under the head and drop the four metadata strips (run timer,
+   sub-agents, jobs, live stats) BELOW it via flex order. A very active agent's
+   strips then can never bury the TUI, however many tiles/jobs it has. The strips
+   stay above the one-line output when collapsed; full-screen keeps its own pinned
+   layout. (.agent is a flex column; these strips are display-only, so reordering
+   them past the transcript doesn't disturb tab order.) */
+.agent--expanded:not(.agent--fullscreen) .agent__timer,
+.agent--expanded:not(.agent--fullscreen) .agent__subs,
+.agent--expanded:not(.agent--fullscreen) .agent__jobs,
+.agent--expanded:not(.agent--fullscreen) .agent__stats {
+  order: 1;
+}
+.agent__transcript {
+  margin: 0;
+  /* One tall reading window everywhere — the phone view's 60vh, also on
+     desktop, so scrollback is readable without going full-screen. */
+  max-height: 60vh;
+  overflow-y: auto;
+  /* Own compositing layer. The card (`.glass`) carries a backdrop-filter, and
+     WebKit/Blink cache that layer's raster — when the transcript streams new
+     text into it, the layer isn't re-rastered, so the new output mutates the
+     DOM but stays unpainted until a reflow forces it (toggling full-screen,
+     which portals this <pre> out of the card and back, is what made it
+     "reappear"). It used to repaint by luck: the viewer snapped scrollTop to the
+     bottom on every poll, and that scroll forced the repaint — until that snap
+     was gated on being pinned to the bottom. Painting this pane on its own layer
+     decouples it from the card's cached layer, so content-only updates repaint
+     on their own regardless of scroll position. */
+  transform: translateZ(0);
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: var(--font-mono);
+  font-size: 0.66rem;
+  line-height: 1.35;
+  color: var(--text-dim);
+  background: rgba(0, 0, 0, 0.25);
+  border: 1px solid var(--hairline);
+  border-radius: 4px;
+  padding: 0.5rem 0.6rem;
+}
+/* Faint (ESC[2m) runs from the pane — e.g. Claude Code's input-box placeholder.
+   Muted so suggestion text doesn't read as a real, pending message. */
+.agent__dim {
+  opacity: 0.45;
+}
+/* Full-history view (the 📜 toggle): the complete conversation reconstructed from
+   the agent's on-disk .jsonl transcript(s), rendered as chat bubbles instead of
+   the live tmux tail. Shares the transcript's scroll window + own-layer repaint. */
+.agent__history {
+  margin: 0;
+  max-height: 60vh;
+  overflow-y: auto;
+  transform: translateZ(0);
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  font-size: 0.72rem;
+  line-height: 1.4;
+  background: rgba(0, 0, 0, 0.25);
+  border: 1px solid var(--hairline);
+  border-radius: 4px;
+  padding: 0.6rem;
+}
+.agent__msg {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  max-width: 92%;
+  padding: 0.4rem 0.55rem;
+  border-radius: 6px;
+  border: 1px solid var(--hairline);
+}
+.agent__msg--user {
+  align-self: flex-end;
+  background: rgba(80, 130, 200, 0.16);
+  border-color: rgba(80, 130, 200, 0.35);
+}
+.agent__msg--assistant {
+  align-self: flex-start;
+  background: rgba(255, 255, 255, 0.04);
+}
+/* An Atlas orchestrator steered this agent: the injected prompt lands as a user
+   turn, so keep it right-aligned like the operator's own input but swap the
+   operator blue for Atlas gold (the constellation's #d2a64f lineage hue) so it
+   reads as "not me". Follows --user so it overrides the tint. */
+.agent__msg--steered {
+  background: rgba(210, 166, 79, 0.16);
+  border-color: rgba(210, 166, 79, 0.42);
+}
+.agent__msg-from {
+  font-size: 0.6rem;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  /* Theme-aware gold: the dark-theme value is the same #d2a64f as before, but the
+     light "paper" themes swap in their darker --status-amber (#bf8c34 / #b07d2a) so
+     the caption reads on cream instead of washing out against the gold-tint bubble. */
+  color: var(--status-amber);
+  opacity: 0.85;
+}
+/* A resolved choice menu echoed back into the chat: the TUI menu + the answer
+   never land on disk, so after a pick we record it here (see AnsweredMenu) so
+   there's a visible trace of what was asked and what was chosen. Amber, left-
+   aligned like an assistant turn — reads as the resolution of the question. */
+.agent__msg--answered {
+  align-self: flex-start;
+  background: rgba(210, 166, 79, 0.1);
+  border-color: rgba(210, 166, 79, 0.4);
+}
+.agent__answered-q {
+  color: var(--text-dim);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.agent__answered-pick {
+  color: var(--text-bright);
+  font-weight: 600;
+}
+.agent__msg-text {
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--text);
+}
+/* Assistant bubbles render their markdown through the shared wiki renderer
+   (lib/markdown.tsx → .prose). Compact its reader-scale styles to bubble scale:
+   inherit the history view's font, tighten block margins, and size headings in
+   em so the hierarchy survives at chat size. */
+.agent__msg-md {
+  min-width: 0;
+  word-break: break-word;
+}
+.agent__msg-md .prose {
+  font-size: inherit;
+  line-height: inherit;
+}
+.agent__msg-md .prose > :last-child {
+  margin-bottom: 0;
+}
+.agent__msg-md .prose__h {
+  margin: 0.55rem 0 0.2rem;
+}
+.agent__msg-md .prose__h1 {
+  font-size: 1.25em;
+}
+.agent__msg-md .prose__h2 {
+  font-size: 1.15em;
+}
+.agent__msg-md .prose__h3 {
+  font-size: 1.05em;
+}
+.agent__msg-md .prose__h4,
+.agent__msg-md .prose__h5,
+.agent__msg-md .prose__h6 {
+  font-size: 1em;
+}
+.agent__msg-md .prose__p,
+.agent__msg-md .prose__ul,
+.agent__msg-md .prose__ol {
+  margin: 0.3rem 0;
+}
+/* Preflight strips ul markers and .prose__ul never re-adds them (a wiki-reader
+   quirk we leave alone there); in a compact bubble a marker-less list reads as
+   flat text, so restore discs here only. */
+.agent__msg-md .prose__ul {
+  list-style: disc;
+}
+.agent__msg-md .prose__pre {
+  margin: 0.4rem 0;
+  padding: 0.45rem 0.6rem;
+  border-radius: 6px;
+}
+.agent__msg-md .prose__quote {
+  margin: 0.4rem 0;
+}
+.agent__msg-md .prose__table {
+  margin: 0.4rem 0;
+}
+.agent__msg-md .prose__table th,
+.agent__msg-md .prose__table td {
+  padding: 0.25rem 0.45rem;
+}
+.agent__msg-md .prose__hr {
+  margin: 0.5rem 0;
+}
+.agent__msg-tools {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.3rem;
+}
+.agent__msg-tool {
+  font-family: var(--font-mono);
+  font-size: 0.64rem;
+  color: var(--text-dim);
+  background: rgba(0, 0, 0, 0.25);
+  border: 1px solid var(--hairline);
+  border-radius: 4px;
+  padding: 0.05rem 0.35rem;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.agent__msg-tool-arg {
+  opacity: 0.6;
+}
+.agent__history-note {
+  align-self: center;
+  font-size: 0.64rem;
+  color: var(--text-dim);
+  opacity: 0.85;
+  padding: 0.15rem 0;
+}
+.agent__history-note--err {
+  color: var(--danger);
+  opacity: 1;
+}
+/* Chat view's "turn in progress" pulse — the on-disk transcript only gains a
+   message when a block completes, so this bridges the gap the TUI spinner fills. */
+.agent__history-live {
+  animation: agent-hist-pulse 1.6s ease-in-out infinite;
+}
+@keyframes agent-hist-pulse {
+  50% {
+    opacity: 0.3;
+  }
+}
+/* Pending choice menu as native buttons (the TUI menu never reaches the .jsonl;
+   the sessions poll ships its parsed options instead). Amber like the rest of
+   the needs-decision affordances. */
+.agent__history-menu {
+  align-self: stretch;
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  margin-top: 0.2rem;
+  padding: 0.5rem 0.6rem;
+  border: 1px solid rgba(210, 166, 79, 0.45);
+  border-radius: 6px;
+  background: rgba(210, 166, 79, 0.08);
+}
+.agent__history-menu-title {
+  color: var(--status-amber);
+  font-weight: 700;
+  letter-spacing: 0.03em;
+}
+/* The prompt a choice menu is asking, shown above its option buttons so the
+   operator sees WHAT they're answering (not just bare Yes/No). */
+.agent__history-menu-q {
+  color: var(--text);
+  white-space: pre-wrap;
+  word-break: break-word;
+  margin-bottom: 0.1rem;
+}
+.agent__history-opt {
+  display: block;
+  text-align: left;
+  font: inherit;
+  color: var(--text);
+  background: rgba(0, 0, 0, 0.2);
+  border: 1px solid var(--hairline);
+  border-radius: 5px;
+  padding: 0.3rem 0.5rem;
+  cursor: pointer;
+}
+.agent__history-opt:hover:not(:disabled) {
+  border-color: var(--status-amber);
+  color: var(--text-bright);
+}
+.agent__history-opt:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+.agent__history-opt--hl {
+  border-color: rgba(210, 166, 79, 0.55);
+  background: rgba(210, 166, 79, 0.12);
+}
+.agent__history-opt-n {
+  color: var(--status-amber);
+  font-family: var(--font-mono);
+  margin-right: 0.15rem;
+}
+.agent__hist--active {
+  color: var(--accent);
+}
+.agent--fullscreen .agent__history {
+  flex: 1 1 auto;
+  max-height: none;
+}
+/* Desktop full-screen: bump the chat view like the terminal's 0.8rem — the
+   card-scale 0.72rem bubbles read small on a monitor once the pane has the
+   whole screen. Mobile keeps the card size (space is the constraint there). */
+@media (min-width: 641px) {
+  .agent--fullscreen .agent__history {
+    font-size: 0.85rem;
+  }
+}
+.agent--fullscreen .agent__split-wrap .agent__history {
+  min-width: 0;
+  min-height: 0;
+}
+/* Respond toolbar — shown only while the agent is idle/awaiting your input.
+   Drives its TUI menu (arrow-select / accept / cancel) without typing. */
+.agent__keys {
+  display: flex;
+  align-items: center;
+  gap: 0.3rem;
+}
+.agent__keys-label {
+  font-size: 0.55rem;
+  color: var(--status-amber);
+  margin-right: 0.15rem;
+}
+.agent__keys-bolt {
+  color: var(--status-amber);
+}
+/* A real interactive menu/autocomplete is up — make the respond toolbar glow so
+   you know there's something to act on (vs. plain idle, where it's available but
+   quiet). */
+.agent--menu .agent__keys {
+  padding: 0.15rem 0.4rem;
+  border-radius: 7px;
+  background: rgba(210, 166, 79, 0.1);
+  animation: agent-menu-glow 1.8s ease-in-out infinite;
+}
+@keyframes agent-menu-glow {
+  0%, 100% { box-shadow: 0 0 0 1px rgba(210, 166, 79, 0.3), 0 0 8px rgba(210, 166, 79, 0.18); }
+  50% { box-shadow: 0 0 0 1px rgba(210, 166, 79, 0.5), 0 0 14px rgba(210, 166, 79, 0.35); }
+}
+/* Held-back send: shown when you type into an open choice menu instead of
+   answering it. Amber like the rest of the menu affordances, sat just above the
+   prompt input, with the explicit "dismiss & send" escape hatch. */
+.agent__menu-warn {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  flex-wrap: wrap;
+  margin: 0.15rem 0;
+  padding: 0.3rem 0.5rem;
+  border: 1px solid rgba(210, 166, 79, 0.5);
+  border-radius: 7px;
+  background: rgba(210, 166, 79, 0.1);
+}
+.agent__menu-warn-text {
+  flex: 1 1 12rem;
+  font-size: 0.7rem;
+  line-height: 1.4;
+  color: var(--text-dim);
+}
+.agent__menu-warn-send {
+  border: 1px solid var(--status-amber);
+  background: var(--bg-800);
+  color: var(--status-amber);
+  cursor: pointer;
+  font-size: 0.72rem;
+  padding: 0.15rem 0.55rem;
+  border-radius: 6px;
+  white-space: nowrap;
+}
+.agent__menu-warn-send:hover:not(:disabled) {
+  color: var(--text-bright);
+}
+.agent__menu-warn-send:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+.agent__menu-warn-x {
+  border: none;
+  background: none;
+  color: var(--text-faint);
+  cursor: pointer;
+  font-size: 0.8rem;
+  line-height: 1;
+  padding: 0 0.2rem;
+}
+.agent__menu-warn-x:hover {
+  color: var(--text-bright);
+}
+.agent__key {
+  border: 1px solid var(--hairline);
+  background: var(--bg-800);
+  color: var(--text-dim);
+  cursor: pointer;
+  font-size: 0.72rem;
+  line-height: 1.4;
+  padding: 0.1rem 0.5rem;
+  border-radius: 6px;
+}
+.agent__key:hover:not(:disabled) {
+  border-color: var(--status-amber);
+  color: var(--text-bright);
+}
+.agent__key--accept {
+  border-color: var(--status-amber);
+  color: var(--status-amber);
+}
+.agent__key:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+.agent__prompt {
+  display: flex;
+  gap: 0.5rem;
+}
+.agent__prompt .capture__input--sm {
+  flex: 1;
+}
+/* Attach-image button (a label fronting a hidden file input). */
+.agent__attach {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 0.5rem;
+  border: 1px solid var(--border);
+  border-radius: 0.4rem;
+  cursor: pointer;
+  font-size: 0.9rem;
+  line-height: 1;
+  user-select: none;
+}
+.agent__attach:hover {
+  border-color: var(--accent-dim);
+}
+.agent__attach--full {
+  opacity: 0.4;
+  cursor: default;
+}
+/* Mic button reuses the attach chip's frame; reset the <button> chrome, and turn
+   red while recording so it's obvious the mic is live. */
+.agent__mic {
+  background: none;
+  color: inherit;
+  font-family: inherit;
+}
+.agent__mic:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+.agent__mic--rec {
+  border-color: var(--status-red);
+  color: var(--status-red);
+}
+/* Spinner shown on the 🔊 speak button (press → audio plays) and the 🎤 button
+   while a clip is transcribing. Inherits the button's text colour. */
+.agent__spin {
+  display: inline-block;
+  width: 0.72em;
+  height: 0.72em;
+  border: 2px solid currentColor;
+  border-right-color: transparent;
+  border-radius: 50%;
+  vertical-align: -0.1em;
+  animation: agent-spin 0.6s linear infinite;
+}
+@keyframes agent-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+/* Pending file attachments shown above the prompt input. */
+.agent__imgs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  margin-bottom: 0.4rem;
+}
+.agent__img {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  max-width: 14rem;
+  padding: 0.15rem 0.35rem;
+  border: 1px solid var(--border);
+  border-radius: 0.4rem;
+  font-size: 0.75rem;
+}
+.agent__img-thumb {
+  width: 1.5rem;
+  height: 1.5rem;
+  object-fit: cover;
+  border-radius: 0.2rem;
+}
+/* Non-image attachments (CSV, text, …) get a generic glyph in the thumb box. */
+.agent__img-thumb--file {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 1rem;
+}
+.agent__img-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.agent__img-rm {
+  border: none;
+  background: none;
+  color: var(--text-dim);
+  cursor: pointer;
+  font-size: 0.9rem;
+  line-height: 1;
+  padding: 0;
+}
+.agent__img-rm:hover {
+  color: var(--status-red);
+}
+/* "Interrupt & send" — the cut-in action while the agent is generating. Tinted
+   amber (a caution: it stops the current turn) to set it apart from plain Send/Queue. */
+.btn--interrupt {
+  color: var(--status-amber);
+  border-color: rgba(210, 166, 79, 0.4);
+}
+/* The pending queued-prompt chip, shown above the input until it flushes at the
+   end of the current turn (or you cancel it with ×). */
+.agent__queued {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  margin-bottom: 0.4rem;
+  padding: 0.15rem 0.4rem;
+  border: 1px dashed rgba(210, 166, 79, 0.4);
+  border-radius: 0.4rem;
+  font-size: 0.75rem;
+}
+.agent__queued-label {
+  color: var(--status-amber);
+  white-space: nowrap;
+}
+.agent__queued-text {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-dim);
+}
+.agent__queued-send {
+  border: none;
+  background: none;
+  color: var(--text-dim);
+  cursor: pointer;
+  font-size: 0.8rem;
+  line-height: 1;
+  padding: 0;
+}
+.agent__queued-send:hover {
+  color: var(--status-amber);
+}
+.agent__queued-rm {
+  border: none;
+  background: none;
+  color: var(--text-dim);
+  cursor: pointer;
+  font-size: 0.9rem;
+  line-height: 1;
+  padding: 0;
+}
+.agent__queued-rm:hover {
+  color: var(--status-red);
+}
+/* Scheduled (future-time) variant of the queued chip — a cyan tint sets it apart
+   from the amber "queued for next idle" chips. Used for scheduled prompts (on a
+   row) and scheduled spawns/chats (a pending list under a spawn form). */
+.agent__queued--sched {
+  border-color: rgba(34, 211, 238, 0.4);
+}
+.agent__queued--sched .agent__queued-label {
+  color: var(--accent-cyan, var(--accent));
+}
+.agents__scheduled {
+  display: flex;
+  flex-direction: column;
+}
+
+/* --- Schedule-for-later button + popover ------------------------- */
+.sched {
+  position: relative;
+  display: inline-flex;
+}
+.btn--sched {
+  padding: 0.4rem 0.55rem;
+  line-height: 1;
+}
+.btn--sched-open,
+.btn--sched.btn--sched-open {
+  color: var(--accent-cyan, var(--accent));
+  border-color: var(--accent-cyan, var(--hairline-strong));
+}
+.sched__pop {
+  position: absolute;
+  bottom: calc(100% + 0.4rem);
+  right: 0;
+  z-index: 40;
+  width: max-content;
+  max-width: min(20rem, 80vw);
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  padding: 0.55rem;
+  border: 1px solid var(--hairline-strong);
+  border-radius: 0.5rem;
+  background: var(--surface-2, var(--surface));
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+}
+.sched__presets {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.3rem;
+}
+.sched__preset {
+  font-family: var(--font-display);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  font-size: 0.55rem;
+  padding: 0.25rem 0.45rem;
+  border-radius: 6px;
+  border: 1px solid var(--hairline);
+  background: var(--surface);
+  color: var(--text-dim);
+  cursor: pointer;
+}
+.sched__preset:hover {
+  color: var(--text-bright);
+  border-color: var(--hairline-strong);
+}
+.sched__input {
+  width: 100%;
+}
+.sched__err {
+  color: var(--status-red);
+  font-size: 0.7rem;
+}
+.sched__actions {
+  display: flex;
+  justify-content: flex-end;
+}
+/* "Ship N ready" — appears on a card when ≥2 agents have signaled
+   READY-TO-SHIP; enqueues them all into the serial ship train at once. */
+.agents__shipall {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-bottom: 0.5rem;
+  flex-wrap: wrap;
+}
+.agents__shipall-hint {
+  font-size: 0.72rem;
+  color: var(--text-faint);
+}
+
+/* ================================================================= *
+ * Mobile / touch (≤640px). ADDITIVE ONLY — every rule above keeps the
+ * desktop layout unchanged; this block just re-flows for a narrow,
+ * finger-driven screen:
+ *   1. Real ~44px tap targets (Apple's minimum) on the icon buttons.
+ *   2. No iOS focus-zoom — text inputs forced to 16px.
+ *   3. The Dev Agents card wraps into clean lines instead of cramming
+ *      task · branch · repo · meter · status · 5 buttons onto one row.
+ *   4. No horizontal pan — cards shrink to their column; long tokens wrap.
+ *   5. Gmail/News subjects get room instead of wrapping a word at a time.
+ * Safe-area insets keep content clear of the notch / home indicator
+ * when launched standalone from the home screen.
+ * ================================================================= */
+@media (max-width: 640px) {
+  /* iOS Safari zooms the page whenever a focused input's font is <16px.
+     Pin every dashboard text input to 16px so focusing never zooms. */
+  .capture__input,
+  .capture__input--sm {
+    font-size: 16px;
+  }
+
+  /* Nothing should make the page pan sideways. Grid/flex children default to
+     min-width:auto, so one long unbreakable token (an email, a location, a
+     branch name) can force a card wider than its column and the whole grid
+     wider than the screen. Let every card shrink to its track, and clamp the
+     document as a backstop. */
+  html,
+  body {
+    overflow-x: hidden;
+  }
+  .cc-grid > * {
+    min-width: 0;
+  }
+
+  /* Keep the scrollable grid clear of the home indicator / rounded corners. */
+  .cc-grid {
+    padding-bottom: calc(3rem + env(safe-area-inset-bottom));
+    padding-left: max(1rem, env(safe-area-inset-left));
+    padding-right: max(1rem, env(safe-area-inset-right));
+  }
+
+  /* Comfortable tap height on every primary button. */
+  .btn {
+    min-height: 2.75rem;
+  }
+
+  /* --- Dev Agents card -------------------------------------------- */
+  /* Spawn form: full-width inputs + button, stacked. */
+  .agents__spawn {
+    flex-wrap: wrap;
+  }
+  .agents__spawn .capture__input--sm,
+  .agents__spawn .btn--approve {
+    flex: 1 1 100%;
+  }
+  /* The task field is wrapped in a .micfield (for the dictation mic), so the
+     full-width rule above — keyed on .capture__input--sm — misses the wrapper and
+     it stays a narrow flex:1 child squeezed beside the dropdowns. Span the row so
+     the text bar (and the overlaid mic) is fully visible. */
+  .agents__spawn .micfield {
+    flex: 1 1 100%;
+  }
+  /* The two dropdowns share one row on mobile. */
+  .agents__spawn .agents__select {
+    flex: 1 1 auto;
+    width: auto;
+  }
+
+  /* Header wraps: task takes the line, metadata trails/wraps, and the
+     action cluster drops to its own full-width row of big buttons. */
+  .agent__head {
+    flex-wrap: wrap;
+    align-items: center;
+    row-gap: 0.4rem;
+  }
+  .agent__task {
+    flex: 1 1 auto;
+    font-size: 0.95rem;
+  }
+  /* Full-screen viewer: the spawn message (the task) can be a whole paragraph,
+     and letting it wrap freely in the header eats the viewport. Clamp it to
+     two lines and let it scroll in place — the freed height goes to the
+     transcript (the Claude Code TUI), which flexes to fill. */
+  .agent--fullscreen .agent__task {
+    line-height: 1.35;
+    max-height: 2.7em;
+    overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+  .agent__actions {
+    flex: 1 0 100%;
+    justify-content: flex-end;
+    margin-left: 0;
+    gap: 0.15rem;
+  }
+  .agent__act {
+    min-width: 2.75rem;
+    min-height: 2.75rem;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 1.05rem;
+    padding: 0.4rem;
+  }
+
+  /* Respond toolbar: wrap, with finger-sized keys. */
+  .agent__keys {
+    flex-wrap: wrap;
+    gap: 0.4rem;
+  }
+  .agent__key {
+    min-height: 2.75rem;
+    font-size: 0.95rem;
+    padding: 0.5rem 0.9rem;
+  }
+
+  /* Prompt form: input on its own top line, attach · mic · Send beneath. */
+  .agent__prompt {
+    flex-wrap: wrap;
+  }
+  .agent__prompt .capture__input--sm {
+    order: -1;
+    flex: 1 1 100%;
+  }
+  .agent__attach,
+  .agent__mic {
+    min-width: 2.75rem;
+    min-height: 2.75rem;
+    font-size: 1.1rem;
+  }
+  .agent__prompt .btn {
+    flex: 1 1 auto;
+  }
+
+  /* Readable transcript + last-line output on a small screen. */
+  .agent__output {
+    font-size: 0.85rem;
+  }
+  .agent__transcript {
+    font-size: 0.78rem;
+  }
+  /* The metadata strips (timer line, sub-agents, jobs, live stats) all stack
+     above the transcript; on a phone their combined height — grown again by the
+     live-stats tiles — buries the TUI. Tighten each strip's cap so the stack
+     stays short and the transcript is in reach (they scroll internally past it). */
+  .agent__subs,
+  .agent__jobs,
+  .agent__stats {
+    max-height: 3.4rem;
+  }
+
+  /* --- Gmail / News rows ------------------------------------------ */
+  /* Subject/title was getting crushed to one word per line because the
+     sender · account · Reply · Delete all shared the row. Let the row wrap,
+     keep the title at ≥60% of the width (so it reads in full lines), and the
+     metadata + action buttons drop beneath it. */
+  .news-item__row {
+    flex-wrap: wrap;
+    row-gap: 0.4rem;
+  }
+  .news-item__title {
+    flex: 1 1 60%;
+  }
+  /* Reply/Delete wrap to their own line, flush right — same spot every row. */
+  .news-item__actions {
+    margin-left: auto;
+  }
+
+  /* --- Calendar / agenda ------------------------------------------ */
+  /* Long tokens (attendee emails, locations) wrap instead of overflowing. */
+  .agenda__body {
+    min-width: 0;
+  }
+  .agenda__title,
+  .agenda__loc {
+    overflow-wrap: anywhere;
+  }
+}
+.prose__ul {
+  margin: 0.5rem 0;
+  padding-left: 1.2rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+.prose__ul li::marker {
+  color: var(--accent-dim);
+}
+.prose__ol {
+  margin: 0.5rem 0;
+  padding-left: 1.4rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  list-style: decimal;
+}
+.prose__ol li::marker {
+  color: var(--accent-dim);
+  font-family: var(--font-mono);
+  font-size: 0.85em;
+}
+
+/* {timer: …} recipe-step countdown chip (markdown.tsx → TimerChip) */
+.timer {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.15rem;
+  margin: 0 0.15rem;
+  vertical-align: baseline;
+}
+.timer__main {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.08rem 0.5rem;
+  border: 1px solid var(--hairline-strong);
+  border-radius: 999px;
+  background: var(--surface-2);
+  color: var(--accent);
+  font-family: var(--font-mono);
+  font-size: 0.82em;
+  line-height: 1.5;
+  cursor: pointer;
+  transition: border-color 160ms ease, box-shadow 160ms ease, color 160ms ease;
+}
+.timer__main:hover {
+  border-color: var(--accent);
+  box-shadow: 0 0 12px var(--glow-cyan);
+}
+.timer__icon {
+  font-size: 0.7em;
+  opacity: 0.85;
+}
+.timer__time {
+  font-weight: 500;
+  letter-spacing: 0.02em;
+}
+.timer--running .timer__main {
+  border-color: var(--accent);
+  box-shadow: 0 0 12px var(--glow-cyan);
+}
+.timer--done .timer__main {
+  color: var(--accent-teal);
+  border-color: rgba(45, 212, 191, 0.5);
+  box-shadow: none;
+}
+.timer__reset {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.2rem;
+  height: 1.2rem;
+  padding: 0;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--text-faint);
+  font-size: 0.9em;
+  cursor: pointer;
+  transition: color 160ms ease;
+}
+.timer__reset:hover {
+  color: var(--text-bright);
+}
+
+/* --- Recipe view (RecipeView.tsx) ------------------------------- */
+.recipe {
+  display: flex;
+  flex-direction: column;
+  gap: 1.1rem;
+}
+
+/* Reading surface: anything opened in the note reader — recipes AND regular
+ * wiki/markdown notes, both vaults — renders dark-on-warm-"paper" for
+ * readability, independent of the app theme. Scoping the palette to the
+ * reader's DIRECT note content re-colors every child (text, wikilinks, timer
+ * chips, nutrition) without touching the rest of the (dark, glanceable)
+ * dashboard. The `>` keeps a recipe's nested Notes markdown from getting its
+ * own card-within-a-card. */
+.reader__body > .recipe,
+.reader__body > .task,
+.reader__body > .prose {
+  --surface: rgba(60, 50, 38, 0.05);
+  --surface-2: #efe7d8;
+  --hairline: rgba(60, 50, 38, 0.14);
+  --hairline-strong: rgba(60, 50, 38, 0.32);
+  --text-bright: #221d17;
+  --text: #38322a;
+  --text-dim: #6a6155;
+  --text-faint: #9a9183;
+  --accent: #b8461f;
+  --accent-dim: #9a3412;
+  --accent-teal: #15803d;
+  --glow-cyan: rgba(184, 70, 31, 0.1);
+  color: var(--text);
+  background: #f7f3ea;
+  border-radius: 12px;
+  padding: 1.5rem 1.6rem 1.7rem;
+}
+/* Warm the few hardcoded (cool) accents so they sit right on paper. */
+.reader__body .wikilink {
+  border-bottom-color: rgba(184, 70, 31, 0.45);
+}
+.reader__body .wikilink--static {
+  color: var(--text-dim);
+  border-bottom-color: rgba(60, 50, 38, 0.3);
+}
+.reader__body .prose__code {
+  background: rgba(60, 50, 38, 0.06);
+}
+/* Atlas task note (TaskView) — typed frontmatter shown above the body. */
+.task__meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.4rem;
+  margin-bottom: 0.55rem;
+}
+.task__status {
+  font-size: 0.58rem;
+  font-weight: 700;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  padding: 0.18rem 0.5rem;
+  border-radius: 999px;
+  background: var(--surface-2);
+  color: var(--text);
+}
+.task__status--doing {
+  background: #d3e3fb;
+  color: #1e3a5f;
+}
+.task__status--next {
+  background: #e8e1d0;
+  color: #4a3f2a;
+}
+.task__status--waiting {
+  background: #f0e0cd;
+  color: #6b4a2a;
+}
+.task__status--done {
+  background: #cfe9d6;
+  color: #1f5132;
+}
+.task__status--inbox {
+  background: #e7e2d6;
+  color: #5a5346;
+}
+/* Editable status — a segmented control (Atlas tasks) that moves the task to
+   another column on tap; the active segment carries that column's colour. This
+   is the move path on touch, where the board's drag-and-drop (mouse-only) can't
+   fire. Available in the reader on desktop too, alongside the board drag. */
+.task__statusbar {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 0.25rem;
+  align-items: center;
+}
+.task__status-btn {
+  font-family: inherit;
+  font-size: 0.58rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  padding: 0.24rem 0.55rem;
+  border-radius: 999px;
+  border: 1px solid var(--hairline);
+  background: transparent;
+  color: var(--text-dim);
+  cursor: pointer;
+  transition: color 140ms ease, background 140ms ease, border-color 140ms ease;
+}
+.task__status-btn:hover:not(:disabled):not(.task__status-btn--active) {
+  color: var(--text-bright);
+  border-color: var(--hairline-strong);
+}
+.task__status-btn:disabled {
+  cursor: default;
+}
+/* Active = the task's current column, filled with that column's status colour
+   (mirrors the read-only .task__status--* chips above). */
+.task__status-btn--active {
+  border-color: transparent;
+  cursor: default;
+}
+.task__status-btn--inbox.task__status-btn--active {
+  background: #e7e2d6;
+  color: #5a5346;
+}
+.task__status-btn--next.task__status-btn--active {
+  background: #e8e1d0;
+  color: #4a3f2a;
+}
+.task__status-btn--doing.task__status-btn--active {
+  background: #d3e3fb;
+  color: #1e3a5f;
+}
+.task__status-btn--waiting.task__status-btn--active {
+  background: #f0e0cd;
+  color: #6b4a2a;
+}
+.task__status-btn--done.task__status-btn--active {
+  background: #cfe9d6;
+  color: #1f5132;
+}
+.task__prio {
+  font-size: 0.6rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  padding: 0.16rem 0.45rem;
+  border-radius: 6px;
+  border: 1px solid var(--hairline-strong);
+  color: var(--text-dim);
+}
+.task__prio--high {
+  color: var(--accent-dim);
+  border-color: rgba(184, 70, 31, 0.5);
+}
+.task__chip {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 0.18rem;
+  font-size: 0.62rem;
+  padding: 0.16rem 0.45rem;
+  border-radius: 6px;
+  background: var(--surface-2);
+  color: var(--text);
+}
+.task__chip-k {
+  color: var(--text-faint);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  font-size: 0.9em;
+}
+.task__chip--overdue {
+  background: rgba(184, 70, 31, 0.14);
+  color: var(--accent-dim);
+}
+.task__tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  margin-bottom: 0.75rem;
+}
+.task__tag {
+  font-size: 0.62rem;
+  color: var(--text-dim);
+}
+.task__empty {
+  color: var(--text-faint);
+  font-style: italic;
+}
+/* Editable body (Atlas tasks) — Edit/Save/Cancel around the description. */
+.task__body-edit {
+  float: right;
+  margin: 0 0 0.4rem 0.6rem;
+  font-size: 0.62rem;
+  padding: 0.32rem 0.7rem;
+}
+.task__body-input {
+  width: 100%;
+  min-height: 6rem;
+  resize: vertical;
+  background: var(--surface-2);
+  border: 1px solid var(--hairline);
+  border-radius: 8px;
+  padding: 0.6rem 0.75rem;
+  color: var(--text-bright);
+  font-family: var(--font-body);
+  font-size: 0.85rem;
+  line-height: 1.5;
+  outline: 0;
+  transition: border-color 160ms ease, box-shadow 160ms ease;
+}
+.task__body-input:focus {
+  border-color: var(--hairline-strong);
+  box-shadow: 0 0 16px var(--glow-cyan);
+}
+.task__body-input::placeholder {
+  color: var(--text-faint);
+}
+.task__body-actions {
+  display: flex;
+  gap: 0.5rem;
+  margin-top: 0.6rem;
+}
+.task__body-err {
+  margin-top: 0.5rem;
+  color: var(--status-red);
+  font-size: 0.74rem;
+}
+.task__foot {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1rem;
+  margin-top: 1.1rem;
+  padding-top: 0.6rem;
+  border-top: 1px solid var(--hairline);
+  font-size: 0.56rem;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+.recipe__title {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: 1.55rem;
+  line-height: 1.15;
+  color: var(--text-bright);
+}
+.recipe__desc {
+  margin: 0;
+  max-width: 62ch;
+  color: var(--text-dim);
+  line-height: 1.6;
+}
+.recipe__meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.6rem;
+}
+.recipe__stepper {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.2rem 0.45rem;
+  border: 1px solid var(--hairline-strong);
+  border-radius: 999px;
+  background: var(--surface-2);
+}
+.recipe__step-btn {
+  width: 1.5rem;
+  height: 1.5rem;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--accent);
+  font-size: 1.1rem;
+  line-height: 1;
+  cursor: pointer;
+  transition: background 140ms ease;
+}
+.recipe__step-btn:hover {
+  background: var(--glow-cyan);
+}
+.recipe__servings {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 0.35rem;
+  min-width: 6rem;
+  justify-content: center;
+  font-family: var(--font-mono);
+  font-size: 0.98rem;
+  color: var(--text-bright);
+}
+.recipe__servings-label {
+  font-size: 0.66rem;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  color: var(--text-faint);
+}
+.recipe__chip {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 0.35rem;
+  padding: 0.2rem 0.6rem;
+  border: 1px solid var(--hairline);
+  border-radius: 999px;
+  font-size: 0.84rem;
+  color: var(--text-dim);
+}
+.recipe__chip-k {
+  font-size: 0.64rem;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  color: var(--text-faint);
+}
+/* "Cook this week" — a distinct accent action, pushed to the end of the meta row. */
+.recipe__cook-wrap {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+.recipe__cook {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.32rem 0.8rem;
+  border: 1px solid rgba(45, 212, 191, 0.35);
+  border-radius: 999px;
+  background: var(--surface-2);
+  color: var(--accent-teal);
+  font-size: 0.84rem;
+  cursor: pointer;
+  transition: color 150ms ease, border-color 150ms ease, background 150ms ease;
+}
+.recipe__cook:hover:not(:disabled) {
+  border-color: var(--accent-teal);
+  background: var(--glow-cyan);
+}
+.recipe__cook:disabled {
+  cursor: default;
+  opacity: 0.85;
+}
+.recipe__cook-err {
+  font-size: 0.74rem;
+  color: var(--status-red);
+}
+.recipe__cols {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 1.4rem;
+}
+@media (min-width: 720px) {
+  .recipe__cols {
+    grid-template-columns: minmax(0, 0.82fr) minmax(0, 1.18fr);
+    gap: 2rem;
+  }
+}
+.recipe__h2 {
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+  margin: 0 0 0.7rem;
+  font-family: var(--font-body);
+  font-size: 0.74rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.09em;
+  color: var(--accent-dim);
+}
+.recipe__scale-note {
+  font-family: var(--font-mono);
+  font-size: 0.8rem;
+  letter-spacing: 0;
+  text-transform: none;
+  color: var(--accent);
+}
+.recipe__ing-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.recipe__ing {
+  padding: 0.42rem 0;
+  border-bottom: 1px solid var(--hairline);
+  line-height: 1.45;
+}
+.recipe__ing:last-child {
+  border-bottom: 0;
+}
+.recipe__step-list {
+  margin: 0;
+  padding-left: 1.4rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  list-style: decimal;
+}
+.recipe__step-list li {
+  line-height: 1.6;
+  padding-left: 0.2rem;
+}
+.recipe__step-list li::marker {
+  color: var(--accent-dim);
+  font-family: var(--font-mono);
+  font-size: 0.85em;
+}
+.recipe__empty {
+  color: var(--text-faint);
+  font-style: italic;
+}
+.recipe__nutrition {
+  margin-top: 1.1rem;
+  padding: 0.8rem;
+  border: 1px solid var(--hairline);
+  border-radius: 10px;
+  background: var(--surface-2);
+}
+.recipe__nutrition-head {
+  margin-bottom: 0.6rem;
+  font-size: 0.66rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-faint);
+}
+.recipe__nutrition-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 0.5rem;
+}
+.recipe__nut {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.15rem;
+  text-align: center;
+}
+.recipe__nut-v {
+  font-family: var(--font-mono);
+  font-size: 1rem;
+  font-weight: 500;
+  color: var(--accent);
+}
+.recipe__nut-k {
+  font-size: 0.62rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-faint);
+}
+.recipe__notes {
+  border-top: 1px solid var(--hairline);
+  padding-top: 0.6rem;
+}
+.prose__quote {
+  margin: 0.7rem 0;
+  padding: 0.3rem 0 0.3rem 0.9rem;
+  border-left: 2px solid var(--hairline-strong);
+  color: var(--text-dim);
+  font-style: italic;
+}
+.wikilink {
+  font: inherit;
+  padding: 0;
+  background: none;
+  border: 0;
+  color: var(--accent);
+  cursor: pointer;
+  border-bottom: 1px dashed rgba(34, 211, 238, 0.4);
+}
+.wikilink:hover {
+  color: var(--accent-teal);
+}
+.wikilink--static {
+  color: var(--secondary);
+  border-bottom: 1px dashed rgba(95, 125, 146, 0.4);
+  cursor: default;
+}
+
+/* --- Note reader (overlay) -------------------------------------- */
+.reader {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 4vh 4vw;
+  background: rgba(4, 8, 12, 0.72);
+  backdrop-filter: blur(4px);
+  -webkit-backdrop-filter: blur(4px);
+}
+.reader__panel {
+  display: flex;
+  flex-direction: column;
+  width: min(820px, 100%);
+  max-height: 88vh;
+}
+.reader__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 1rem 1.25rem;
+  border-bottom: 1px solid var(--hairline);
+}
+.reader__head-left {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  min-width: 0;
+}
+.reader__title {
+  font-size: 0.7rem;
+  color: var(--text-dim);
+}
+.reader__back {
+  flex: 0 0 auto;
+  padding: 0.15rem 0.5rem;
+  border-radius: 6px;
+  border: 1px solid var(--hairline);
+  background: none;
+  color: var(--text-dim);
+  font-size: 0.62rem;
+  letter-spacing: 0.04em;
+  cursor: pointer;
+  line-height: 1.4;
+}
+.reader__back:hover {
+  color: var(--text-bright);
+  border-color: var(--hairline-strong);
+}
+.reader__close {
+  flex: 0 0 auto;
+  width: 26px;
+  height: 26px;
+  border-radius: 6px;
+  border: 1px solid var(--hairline);
+  background: none;
+  color: var(--text-dim);
+  cursor: pointer;
+  line-height: 1;
+}
+.reader__close:hover {
+  color: var(--text-bright);
+  border-color: var(--hairline-strong);
+}
+/* Right-side header group: the "Chat about this" action (Atlas) + close. */
+.reader__head-right {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  flex: 0 0 auto;
+}
+.reader__chat {
+  flex: 0 0 auto;
+  padding: 0.2rem 0.6rem;
+  border-radius: 6px;
+  border: 1px solid var(--hairline);
+  background: none;
+  color: var(--text-dim);
+  font-size: 0.62rem;
+  letter-spacing: 0.04em;
+  cursor: pointer;
+  line-height: 1.4;
+}
+.reader__chat:hover:not(:disabled) {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+.reader__chat:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+.reader__chat-err {
+  font-size: 0.62rem;
+  color: var(--status-red);
+}
+.reader__body {
+  padding: 1.1rem 1.25rem 1.4rem;
+  overflow-y: auto;
+}
+/* HTML wiki page rendered in a sandboxed iframe (experimental). */
+.reader__html {
+  width: 100%;
+  height: 72vh;
+  border: 0;
+  border-radius: 10px;
+  background: #fff;
+}
+/* Clickable Recent-Ingests rows + the experimental HTML badge. */
+.wiki-log__row--link {
+  cursor: pointer;
+  border-radius: 8px;
+  transition: background 140ms ease;
+}
+.wiki-log__row--link:hover {
+  background: var(--surface-2);
+}
+.wiki-log__badge {
+  margin-left: 0.5rem;
+  padding: 0.05rem 0.35rem;
+  border-radius: 999px;
+  font-family: var(--font-display);
+  font-size: 0.5rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--accent);
+  border: 1px solid var(--hairline-strong);
+  vertical-align: middle;
+}
+
+/* ================================================================= *
+ * Theme switcher (header dropdown). Token-driven, so it fits any theme.
+ * ================================================================= */
+/* Mobile: the tab row drops to its own full-width line (see TabBar), so
+   shrink + de-track the labels and keep them on one line. */
+@media (max-width: 639.98px) {
+  .hud-tab {
+    font-size: 0.62rem;
+    letter-spacing: 0.05em;
+    padding: 0.4rem 0.1rem;
+    white-space: nowrap;
+  }
+}
+
+.theme-switch {
+  position: relative;
+}
+.theme-switch__btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.58rem;
+  color: var(--text-dim);
+  background: transparent;
+  border: 1px solid var(--hairline);
+  border-radius: 999px;
+  padding: 0.22rem 0.6rem;
+  cursor: pointer;
+  transition: color 160ms ease, border-color 160ms ease;
+}
+.theme-switch__btn:hover {
+  color: var(--text-bright);
+  border-color: var(--hairline-strong);
+}
+.theme-switch__swatch {
+  width: 0.6rem;
+  height: 0.6rem;
+  border-radius: 999px;
+  background: var(--accent);
+  box-shadow: 0 0 6px var(--glow-cyan-strong);
+}
+.theme-switch__caret {
+  font-size: 0.5rem;
+  opacity: 0.7;
+}
+.theme-switch__menu {
+  position: absolute;
+  top: calc(100% + 0.4rem);
+  right: 0;
+  z-index: 50;
+  min-width: 9rem;
+  margin: 0;
+  padding: 0.3rem;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+}
+.theme-switch__opt {
+  width: 100%;
+  text-align: left;
+  background: transparent;
+  border: 0;
+  border-radius: 8px;
+  padding: 0.42rem 0.6rem;
+  cursor: pointer;
+  font-family: var(--font-display);
+  font-size: 0.62rem;
+  letter-spacing: var(--hud-tracking);
+  text-transform: uppercase;
+  color: var(--text-dim);
+  transition: background 140ms ease, color 140ms ease;
+}
+.theme-switch__opt:hover {
+  background: var(--surface-2);
+  color: var(--text-bright);
+}
+.theme-switch__opt.is-active {
+  color: var(--accent);
+}
+
+/* ================================================================= *
+ * Claude theme — overrides for surfaces that use literal colors
+ * (everything else re-skins via the tokens in tokens.css). Kept
+ * outside @layer so these win over the layered base/component rules.
+ * ================================================================= */
+[data-theme="claude"] .app-bg {
+  background-color: var(--bg-850);
+  background-image:
+    radial-gradient(1000px 680px at 78% -12%, rgba(217, 119, 87, 0.06), transparent 60%),
+    linear-gradient(180deg, #f6f4ee 0%, #f1eee6 60%, #efece3 100%);
+}
+[data-theme="claude"] .scanlines::before,
+[data-theme="contrast-claude"] .scanlines::before {
+  display: none;
+}
+[data-theme="claude"] .glow-text,
+[data-theme="contrast-claude"] .glow-text {
+  text-shadow: none;
+}
+[data-theme="claude"] .corner,
+[data-theme="contrast-claude"] .corner {
+  opacity: 0.22;
+}
+[data-theme="claude"] .hud-label,
+[data-theme="contrast-claude"] .hud-label {
+  text-transform: none;
+  letter-spacing: 0.02em;
+}
+[data-theme="claude"] .card:hover,
+[data-theme="contrast-claude"] .card:hover {
+  box-shadow:
+    0 10px 30px rgba(60, 50, 35, 0.12),
+    0 0 0 1px var(--hairline-strong);
+}
+/* Tool chips in the chat view hardcode a dark overlay (fine on the dark
+   default theme). On the light paper themes that reads as a muddy grey that
+   swallows the dimmed label — swap it for a faint warm-neutral fill. */
+[data-theme="claude"] .agent__msg-tool,
+[data-theme="contrast-claude"] .agent__msg-tool {
+  background: rgba(60, 50, 40, 0.05);
+}
+[data-theme="claude"] .hero__bg {
+  background-image:
+    radial-gradient(720px 240px at 82% -50%, rgba(217, 119, 87, 0.1), transparent 70%),
+    linear-gradient(transparent 95%, rgba(120, 95, 75, 0.04) 95%),
+    linear-gradient(90deg, transparent 95%, rgba(120, 95, 75, 0.04) 95%);
+}
+[data-theme="contrast-claude"] .hero__bg {
+  background-image:
+    radial-gradient(720px 240px at 82% -50%, rgba(184, 70, 31, 0.12), transparent 70%),
+    linear-gradient(transparent 95%, rgba(120, 90, 60, 0.05) 95%),
+    linear-gradient(90deg, transparent 95%, rgba(120, 90, 60, 0.05) 95%);
+}
+[data-theme="claude"] .heat-cell--0 {
+  background: rgba(60, 50, 40, 0.06);
+}
+[data-theme="claude"] .heat-cell--1 {
+  background: rgba(217, 119, 87, 0.28);
+}
+[data-theme="claude"] .heat-cell--2 {
+  background: rgba(217, 119, 87, 0.48);
+}
+[data-theme="claude"] .heat-cell--3 {
+  background: rgba(217, 119, 87, 0.7);
+}
+[data-theme="claude"] .heat-cell--4 {
+  background: rgba(217, 119, 87, 0.92);
+  box-shadow: none;
+}
+
+/* Contrast Claude — warm paper canvas + a stronger terracotta heatmap ramp. */
+[data-theme="contrast-claude"] .app-bg {
+  background-color: var(--bg-850);
+  background-image:
+    radial-gradient(1000px 680px at 78% -12%, rgba(184, 70, 31, 0.07), transparent 60%),
+    linear-gradient(180deg, #f7f3ea 0%, #f2ede1 60%, #efe9db 100%);
+}
+
+/* Atlas tab — the open world-atlas book emblem, layered into the page
+   background so it sits at the very back: the ASCII field (.ascii-backdrop,
+   z-0) and the content (z-10) render over it, keeping the existing overlay.
+   Scoped to the Jarvis-Claude paper backdrop + the Atlas tab only. The paper
+   veil on top (first layer) softens it to a watermark so the glass cards stay
+   readable — raise/lower those two alphas to make the emblem fainter/bolder,
+   and tweak background-size to resize it. */
+[data-backdrop="paper"] .app-bg[data-active-tab="atlas"] {
+  background-image:
+    linear-gradient(rgba(247, 243, 234, 0.32), rgba(247, 243, 234, 0.46)),
+    url(/atlas-bg.jpg),
+    radial-gradient(1000px 680px at 78% -12%, rgba(184, 70, 31, 0.07), transparent 60%),
+    linear-gradient(180deg, #f7f3ea 0%, #f2ede1 60%, #efe9db 100%);
+  background-repeat: no-repeat;
+  background-position: center;
+  background-size: cover, auto min(86vh, 92vw), cover, cover;
+  background-attachment: fixed;
+}
+[data-theme="contrast-claude"] .heat-cell--0 {
+  background: rgba(60, 50, 38, 0.08);
+}
+[data-theme="contrast-claude"] .heat-cell--1 {
+  background: rgba(184, 70, 31, 0.3);
+}
+[data-theme="contrast-claude"] .heat-cell--2 {
+  background: rgba(184, 70, 31, 0.52);
+}
+[data-theme="contrast-claude"] .heat-cell--3 {
+  background: rgba(184, 70, 31, 0.74);
+}
+[data-theme="contrast-claude"] .heat-cell--4 {
+  background: rgba(184, 70, 31, 0.95);
+  box-shadow: none;
+}
+
+/* ================================================================= *
+ * Rich markdown: GFM tables + Obsidian callouts (token-driven).
+ * ================================================================= */
+.prose__table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 1rem 0;
+  font-size: 0.92em;
+}
+.prose__table th,
+.prose__table td {
+  border: 1px solid var(--hairline);
+  padding: 0.4rem 0.65rem;
+  text-align: left;
+  vertical-align: top;
+}
+.prose__table th {
+  background: var(--surface-2);
+  color: var(--text-bright);
+  font-weight: 600;
+}
+.prose__table tbody tr:nth-child(even) td {
+  background: var(--surface);
+}
+
+.prose__callout {
+  margin: 1rem 0;
+  padding: 0.7rem 0.9rem;
+  border-left: 3px solid var(--accent);
+  border-radius: 8px;
+  background: var(--surface);
+}
+.prose__callout-title {
+  font-family: var(--font-display);
+  font-size: 0.72rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--accent);
+  margin-bottom: 0.3rem;
+}
+.prose__callout-body {
+  color: var(--text);
+}
+.prose__callout--warning,
+.prose__callout--caution,
+.prose__callout--attention {
+  border-left-color: var(--status-amber);
+}
+.prose__callout--warning .prose__callout-title,
+.prose__callout--caution .prose__callout-title,
+.prose__callout--attention .prose__callout-title {
+  color: var(--status-amber);
+}
+.prose__callout--danger,
+.prose__callout--error,
+.prose__callout--bug,
+.prose__callout--failure {
+  border-left-color: var(--status-red);
+}
+.prose__callout--danger .prose__callout-title,
+.prose__callout--error .prose__callout-title,
+.prose__callout--bug .prose__callout-title,
+.prose__callout--failure .prose__callout-title {
+  color: var(--status-red);
+}
+.prose__callout--success,
+.prose__callout--tip,
+.prose__callout--check,
+.prose__callout--done {
+  border-left-color: var(--status-green);
+}
+.prose__callout--success .prose__callout-title,
+.prose__callout--tip .prose__callout-title,
+.prose__callout--check .prose__callout-title,
+.prose__callout--done .prose__callout-title {
+  color: var(--status-green);
+}

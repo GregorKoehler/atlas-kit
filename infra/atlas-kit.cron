@@ -1,0 +1,30 @@
+# Atlas Kit cron jobs. Source of truth for this file; `scripts/serve.sh
+# install-boot` installs it to /etc/cron.d/atlas-kit. On the native box you can
+# instead just `cp infra/atlas-kit.cron /etc/cron.d/atlas-kit` (root-owned, 0644).
+# Paths assume the repo is at /workspace and your vault is registered via
+# VAULT_PATH / vaults.json — adjust /workspace if you clone elsewhere.
+SHELL=/bin/bash
+HOME=/root
+PATH=/usr/local/bin:/usr/bin:/bin
+MAILTO=""
+
+# Self-heal watchdog — if the dashboard is ever DOWN (a failed restart, a crash,
+# an OOM), bring it back within ~2 min. `serve.sh ensure` is a no-op when health is
+# green (a cheap curl, then exit) and single-flights via a flock, so it never fights
+# a running restart. (Assumes web/dist is already built — true in steady state.)
+*/2 * * * * root /workspace/scripts/serve.sh ensure >> /tmp/atlas-kit-serve-watchdog.log 2>&1
+
+# Keep the vault checkout fresh so the Atlas tab + Kanban auto-update as your phone
+# (Obsidian Git) or a knowledge agent commits to it — every 15 min. A clean no-op
+# until the vault is cloned + pointed at by VAULT_PATH / vaults.json.
+5,20,35,50 * * * * root cd /workspace && /usr/bin/node --env-file=.env scripts/refresh-atlas.mjs >> /tmp/atlas-kit-cron.log 2>&1
+
+# Daily done-clear — archive completed Kanban tasks (status: done, done-date older
+# than CLEAR_DONE_RETAIN_DAYS) into Tasks/.archive/ so the board stays clean; kept in
+# git history, never deleted. Once daily at 03:30, through the serial commit queue.
+30 3 * * * root cd /workspace && /usr/bin/node --env-file=.env scripts/clear-done.mjs >> /tmp/atlas-kit-cron.log 2>&1
+
+# (Optional) GitHub contributions → data/scorecard.json + data/heatmap.json for the
+# hero Scorecard. Ship your own scripts/refresh-github.mjs writing that JSON contract,
+# then uncomment. The dashboard also exposes POST /api/refresh/github as an on-open hook.
+# 7,37 * * * * root cd /workspace && /usr/bin/node --env-file=.env scripts/refresh-github.mjs >> /tmp/atlas-kit-cron.log 2>&1

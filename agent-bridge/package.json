@@ -1,0 +1,12 @@
+{
+  "name": "atlas-kit-agent-bridge",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Host-native bridge: drive Claude Code sessions in local dev containers over Tailscale. Dependency-free.",
+  "bin": { "agent-bridge": "server.mjs" },
+  "scripts": {
+    "start": "node server.mjs"
+  },
+  "engines": { "node": ">=18" }
+}

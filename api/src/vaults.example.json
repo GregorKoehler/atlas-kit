@@ -1,0 +1,5 @@
+{
+  "_comment": "OPTIONAL multi-vault registry (gitignored). Atlas Kit is single-vault by default — just set VAULT_PATH in .env and you do NOT need this file. Copy to vaults.json only if you run more than one vault. Each KEY is the vault id used in API/MCP params (vault: 'atlas'); `path` is the vault's git checkout on the box; exactly one entry should set default:true (used when no vault is named). A vault whose checkout contains Wiki/Legend.md is auto-treated as a TYPED (queryable) Atlas. The vault keyed `atlas` additionally gets the agent-orchestrator MCP tools for its knowledge chat.",
+  "atlas": { "path": "/vault", "label": "Atlas", "default": true },
+  "my-second-vault": { "path": "/vault-two", "label": "Second Vault" }
+}

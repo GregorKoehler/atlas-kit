@@ -1,0 +1,157 @@
+/* ------------------------------------------------------------------ *
+ * Atlas Kit — Holographic HUD design tokens
+ * A restrained Jarvis/Stark interface: depth + glow + precision type.
+ * All visual decisions trace back to these variables.
+ * ------------------------------------------------------------------ */
+:root {
+  /* --- Background ramp: very dark, desaturated blue-black --------- */
+  --bg-900: #070b11; /* deepest — gradient floor */
+  --bg-850: #0a0e14; /* base canvas */
+  --bg-800: #0d1117; /* raised surface base */
+  --bg-750: #11161f; /* highest surface */
+
+  /* --- Glass surfaces (translucent lightening over the bg) ------- */
+  --surface: rgba(150, 200, 215, 0.025);
+  --surface-2: rgba(150, 200, 215, 0.06);
+  /* Thin, lightly-blurred glass so the ASCII backdrop reads through the cards. */
+  --glass-blur: 3px;
+
+  /* --- Hairlines / edges (faint cyan) ---------------------------- */
+  --hairline: rgba(120, 220, 235, 0.14);
+  --hairline-strong: rgba(45, 212, 238, 0.38);
+
+  /* --- Accent: classic cyan/teal, used sparingly ----------------- */
+  --accent: #22d3ee; /* cyan — active states, key numerics */
+  --accent-teal: #2dd4bf; /* teal — secondary accent */
+  --accent-dim: #1593ab; /* recessed accent for fills */
+
+  /* --- Dim secondary: muted slate-cyan --------------------------- */
+  --secondary: #5f7d92;
+
+  /* --- Text ramp (cyan-tinted neutrals) -------------------------- */
+  --text-bright: #e9f4f8;
+  --text: #b7c8d2;
+  --text-dim: #76909f;
+  --text-faint: #455866;
+
+  /* --- Status (desaturated) -------------------------------------- */
+  --status-green: #3fb27f;
+  --status-amber: #d2a64f;
+  --status-red: #d56b60;
+
+  /* --- Glow: soft cyan, LOW opacity ------------------------------ */
+  --glow-cyan: rgba(34, 211, 238, 0.16);
+  --glow-cyan-strong: rgba(34, 211, 238, 0.28);
+
+  /* --- Typography ------------------------------------------------- */
+  --font-display: "Chakra Petch", ui-sans-serif, system-ui, sans-serif;
+  --font-body: "Saira", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, monospace;
+
+  /* --- Geometry --------------------------------------------------- */
+  --radius-panel: 14px;
+  --hud-tracking: 0.18em;
+
+  /* Knockout halo behind knowledge-graph labels (matches the canvas so
+     glyphs stay legible over nodes/edges). Dark on the HUD; light on Claude. */
+  --graph-label-halo: rgba(5, 12, 16, 0.75);
+}
+
+/* ------------------------------------------------------------------ *
+ * Claude theme — warm, light, paper-and-coral (claude.ai-inspired).
+ * Overrides the token set above when <html data-theme="claude">. Most
+ * of the UI reads these vars (incl. the Tailwind hud/accent/bg/status
+ * colors), so flipping them re-skins the app; a few literal-color
+ * surfaces are overridden in index.css.
+ * ------------------------------------------------------------------ */
+[data-theme="claude"] {
+  --bg-900: #ece9e0;
+  --bg-850: #f4f2ec; /* base canvas — warm paper */
+  --bg-800: #ffffff;
+  --bg-750: #ffffff;
+
+  --surface: rgba(255, 255, 255, 0.62);
+  --surface-2: rgba(255, 255, 255, 0.9);
+  --glass-blur: 10px; /* opaque-paper themes keep the full frost (no backdrop) */
+
+  --hairline: rgba(60, 53, 40, 0.12);
+  --hairline-strong: rgba(217, 119, 87, 0.5);
+
+  --accent: #d97757; /* Claude coral */
+  --accent-teal: #be6a48;
+  --accent-dim: #c75f3c;
+
+  --secondary: #8c8578;
+
+  --text-bright: #1f1e1c;
+  --text: #3c3a34;
+  --text-dim: #76706a;
+  --text-faint: #aaa49a;
+
+  --status-green: #3a9d6e;
+  --status-amber: #bf8c34;
+  --status-red: #c5544a;
+
+  --glow-cyan: rgba(217, 119, 87, 0.1);
+  --glow-cyan-strong: rgba(217, 119, 87, 0.2);
+
+  /* Softer, non-techy display type + tighter tracking for the light look. */
+  --font-display: var(--font-body);
+  --hud-tracking: 0.05em;
+
+  /* Light knockout halo so graph labels read on the warm canvas. */
+  --graph-label-halo: rgba(244, 242, 236, 0.92);
+}
+
+/* ------------------------------------------------------------------ *
+ * Contrast Claude — the warm Claude theme, dialed to the high-contrast
+ * "paper" of the vault reader: deeper warm-neutral text, a terracotta
+ * accent, and stronger hairlines, on a warm paper canvas. Same light-look
+ * chrome adjustments as Claude (shared in index.css); only the palette is
+ * pushed for readability. Applied when <html data-theme="contrast-claude">.
+ * ------------------------------------------------------------------ */
+[data-theme="contrast-claude"] {
+  --bg-900: #ece5d6;
+  --bg-850: #f3eee2; /* base canvas — warm paper */
+  --bg-800: #f7f3ea; /* raised surface = the reader paper */
+  --bg-750: #fbf8f1;
+
+  --surface: rgba(60, 50, 38, 0.05);
+  --surface-2: #efe7d8;
+  --glass-blur: 10px; /* opaque-paper themes keep the full frost (no backdrop) */
+
+  --hairline: rgba(60, 50, 38, 0.16);
+  --hairline-strong: rgba(184, 70, 31, 0.45);
+
+  --accent: #b8461f; /* terracotta — stronger than Claude's coral */
+  --accent-teal: #15803d; /* green secondary */
+  --accent-dim: #9a3412;
+
+  --secondary: #8a8073;
+
+  --text-bright: #211d18; /* near-black warm — high contrast */
+  --text: #38322a;
+  --text-dim: #6a6155;
+  --text-faint: #9a9183;
+
+  --status-green: #2f8f5e;
+  --status-amber: #b07d2a;
+  --status-red: #b8402f;
+
+  --glow-cyan: rgba(184, 70, 31, 0.12);
+  --glow-cyan-strong: rgba(184, 70, 31, 0.22);
+
+  --font-display: var(--font-body);
+  --hud-tracking: 0.05em;
+
+  --graph-label-halo: rgba(247, 243, 234, 0.94);
+}
+
+/* "Jarvis Claude" = the contrast-claude palette above with the ASCII backdrop
+ * layered on (applyTheme sets data-theme="contrast-claude" + data-backdrop=
+ * "paper"). Only delta vs. plain contrast-claude: a lighter glass blur so the
+ * backdrop reads through the cards. */
+[data-theme="contrast-claude"][data-backdrop="paper"] {
+  --surface: rgba(60, 50, 38, 0.03);
+  --glass-blur: 3px;
+}

@@ -1,0 +1,70 @@
+/* ------------------------------------------------------------------ *
+ * Self-hosted fonts — bundled locally, NO CDN. Works fully offline.
+ * woff2 files live in ./assets/fonts and are emitted by Vite at build.
+ *
+ *   Chakra Petch  — display / headings / HUD chrome (chamfered, technical)
+ *   Saira         — body / UI text (humanist, readable)
+ *   JetBrains Mono— numerics / data (clock, stats); monospace = tabular
+ * ------------------------------------------------------------------ */
+
+/* ----------------------------- Chakra Petch ----------------------- */
+@font-face {
+  font-family: 'Chakra Petch';
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url('../assets/fonts/chakra-petch-500.woff2') format('woff2');
+}
+@font-face {
+  font-family: 'Chakra Petch';
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url('../assets/fonts/chakra-petch-600.woff2') format('woff2');
+}
+@font-face {
+  font-family: 'Chakra Petch';
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url('../assets/fonts/chakra-petch-700.woff2') format('woff2');
+}
+
+/* --------------------------------- Saira -------------------------- */
+@font-face {
+  font-family: 'Saira';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url('../assets/fonts/saira-400.woff2') format('woff2');
+}
+@font-face {
+  font-family: 'Saira';
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url('../assets/fonts/saira-500.woff2') format('woff2');
+}
+
+/* ----------------------------- JetBrains Mono --------------------- */
+@font-face {
+  font-family: 'JetBrains Mono';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url('../assets/fonts/jetbrains-mono-400.woff2') format('woff2');
+}
+@font-face {
+  font-family: 'JetBrains Mono';
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url('../assets/fonts/jetbrains-mono-500.woff2') format('woff2');
+}
+@font-face {
+  font-family: 'JetBrains Mono';
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url('../assets/fonts/jetbrains-mono-700.woff2') format('woff2');
+}

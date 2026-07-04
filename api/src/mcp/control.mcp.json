@@ -1,0 +1,14 @@
+{
+  "_comment": "MCP config for the Atlas ORCHESTRATOR only (the knowledge chat on the vault keyed 'atlas'). Same server as the root .mcp.json — so it carries query_atlas/query_vault — but with ATLAS_AGENT_CONTROL=1 in the child env, which flips on the agent-control tools in tools.mjs (list_agents/spawn_agent/prompt_agent/queue_agent/interrupt_agent/kill_agent/cleanup_agent). Loaded via `--mcp-config <this> --strict-mcp-config` in agent-local.mjs's ATLAS_CONTROL_LAUNCH_CMD. Paths assume the kit is checked out at /workspace (see docs/SETUP.md); adjust both if you clone elsewhere.",
+  "mcpServers": {
+    "atlas-kit": {
+      "type": "stdio",
+      "command": "node",
+      "args": [
+        "--env-file=/workspace/.env",
+        "/workspace/api/src/mcp/server.mjs"
+      ],
+      "env": { "ATLAS_AGENT_CONTROL": "1" }
+    }
+  }
+}

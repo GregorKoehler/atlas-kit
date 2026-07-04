@@ -1,0 +1,59 @@
+# Atlas Kit reverse proxy. Copy to infra/Caddyfile and adjust <REPO_ROOT>.
+# serve.sh runs `caddy run --config infra/Caddyfile` (with .env sourced, so
+# {env.DASHBOARD_BEARER_TOKEN} is available). Binds :8080 on localhost; a
+# Cloudflare Tunnel + Access front it at the edge (see docs/SETUP.md).
+#
+# The pattern: WRITE/EXEC routes get the bearer injected here server-side, so the
+# browser never holds the token. READ routes and the live-app proxy pass through
+# untouched (Cloudflare Access gates identity at the edge).
+
+:8080 {
+	encode gzip
+
+	# --- Write/exec routes: inject the dashboard bearer, then proxy to Express ---
+	handle /api/agents/* {
+		reverse_proxy localhost:3001 {
+			header_up Authorization "Bearer {env.DASHBOARD_BEARER_TOKEN}"
+		}
+	}
+	handle /api/tasks/* {
+		reverse_proxy localhost:3001 {
+			header_up Authorization "Bearer {env.DASHBOARD_BEARER_TOKEN}"
+		}
+	}
+	handle /api/atlas/* {
+		reverse_proxy localhost:3001 {
+			header_up Authorization "Bearer {env.DASHBOARD_BEARER_TOKEN}"
+		}
+	}
+	# (The token is harmless on the read routes below; only writes require it.)
+
+	# --- Read routes (open; Cloudflare Access gates them at the edge) ---
+	handle /api/* {
+		reverse_proxy localhost:3001
+	}
+
+	# --- Dev-agent live-app preview (HTTP + auto-upgraded WebSocket) ---
+	handle /agent-app/* {
+		reverse_proxy localhost:3001
+	}
+
+	# --- Static SPA (the built dashboard) with PWA-safe caching ---
+	@assets path /assets/*
+	handle {
+		root * <REPO_ROOT>/web/dist
+		header @assets Cache-Control "public, max-age=31536000, immutable"
+		header Cache-Control "no-cache"
+		try_files {path} /index.html
+		file_server
+	}
+
+	# --- Hardening headers ---
+	# X-Frame-Options is SAMEORIGIN (not DENY) so the dashboard can iframe its own
+	# /agent-app/* live-app proxy.
+	header {
+		X-Content-Type-Options nosniff
+		X-Frame-Options SAMEORIGIN
+		Referrer-Policy no-referrer
+	}
+}

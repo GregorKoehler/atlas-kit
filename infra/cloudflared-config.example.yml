@@ -1,0 +1,30 @@
+# Reference: the cloudflared tunnel config for the Atlas Kit box.
+#
+# The LIVE copy lives at /root/.cloudflared/config.yml (NOT committed — it names
+# the tunnel's credentials file). Keep this reference in sync whenever you change
+# ingress.
+#
+# One-time setup on the box (full runbook: docs/SETUP.md):
+#   cloudflared tunnel login                          # browser auth -> ~/.cloudflared/cert.pem
+#   cloudflared tunnel create atlas-kit               # -> <tunnel-id> + <tunnel-id>.json creds
+#   # write /root/.cloudflared/config.yml from this template, then:
+#   cloudflared tunnel route dns atlas-kit dashboard.<your-domain>
+#   cloudflared tunnel route dns atlas-kit mcp.<your-domain>
+#   cloudflared service install                       # run as a systemd service (survives reboot)
+#   systemctl restart cloudflared                     # re-run after ANY ingress change
+#
+# Outbound-only: the box never opens 80/443. Cloudflare Access gates each hostname
+# at the edge (Google login) before traffic reaches Caddy / the MCP server.
+
+tunnel: <tunnel-id>
+credentials-file: /root/.cloudflared/<tunnel-id>.json
+
+ingress:
+  # Dashboard — Caddy serves the static app + proxies /api. [Access: Google login]
+  - hostname: dashboard.<your-domain>
+    service: http://localhost:8080
+  # MCP server — streamable-HTTP for the Claude.ai connector. [Access: Managed OAuth]
+  - hostname: mcp.<your-domain>
+    service: http://localhost:3002
+  # Catch-all: anything else gets a 404 (required last rule).
+  - service: http_status:404

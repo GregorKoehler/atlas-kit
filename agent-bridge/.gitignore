@@ -1,0 +1,4 @@
+# Operator-local config + runtime state — never commit these.
+repos.json
+state.json
+audit.log
