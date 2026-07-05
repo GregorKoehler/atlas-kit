@@ -88,6 +88,15 @@ function persistHistMode(chat: boolean) {
   }
 }
 
+/* Format a message's ISO timestamp as a local HH:MM clock time for the bubble's
+ * "sent at" caption. Every real message carries `ts` from its Claude Code JSONL
+ * event; returns '' when it's missing or unparseable so the caption is skipped. */
+function fmtMsgTime(ts: string | null | undefined): string {
+  if (!ts) return ''
+  const d = new Date(ts)
+  return isNaN(d.getTime()) ? '' : d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+}
+
 /* One chat bubble of the history view. Memoized on the message's identity —
  * messages are append-only on disk, so during the live poll only NEW bubbles
  * mount; existing ones skip their markdown re-render entirely. */
@@ -122,6 +131,11 @@ const HistMsg = memo(
             ))}
           </div>
         ) : null}
+        {fmtMsgTime(m.ts) ? (
+          <time className="agent__msg-time tnum" dateTime={m.ts ?? undefined}>
+            {fmtMsgTime(m.ts)}
+          </time>
+        ) : null}
       </div>
     )
   },
@@ -150,6 +164,11 @@ function AnsweredMsg({ a }: { a: AnsweredMenu }) {
       <div className="agent__answered-pick">
         <span className="agent__history-opt-n tnum">{a.n}.</span> {a.text}
       </div>
+      {fmtMsgTime(a.ts) ? (
+        <time className="agent__msg-time tnum" dateTime={a.ts}>
+          {fmtMsgTime(a.ts)}
+        </time>
+      ) : null}
     </div>
   )
 }

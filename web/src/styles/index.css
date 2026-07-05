@@ -5187,6 +5187,17 @@ button.capture-job__title--link {
   word-break: break-word;
   color: var(--text);
 }
+/* The "sent at" local HH:MM caption, trailing each bubble. Muted and small so it
+   reads as metadata; aligned to the bubble's trailing edge (right) for both the
+   left- and right-aligned bubble variants. */
+.agent__msg-time {
+  align-self: flex-end;
+  margin-top: 0.05rem;
+  font-size: 0.6rem;
+  line-height: 1;
+  color: var(--text-dim);
+  opacity: 0.7;
+}
 /* Assistant bubbles render their markdown through the shared wiki renderer
    (lib/markdown.tsx → .prose). Compact its reader-scale styles to bubble scale:
    inherit the history view's font, tighten block margins, and size headings in
