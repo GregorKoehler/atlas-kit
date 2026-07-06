@@ -1,8 +1,9 @@
 /* ------------------------------------------------------------------ *
  * Theme switching. Each theme is a set of CSS-variable overrides keyed
- * off <html data-theme="…"> (see styles/tokens.css). The default
- * (no attribute / "jarvis") is the Holographic HUD; "claude" is a warm,
- * light, paper-and-coral look. Selection persists in localStorage.
+ * off <html data-theme="…"> (see styles/tokens.css). The out-of-the-box
+ * default is "contrast-claude" (a warm-paper / terracotta look); "jarvis"
+ * is the Holographic HUD (dark, cyan-on-black), fully available in the
+ * ThemeSwitcher. Selection persists in localStorage.
  * ------------------------------------------------------------------ */
 export type ThemeId = 'jarvis' | 'claude' | 'contrast-claude' | 'jarvis-claude'
 
@@ -23,7 +24,7 @@ export function getTheme(): ThemeId {
   } catch {
     /* localStorage unavailable — fall through to default */
   }
-  return 'jarvis-claude'
+  return 'contrast-claude'
 }
 
 /** Apply a theme to the document (no persistence).
