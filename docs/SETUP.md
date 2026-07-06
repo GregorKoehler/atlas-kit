@@ -6,6 +6,11 @@ spawn Claude Code agents. Most of steps 1–9 are automated by
 (Cloudflare Access, Tailscale) are called out. Local dev is simpler — see the
 [Quick start](../README.md#quick-start-local-dev) in the README.
 
+> **Prefer to have an agent drive it?** [docs/SETUP-AGENT.md](SETUP-AGENT.md) is these
+> same ten steps written for a Claude Code agent to run for you — bootstrap the `claude`
+> CLI, clone the repo, run `claude` in it, and say *"Read docs/SETUP-AGENT.md and set me
+> up."* This file is the manual version.
+
 Architecture recap: a **Cloudflare Tunnel** (outbound-only) fronts **Caddy** on
 `:8080`; Caddy serves the built app and proxies `/api` to the **Express** API on
 `127.0.0.1:3001` (injecting the bearer token on write routes); an **MCP** server runs

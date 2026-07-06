@@ -160,9 +160,17 @@ To spawn a **box-local dev agent**, copy `api/src/agent-local-repos.example.json
 read `Wiki/Projects/*.md` from your vault; give a project page an `agent_repo:` key to
 bind it to a spawnable repo.
 
-For production (a Hetzner box behind a Cloudflare Tunnel + Access, systemd, cron,
-optional remote bridge), follow **[docs/SETUP.md](docs/SETUP.md)** — a zero-to-running
-walkthrough.
+## Production setup — two ways
+
+For a real box (a Hetzner server behind a Cloudflare Tunnel + Access, systemd, cron,
+optional remote bridge), pick whichever you prefer:
+
+- **Agent-guided (the easy path) — [docs/SETUP-AGENT.md](docs/SETUP-AGENT.md).** Rent a
+  box, SSH in, install the `claude` CLI + `gh` and log both in, clone the repo, run
+  `claude` in it, and say *"Read docs/SETUP-AGENT.md and set me up."* A Claude Code agent
+  then interviews you, runs the whole install, and verifies each step.
+- **Manual — [docs/SETUP.md](docs/SETUP.md).** The same ten steps as a zero-to-running
+  walkthrough you run by hand.
 
 ---
 
