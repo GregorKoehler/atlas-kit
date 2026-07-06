@@ -14,10 +14,9 @@ agents running in tmux, and a task Kanban — all wired to a single markdown vau
 Extracted and generalized from a larger personal command-center ("Gravis"), pared
 down to the pieces worth reusing.
 
-<!-- screenshots: replace these with your own -->
-<!-- ![Home tab — project cards + scorecard + Atlas agent](docs/screenshots/home.png) -->
-<!-- ![Atlas tab — Kanban + graph + reader](docs/screenshots/atlas.png) -->
-<!-- ![A dev agent's live transcript + PR ship flow](docs/screenshots/agent.png) -->
+![Atlas Kit dashboard — Home (hero, scorecard, project cards with dev agents) beside the vault-coupled Kanban](docs/screenshots/dashboard.png)
+
+<sub>Preview render with **sample data** — the default Contrast Claude (warm-paper) theme. The real app is Preact + Tailwind; this is a static mock.</sub>
 
 ---
 
