@@ -45,7 +45,8 @@ branch. You can **prompt** it, **queue** a message (lands at its next idle),
 **schedule** one for a future time, **interrupt & steer** a running turn, **kill**
 (keep the worktree for review), or **cleanup** (remove worktree + branch). Idle vs.
 busy is detected from the terminal; numbered menus are answerable from the card.
-Extracted from the Gravis agent runtime — simplified but functional.
+Extracted from the Gravis agent runtime — simplified but functional. See
+[docs/PROTOCOLS.md](docs/PROTOCOLS.md) for exactly what each of these does and where.
 
 ### 2. Knowledge-base coupling
 The workflow where dev agents (a) **search the vault first** before starting work,

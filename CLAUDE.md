@@ -27,6 +27,9 @@ agent-bridge/  optional host-native bridge to run agents in remote dev container
 
 ## Working on the code
 
+- **Touching the agent runtime (queue/prompt/interrupt/kill/cleanup, the ship marker,
+  or the BRIEF/INGEST flow)?** Read **[docs/PROTOCOLS.md](docs/PROTOCOLS.md)** first —
+  it maps each protocol to exactly where it's implemented.
 - **Build/verify:** `cd web && npm run build` (Vite; `npm run typecheck` for tsc).
   `cd api && node --env-file=../.env src/server.mjs` runs the API. `npm run dev`
   (root, via `scripts/dev.sh`) runs both for local dev.
