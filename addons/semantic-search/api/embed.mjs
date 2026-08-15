@@ -168,6 +168,24 @@ function auditModel(entry) {
   }
 }
 
+/* The model lives in a WORKER THREAD inside the API process (`embed-worker.mjs`),
+ * and the main thread decides a query's deadline from whether it is loaded — a
+ * cold load is a budget of 30 s, a warm embed 5 s. So an eviction that nobody
+ * asked about has to REACH the main thread, or the next query after an idle
+ * unload is given the warm budget and degrades once for no reason. One listener,
+ * set by the worker; unset (and free) everywhere else, including the CLI indexer. */
+let stateListener = null
+export const onModelState = (fn) => {
+  stateListener = fn
+}
+function announceState() {
+  try {
+    stateListener?.(residentState())
+  } catch {
+    /* a listener must never break retrieval, same as the audit appender */
+  }
+}
+
 function armIdleTimer() {
   if (!IDLE_MS) return
   clearTimeout(idleTimer)
@@ -190,6 +208,7 @@ export async function evictResident(reason = 'idle') {
     /* a load that failed has nothing to dispose */
   }
   auditModel({ event: 'embed-model-unload', model: MODEL_ID, dtype: DTYPE, reason, heldMs })
+  announceState()
   return true
 }
 
@@ -206,6 +225,7 @@ export function resident() {
         loadedAt = Date.now()
         lastLoadMs = Math.round(loadedAt - t0)
         auditModel({ event: 'embed-model-load', model: MODEL_ID, dtype: DTYPE, threads: THREADS, loadMs: lastLoadMs, idleMs: IDLE_MS })
+        announceState()
         return ctx
       })
       .catch((e) => {

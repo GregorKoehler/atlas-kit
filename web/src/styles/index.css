@@ -949,15 +949,141 @@ button.agent__dl {
   animation: ship-ready 1.6s ease-in-out infinite;
 }
 
+/* The strip collapsed to ONE chip, for the full-screen head and the app-only
+   overlay bar (AgentDownloads `compact`): "⬇ N" plus a single aggregate badge,
+   opening the list in a sheet. Full screen is where the transcript is the
+   product, so the strip's one-chip-per-file would cost a real row per file on a
+   phone; this costs one chip's width whatever N is. A <button>, so reset the
+   chrome — it borrows .agent__budget's row layout and the context meter's label
+   sizing, to sit in the same gauge family as 5H and RAM. */
+button.agent__dlchip {
+  border: none;
+  background: none;
+  padding: 0;
+  font: inherit;
+  cursor: pointer;
+}
+.agent__dlchip:hover .agent__ctx-label {
+  color: var(--accent-teal);
+}
+
+/* The sheet the chip opens. Desktop: a popover anchored under the chip (JS
+   measures it once on open into --dlsheet-top/left). Phone: docked to the bottom
+   edge, thumb-reachable, insets honoured. Dismissible the same four ways as the
+   image preview below — ✕, backdrop, Escape, and the system back gesture — so it
+   can never strand the operator in the chrome-less installed webview either. */
+.dlsheet-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 140;
+}
+.dlsheet {
+  position: fixed;
+  top: var(--dlsheet-top, 4rem);
+  left: var(--dlsheet-left, 1rem);
+  z-index: 141;
+  width: min(20rem, calc(100vw - 1rem));
+  max-height: min(24rem, 60vh);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+  padding: 0.4rem;
+  border: 1px solid var(--hairline);
+  border-radius: 6px;
+  background: var(--bg-900);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+}
+.dlsheet__head {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0 0.15rem 0.25rem;
+  border-bottom: 1px solid var(--hairline);
+}
+.dlsheet__head .hud-label {
+  flex: 1 1 auto;
+}
+.dlsheet__close {
+  flex: 0 0 auto;
+  border: none;
+  background: none;
+  color: var(--text-dim);
+  cursor: pointer;
+  font-size: 0.85rem;
+  line-height: 1;
+  padding: 0.2rem 0.3rem;
+}
+.dlsheet__close:hover {
+  color: var(--accent-teal);
+}
+/* One row per file — name · size · its own updated dot. Same <a>/<button>
+   split as the strip's chips (DownloadItem), so the hand-off is identical. */
+.dlsheet__row {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  width: 100%;
+  /* ≥44px of tappable height on a phone, per the head's button cluster. */
+  min-height: 2.1rem;
+  padding: 0.25rem 0.3rem;
+  border: none;
+  border-radius: 4px;
+  background: none;
+  cursor: pointer;
+  font-family: var(--font-mono);
+  font-size: 0.66rem;
+  color: var(--text-dim);
+  text-align: left;
+  text-decoration: none;
+}
+.dlsheet__row:hover {
+  color: var(--accent-teal);
+  background: var(--surface-2);
+}
+.dlsheet__name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.dlsheet__size {
+  flex: 0 0 auto;
+  color: var(--text-faint);
+}
+@media (max-width: 640px) {
+  .dlsheet {
+    top: auto;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    width: auto;
+    max-height: 60vh;
+    border-radius: 8px 8px 0 0;
+    padding-bottom: calc(0.4rem + env(safe-area-inset-bottom));
+  }
+  .dlsheet-backdrop {
+    background: rgba(4, 8, 12, 0.5);
+  }
+  .dlsheet__row {
+    font-size: 0.72rem;
+  }
+}
+
 /* In-app image preview for a download chip (AgentDownloads). The whole point is
    that it never navigates: in an installed (home-screen) PWA there is no URL bar
    and no back button, so a navigation away from the dashboard is unrecoverable.
    The action bar sits at the BOTTOM — thumb-reachable on a phone and clear of the
-   notch — and every safe-area inset is honoured. */
+   notch — and every safe-area inset is honoured.
+   Above .dlsheet (141) because it is opened FROM it, and above the app-only
+   full screen (.agent-app-full, 130) which now carries a download chip of its
+   own — at its old 120 the preview would have painted behind that overlay. */
 .dlprev {
   position: fixed;
   inset: 0;
-  z-index: 120;
+  z-index: 142;
   display: flex;
   flex-direction: column;
   align-items: center;

@@ -72,12 +72,68 @@ the session and its threads — it is **not** the memory-pressure fix it looks
 like. `ATLAS_EMBED_IDLE_MS=0` holds the model forever and is a defensible
 choice; the difference is ~100 MB, not ~660 MB.
 
-⚠️ **The encoder is CPU-bound and does not yield.** An embed runs on the API's
-event loop, so a cold load plus a query is a stretch of seconds during which the
-health endpoint is slow to answer. If you run a watchdog that restarts on a
-missed health probe, give it a timeout above ~15 s and require more than one
-miss — otherwise it will reap a perfectly healthy API mid-retrieval, and the
-restart evicts the encoder so the next query is cold again.
+---
+
+## Off the main thread — one worker, one encoder copy
+
+The encoder is CPU-bound and does not yield, so it does **not** run on the API's
+event loop: `api/embed-client.mjs` (main-thread side) hands the work to
+`api/embed-worker.mjs`, one `worker_thread` that owns the one encoder and the one
+loaded index for the whole process. Both in-process call sites route through it:
+
+| op | function | what moved |
+|---|---|---|
+| `search-hits` | `searchHits()` in `api/semantic.mjs` | embed the query, cosine-rank the pages |
+| `evidence-rows` | `evidenceRows()` in `api/evidence.mjs` | embed the sub-asks (one batch), chunk-level scan, quote the chosen pages |
+
+The third caller — the CLI indexer — is its own short-lived process and keeps
+running in-process. **No new dependency:** `node:worker_threads` is a builtin and
+the worker loads the same out-of-tree runtime `install.sh` installs.
+
+**Why it matters.** With the encoder on the loop, a 10–20 s retrieval is 10–20 s
+during which the API answers nothing at all — including the health probe a
+watchdog reads to decide the process is dead, and including a keep-alive socket
+an agent spawn is waiting on. A watchdog that restarts on a missed probe will
+reap a perfectly healthy API mid-retrieval, and the restart evicts the encoder so
+the next query is cold again.
+
+### The three things that changed behaviour, not just location
+
+- 🔴 **The deadlines are real now.** `ATLAS_EVIDENCE_SEMANTIC_MS` (6 s) and
+  `/api/search`'s budgets could not fire while the leg held the loop — a blocked
+  loop cannot run its own timer. With the loop free they fire: a cold or wedged
+  encoder costs a spawn 6 s and a keyword-only block instead of freezing the API.
+  ⚠️ That is a real change for a **cold** spawn — on a box that evicts the model,
+  the first spawn after an eviction will more often land keyword-only.
+  `ATLAS_EMBED_IDLE_MS=0` removes that case. `/api/search` picks its budget the
+  same way: 5 s warm, 30 s while the model is loading, from the state the worker
+  mirrors back as it loads and evicts.
+- ⚠️ **The encoder is serial** (one copy, by design), so a query can now spend its
+  budget QUEUEING behind another retrieval and degrade where it used to simply
+  wait. Never silent: `queueMs` rides the leg's answer and `semanticQueueMs` the
+  `atlas-evidence` audit line, so a slow embed and a queued one are
+  distinguishable in the log rather than guessed at. The field is present only
+  when the retrieval ran off-thread, so a core or in-process line is unchanged.
+- **Degradation is unchanged in shape**: a worker that fails to start, crashes,
+  exits or overruns yields `available: false` + a reason, exactly as a missing
+  encoder always did. A crash costs ONE retrieval — the next call spawns a fresh
+  worker.
+
+⚠️ **It fixes latency, not memory.** A worker thread shares the process address
+space, so ORT's arena is still the API's RSS. Returning the footprint would need
+a separate process, which is a different trade (a lifecycle to supervise, a
+transport, a second place for the encoder to be missing) and is not taken here.
+
+`meta.json` and the vector file are also read separately (`loadMeta` vs
+`loadIndex`): the main thread answers "is there a usable index, how stale, which
+model" from the metadata plus one `stat` of the vector file, and **only the
+worker reads the floats** — otherwise the 35 MB index would sit in the process
+twice and its `readFileSync` would be back on the loop.
+
+Guards: `test/embed-worker.test.mjs` — loop responsiveness (with the inline arm
+asserted too, so the test can SEE the old behaviour), crash / exit / hang /
+deadline degradation, and one worker shared by both call sites. Hermetic: a stub
+worker plus an `ATLAS_EMBED_DIR` that looks installed and is not.
 
 ---
 
@@ -206,10 +262,11 @@ result, where the consuming agent picks **after** seeing the content.
 | `ATLAS_EMBED_THREADS` | `3` | ORT defaults to every core and would starve the rest of the box |
 | `ATLAS_EMBED_IDLE_MS` | `1200000` | `0` holds the model forever (see above for what eviction really buys) |
 | `ATLAS_EMBED_AUTOINSTALL` | `1` | `0` disables the self-heal |
+| `ATLAS_EMBED_WORKER` | on | `0` runs the encoder ON the API's main thread again — i.e. the event-loop block described above. For a short-lived CLI or an eval harness that has no loop to protect and drives `residentState()`/`evictResident()` itself. |
 | `ATLAS_SEMANTIC_TIMEOUT_MS` | `5000` | one embed. ⚠️ Separate from the load budget on purpose. |
 | `ATLAS_SEMANTIC_LOAD_TIMEOUT_MS` | `30000` | a cold load is a measured ~2–3 s; 30 s means "hung", not "slow" |
 | `ATLAS_EVIDENCE_SEMANTIC` | unset (off) | `1` turns on the spawn-evidence dense leg — read the section above |
-| `ATLAS_EVIDENCE_SEMANTIC_MS` | `6000` | the whole evidence leg's deadline; over it, the spawn proceeds keyword-only |
+| `ATLAS_EVIDENCE_SEMANTIC_MS` | `6000` | the whole evidence leg's deadline; over it, the spawn proceeds keyword-only. ⚠️ It **fires** now — see "Off the main thread"; while the leg held the loop it was decorative |
 | `ATLAS_INDEX_MIN_AVAIL_MB` | `800` | the indexer's memory floor — it stops and persists rather than OOM |
 
 ## The index

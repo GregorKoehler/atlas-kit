@@ -874,6 +874,11 @@ export async function buildCandidates({ task, repo, root, maxBytes = EVIDENCE_MA
       // semantic leg (absent in core — see atlas-evidence-semantic.mjs)
       semantic: sem.available, semanticAsks: asks.length, semanticFound: sem.rows.length, semanticShown: semQuoted, semanticStubs: semStubs,
       semanticPages: shownPages, semanticBytes: spent.semantic || 0, semanticMs: sem.ms,
+      // Of those `semanticMs`, how many were spent waiting for a (single, serial)
+      // encoder to get to this request rather than computing — present only when
+      // the leg ran off-thread, so a line from core or from an in-process leg
+      // still reads exactly as it always has.
+      ...(sem.queueMs != null ? { semanticQueueMs: sem.queueMs } : {}),
       semanticTop: sem.rows[0]?.similarity ?? null, semanticChunks: sem.index?.chunks ?? null,
       // the two prose legs landing on the same page — a signal, never a rank.
       // `agree` is over everything the dense leg retrieved (the honest "how

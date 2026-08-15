@@ -88,6 +88,28 @@ test('the record is scoped per (session, filename)', () => {
   assert.equal(updatedDownloads('a1', [{ name: 'other.png', size: 1, mtime: 500 }]).size, 1)
 })
 
+/* The full-screen head's collapsed "⬇ N" chip shows ONE dot for the whole set,
+ * and it is exactly `updatedDownloads(...).size > 0` over the same rule the
+ * per-file chips use — no second notion of "updated" that could drift from the
+ * strip's. These pin the three answers the chip depends on. */
+test('THE CHIP DOT: on while ANY file is unseen, off once the last one is seen', () => {
+  const files = [
+    { name: 'a.png', size: 1, mtime: 100 },
+    { name: 'b.pdf', size: 2, mtime: 200 },
+  ]
+  assert.equal(updatedDownloads('a1', files).size, 2, 'both new → dot on')
+  markDownloaded('a1', 'a.png', 100)
+  assert.equal(updatedDownloads('a1', files).size, 1, 'one still unseen → dot stays on')
+  markDownloaded('a1', 'b.pdf', 200)
+  assert.equal(updatedDownloads('a1', files).size, 0, 'nothing unseen → dot off')
+  // A newer write to either file brings the aggregate dot straight back.
+  assert.equal(updatedDownloads('a1', [{ name: 'b.pdf', size: 2, mtime: 300 }]).size, 1)
+})
+
+test('no files ⇒ nothing to badge (the chip renders nothing at all in that case)', () => {
+  assert.equal(updatedDownloads('a1', []).size, 0)
+})
+
 test('a localStorage that throws (private mode) degrades to "everything is new", never a crash', () => {
   globalThis.localStorage = {
     getItem: () => {

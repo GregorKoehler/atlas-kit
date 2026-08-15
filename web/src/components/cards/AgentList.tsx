@@ -1893,6 +1893,14 @@ export function AgentRow({
             ) : null}
             {fullscreen ? <Budget5h /> : null}
             {fullscreen ? <HostRam /> : null}
+            {/* Downloads join the gauge stack COLLAPSED — one "⬇ N" chip with an
+                aggregate updated-dot, opening a sheet. The per-file strip below
+                the head still renders in the list view, but in full screen it
+                would cost a row per file on the phone, exactly where the
+                transcript is the product; the chip is one width whatever N is,
+                and it renders nothing at all when the agent has offered no
+                files. */}
+            {fullscreen ? <AgentDownloads id={s.id} files={s.downloads ?? []} compact /> : null}
           </span>
         ) : null}
         <div className="agent__actions">
@@ -2158,7 +2166,11 @@ export function AgentRow({
           ))}
         </div>
       ) : null}
-      <AgentDownloads id={s.id} files={s.downloads ?? []} />
+      {/* The strip is the LIST view's surface. Full screen carries the same files
+          as the collapsed chip in its head instead — rendering both would put
+          the strip's rows back on the phone, which is the whole cost this
+          change removes. The collapsed/expanded row is untouched. */}
+      {!fullscreen ? <AgentDownloads id={s.id} files={s.downloads ?? []} /> : null}
       {expanded ? (
         showAppPane ? (
           // Full-screen split: transcript pinned left, the agent's live app
@@ -2446,6 +2458,10 @@ export function AgentRow({
                   itself) on a narrow phone rather than squeezing the title. */}
               <Budget5h />
               <HostRam />
+              {/* App-only full screen has no body at all — no head, no strip —
+                  so this bar is the ONLY place the agent's files are reachable
+                  from here. Same collapsed chip, same sheet. */}
+              <AgentDownloads id={s.id} files={s.downloads ?? []} compact />
               <a
                 className="agent-app-full__btn"
                 href={s.appPath}
