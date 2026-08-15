@@ -114,6 +114,10 @@ printf 'TITLE: A 20%% rye sourdough\\nTAGS: baking, sourdough\\n\\nThe reel walk
 )
 
 process.env.PATH = `${bin}${path.delimiter}${process.env.PATH}`
+// Pin the stub as THE binary, not merely the first `claude` on PATH: the API
+// resolves an absolute path once (api/src/claude-bin.mjs) and CLAUDE_BIN is its
+// authoritative input, so an operator's own CLAUDE_BIN can't reach this test.
+process.env.CLAUDE_BIN = path.join(bin, 'claude')
 process.env.ATLAS_IG_YTDLP = path.join(bin, 'yt-dlp')
 process.env.VAULT_PATH = vault
 process.env.VAULT_DIR = vault

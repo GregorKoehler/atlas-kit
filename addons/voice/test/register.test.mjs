@@ -41,6 +41,10 @@ stub('hear-stub', 'cat > /dev/null; echo "spoken words"')
 
 const TOKEN = 'test-token-abc'
 process.env.PATH = `${bin}${path.delimiter}${process.env.PATH || ''}`
+// Pin the stub as THE binary, not merely the first `claude` on PATH: the API
+// resolves an absolute path once (api/src/claude-bin.mjs) and CLAUDE_BIN is its
+// authoritative input, so an operator's own CLAUDE_BIN can't reach this test.
+process.env.CLAUDE_BIN = path.join(bin, 'claude')
 process.env.DASHBOARD_BEARER_TOKEN = TOKEN
 process.env.ATLAS_VOICE_TTS_CMD = ''
 process.env.ATLAS_VOICE_STT_CMD = ''
