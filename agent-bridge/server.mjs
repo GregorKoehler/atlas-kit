@@ -925,7 +925,7 @@ async function spawn({ task, repo, preamble, model, effort, images }) {
   // concrete values (0.0.0.0, its allocated port, the per-session base path), and
   // {statsFile} its container-side live-stats path (mirrors the box-local executor).
   const prompt = preamble
-    ? `${injectApp(preamble.replaceAll('{statsFile}', statsFile(id)), repo, id, appPort)}\n\n---\n# Your task\n${withImages(task, imagePaths)}`
+    ? `${injectApp(preamble.replaceAll('{statsFile}', statsFile(id)).replaceAll('{worktree}', worktree), repo, id, appPort)}\n\n---\n# Your task\n${withImages(task, imagePaths)}`
     : withImages(task, imagePaths)
   const launch = LAUNCH_CMD
     .replace('{model}', shquote(model || DEFAULT_MODEL))

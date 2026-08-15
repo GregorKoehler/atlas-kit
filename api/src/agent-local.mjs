@@ -31,9 +31,12 @@ import {
   collectSubAgents, mergeSubAgentLog,
   collectBackgroundJobs, mergeBackgroundJobLog,
 } from './subagent-scan.mjs'
+import { sharedCheckoutWarning } from './shared-checkout.mjs'
+import { mergedVerdict, mergedInfo, MERGE_LOG_FORMAT } from './merged-check.mjs'
+import { preflightVerdict } from './merge-preflight.mjs'
 import { generateMicros } from './agent-titles.mjs'
-import { readHistory, steerKey } from './agent-history.mjs'
-import { parseChoiceMenu } from './menu.mjs'
+import { readHistory, steerKey, steerEntry } from './agent-history.mjs'
+import { parseChoiceMenu, currentHighlight, driveSelect } from './menu.mjs'
 import { resolveVault, defaultVaultKey, isTypedVault } from './vaults.mjs'
 import { enqueueAtlasMerge } from './atlas-commit-queue.mjs'
 import { trackPhase, recordLifetime, revivePhase, aggregate, PHASE_HOLD_MS } from './agent-timings.mjs'
@@ -42,6 +45,14 @@ import {
   initLifecycle, isClosing, isInert, QUIESCENT,
 } from './agent-lifecycle.mjs'
 export { monthRunMsByRepo } from './agent-timings.mjs'
+// The queued-prompt delivery gate, shared with the bridge executor so the two
+// cannot drift: one per-kind classification, one menu/pacing rule, one test.
+import { decideDelivery, deliveryBackoffMs } from './queue-delivery.mjs'
+// Is a turn running? Two witnesses — the footer's `esc to interrupt` marker and
+// the spinner line above the input box — because the footer is rendered to the
+// pane width and drops that marker mid-turn. Shared, not copied.
+import { isBusy } from './pane-busy.mjs'
+import { sanitizeForTyping, deliveryLanded, clearInputBox, TUI_CLEAR_KEY, TUI_VERIFY, TUI_VERIFY_MAX_CHARS, TUI_VERIFY_SETTLE_MS, TUI_VERIFY_TRIES } from './tui-input.mjs'
 
 const HERE = path.dirname(new URL(import.meta.url).pathname)
 const REPOS_FILE = process.env.AGENT_LOCAL_REPOS || path.join(HERE, 'agent-local-repos.json')
@@ -126,6 +137,11 @@ const APP_PROBE_MS = Number(process.env.AGENT_LOCAL_APP_PROBE_MS || 300)
 // `images` wire field is historical; it now carries any file type.
 const MAX_IMAGES = Number(process.env.AGENT_MAX_IMAGES || 6)
 const MAX_IMAGE_BYTES = Number(process.env.AGENT_MAX_IMAGE_BYTES || 8 * 1024 * 1024)
+// Sanity cap on a single prompt's text, delivered as one literal tmux
+// send-keys line — not a real terminal paste, so no bracketed-paste chunking.
+// Generous enough for a full pasted email or a multi-page brief; still guards
+// against a multi-MB accidental paste getting typed keystroke-by-keystroke.
+const PROMPT_MAX_CHARS = Number(process.env.AGENT_PROMPT_MAX_CHARS || 50000)
 // Context-window meter: Claude's usable window (tokens) and how much of the
 // transcript tail to scan for the latest usage block (assistant events are
 // small, so 1 MiB reliably catches the most recent turn even on big sessions).
@@ -147,6 +163,13 @@ const MAX_STAT_LABEL = 28
 // its pending prompt delivered — true end-of-turn delivery, independent of the UI.
 const INTERRUPT_SETTLE_MS = Number(process.env.AGENT_LOCAL_INTERRUPT_SETTLE_MS || 400)
 const QUEUE_FLUSH_MS = Number(process.env.AGENT_LOCAL_QUEUE_FLUSH_MS || 3000)
+// Kill-switch (0/false/no/off) for the mid-turn half: when off, EVERY queued
+// prompt waits for a full idle again — the behaviour before boundary delivery,
+// restorable with one env var and a restart. Default on.
+const BOUNDARY_DELIVERY = !/^(0|false|no|off)$/i.test(process.env.AGENT_BOUNDARY_DELIVERY || '1')
+// Verified choice-menu selection (see selectChoice below): the settle delay
+// after each nav key before re-capturing the pane.
+const SELECT_STEP_MS = Number(process.env.AGENT_SELECT_STEP_MS || 250)
 // A session's queue (`s.queued`) is a FIFO of parked prompts; this caps its depth
 // so a stuck/errored agent that never flushes can't grow the persisted state without
 // bound. Queueing past the cap is rejected (the card surfaces the error).
@@ -303,6 +326,13 @@ export function localRepoKeys() {
 }
 export function isLocalRepo(repo) {
   return Object.prototype.hasOwnProperty.call(loadRepos(), repo)
+}
+// The box-local checkout for a repo key — the same `path || WORKSPACE` a spawn
+// uses — or null when this box doesn't have that repo (a bridge repo). What the
+// default-branch resolver reads `origin/HEAD` from (ship-prompt.mjs).
+export function repoPathFor(repo) {
+  const target = loadRepos()[repo]
+  return target ? target.path || WORKSPACE : null
 }
 // Whether the box can run Atlas workers at all: box-local execution is on AND the
 // `atlas` vault is registered. Gates the paired-worker briefing/ingest — including
@@ -507,12 +537,14 @@ backfillModelEffort()
 
 // Run a command directly on the box (no docker, no shell): argv is a real arg
 // array, so path/branch/text are never shell-interpolated.
-function run(argv) {
+// `opts` (cwd / a longer timeout) is for the few calls that need it — everything
+// else keeps the shared budget.
+function run(argv, opts = {}) {
   return new Promise((resolve) => {
     execFile(
       argv[0],
       argv.slice(1),
-      { timeout: EXEC_TIMEOUT_MS, maxBuffer: 4 * 1024 * 1024 },
+      { timeout: EXEC_TIMEOUT_MS, maxBuffer: 4 * 1024 * 1024, ...opts },
       (err, stdout, stderr) => {
         resolve({
           ok: !err,
@@ -587,14 +619,12 @@ function lastLine(text) {
   return lines.length ? lines[lines.length - 1] : ''
 }
 
-// Claude Code prints "esc to interrupt" in its status line ONLY while a turn is
-// actively running; the moment it finishes and waits for the next prompt that
-// marker is gone. So a live tmux session showing it = working ('running'); a
-// live one without it = the agent is blocked on YOU ('idle' / needs input).
-const BUSY_MARKER = /esc to interrupt/i
-export function isBusy(pane) {
-  return BUSY_MARKER.test(pane)
-}
+// Is a turn running? Two witnesses — the footer's `esc to interrupt` marker and
+// the spinner line above the input box — because the footer is rendered to the
+// pane width and drops that marker mid-turn. Shared with the bridge executor
+// (one implementation, see pane-busy.mjs); re-exported here so this module
+// stays the callers' single import, as before.
+export { isBusy }
 
 // Two interactive states the respond toolbar can drive — reported as `menuKind`
 // so the card shows only the confirm button that fits (and nothing when merely
@@ -956,12 +986,26 @@ function publicView(s, status, lastOutput, menuKind, transcript, appUp, menuChoi
     // Parsed numbered options of a pending choice menu (+ which one the TUI's
     // `❯` sits on), so the chat view can offer them as clickable buttons, plus
     // the prompt text above them so the operator sees WHAT they're answering.
+    // …question/header/per-option `description`, and an `escape` flag on the
+    // TUI's own "Type something."/"Chat about this" rows, all read straight off
+    // the pane (menu.mjs's parseChoiceMenu). A menu this flow can't drive
+    // reliably (multi-question/multiSelect, detected from the pane's own tab
+    // row) sends no options at all, just `menuUnsupported` — the card falls back
+    // to "use the terminal view" instead of misdriving it.
     ...(menuChoice
-      ? {
-          menuOptions: menuChoice.options,
-          menuHighlighted: menuChoice.highlighted,
-          ...(menuChoice.question ? { menuQuestion: menuChoice.question } : {}),
-        }
+      ? menuChoice.unsupported
+        ? {
+            menuUnsupported: true,
+            menuUnsupportedReason: menuChoice.reason,
+            ...(menuChoice.question ? { menuQuestion: menuChoice.question } : {}),
+            ...(menuChoice.header ? { menuHeader: menuChoice.header } : {}),
+          }
+        : {
+            menuOptions: menuChoice.options,
+            menuHighlighted: menuChoice.highlighted,
+            ...(menuChoice.question ? { menuQuestion: menuChoice.question } : {}),
+            ...(menuChoice.header ? { menuHeader: menuChoice.header } : {}),
+          }
       : {}),
     startedAt: s.startedAt,
     // Knowledge chat in its wrap-up turn (✕ pressed): flushing unsaved insights
@@ -1031,7 +1075,23 @@ function publicView(s, status, lastOutput, menuKind, transcript, appUp, menuChoi
     // Agent-signaled ship state (ATLAS:READY-TO-SHIP / ATLAS:SHIPPED markers):
     // the card highlights the Ship button on 'ready' and swaps it for a check
     // on 'shipped'; `shipInfo` carries the SHIPPED detail (PR number + SHA).
-    ...(s.shipState ? { shipState: s.shipState, ...(s.shipInfo ? { shipInfo: s.shipInfo } : {}) } : {}),
+    // `shipWarning` is the ship-time shared-checkout guard (checkSharedCheckout):
+    // set only alongside 'ready', warn-only — the card shows a ⚠ beside Ship.
+    // 'merged' OUTRANKS both markers: it is the repo's own verdict (sampleMerged
+    // found the merge commit that landed this branch), so it also covers a PR
+    // the orchestrator or the operator merged, and its `shipInfo` is the PR
+    // number + merge SHA read off that commit rather than off the agent's reply.
+    ...(s.shipState || s.shipMerged
+      ? {
+          shipState: s.shipMerged ? 'merged' : s.shipState,
+          ...(s.shipMerged
+            ? { shipInfo: mergedInfo(s.shipMerged) }
+            : s.shipInfo
+              ? { shipInfo: s.shipInfo }
+              : {}),
+          ...(s.shipWarning && !s.shipMerged ? { shipWarning: s.shipWarning } : {}),
+        }
+      : {}),
     // Position in the serial ship train (if enqueued): `pos` 1-based, `active`
     // while it's the one currently merging. The card shows "#N" / "shipping…".
     ...(shipQ ? { shipQueue: shipQ } : {}),
@@ -1051,6 +1111,197 @@ function publicView(s, status, lastOutput, menuKind, transcript, appUp, menuChoi
     ...(s.atlasWorker ? { atlasWorker: true } : {}),
     ...(s.lc?.closePhase ? { closePhase: s.lc.closePhase } : {}),
   }
+}
+
+// One `git status` on the repo's SHARED checkout when a session flips to
+// READY-TO-SHIP (the decision itself is pure — shared-checkout.mjs). The path
+// comes from the session's repo config (`s.path`), never a hardcoded one.
+// Fire-and-forget so the poll stays fast: the warning surfaces on the next tick.
+// Dev sessions only — a knowledge chat's `path` is its vault.
+async function checkSharedCheckout(s) {
+  if (!s.path || s.kind === 'knowledge') return
+  const w = sharedCheckoutWarning(s.path, await run(['git', '-C', s.path, 'status', '--porcelain', '-b']))
+  if ((s.shipWarning || '') === (w || '')) return
+  if (w) s.shipWarning = w
+  else delete s.shipWarning
+  persist()
+}
+
+// ── Merged-branch detection (merged-check.mjs is the pure core) ─────────────
+// The agent's own ATLAS markers only ever tell us what the AGENT did, so a PR
+// merged by the Atlas orchestrator or by the operator on github.com left the
+// card stuck on `ready`. Ask the repo instead: periodically, for every dev
+// session whose branch hasn't been found merged yet, look for the merge commit
+// that landed it. The verdict is PERSISTED on the session (`s.shipMerged`), so
+// it survives cleanup_agent force-deleting the branch, and it is TERMINAL — a
+// merged session is dropped from the candidate set (only a NEW ship marker,
+// i.e. the agent taking on fresh work, clears it; see the poll in listSessions).
+//
+// Freshness: this is the only thing here that touches the network, and it
+// fetches ONE ref (the default branch) per repo per pass, only when that repo
+// still has an unmerged candidate — i.e. nothing at all once the fleet is idle
+// or fully merged. Default cadence is 5 min (AGENT_MERGED_CHECK_MS).
+const MERGED_CHECK_MS = Number(process.env.AGENT_MERGED_CHECK_MS || 5 * 60 * 1000)
+let mergedCheckedAt = 0
+let checkingMerged = false
+
+// A session whose merged-ness is still worth a look: a dev agent with a branch,
+// in a repo checked out on this box, not already found merged.
+const mergeCandidate = (s) =>
+  (s.kind || 'dev') === 'dev' && !!s.branch && !!s.path && !s.shipMerged && s.status !== 'error'
+
+// `origin/<default>` for this checkout — read from the remote HEAD, never assumed.
+async function defaultRemoteRef(repoPath) {
+  const r = await run(['git', '-C', repoPath, 'symbolic-ref', '--short', 'refs/remotes/origin/HEAD'])
+  const ref = r.ok ? r.stdout.trim() : ''
+  return ref.startsWith('origin/') ? ref : ''
+}
+
+async function sampleMerged() {
+  const now = Date.now()
+  if (checkingMerged || now - mergedCheckedAt < MERGED_CHECK_MS) return
+  mergedCheckedAt = now
+  checkingMerged = true
+  let changed = false
+  try {
+    const byPath = new Map()
+    for (const s of Object.values(registry.sessions)) {
+      if (!mergeCandidate(s)) continue
+      if (!byPath.has(s.path)) byPath.set(s.path, [])
+      byPath.get(s.path).push(s)
+    }
+    for (const [repoPath, list] of byPath) {
+      const ref = await defaultRemoteRef(repoPath)
+      if (!ref) continue
+      // Refresh ONLY that one remote-tracking ref — an explicit refspec keeps the
+      // ref lock narrow, so this never contends with a deploy pull the way a bare
+      // `git fetch` would.
+      const head = ref.slice('origin/'.length)
+      await run(['git', '-C', repoPath, 'fetch', '--quiet', '--no-tags', 'origin', `+refs/heads/${head}:refs/remotes/${ref}`])
+      for (const s of list) {
+        const tip = await run(['git', '-C', repoPath, 'rev-parse', '--verify', `${s.branch}^{commit}`])
+        if (!tip.ok) continue // branch gone (cleaned up, or never created) — say nothing
+        const log = await run([
+          'git', '-C', repoPath, 'log', '--ancestry-path', '--merges', MERGE_LOG_FORMAT,
+          `${tip.stdout.trim()}..${ref}`,
+        ])
+        const v = log.ok ? mergedVerdict(tip.stdout.trim(), log.stdout) : null
+        if (!v) continue
+        s.shipMerged = v
+        changed = true
+        audit({ action: 'merged', id: s.id, repo: s.repo, branch: s.branch, pr: v.pr, sha: v.sha, ok: true })
+      }
+    }
+  } finally {
+    checkingMerged = false
+    if (changed) persist()
+  }
+}
+
+// A merge is a network round-trip to GitHub, not a local git call — the shared
+// 15 s exec budget is too tight for it.
+const MERGE_TIMEOUT_MS = Number(process.env.AGENT_MERGE_TIMEOUT_MS || 60000)
+// `mergeStateStatus` reads UNKNOWN while GitHub is still computing mergeability
+// after a push — transient, not a failure, so poll instead of refusing on the
+// first look. Worst case ~3 views + 2 waits, well inside MERGE_TIMEOUT_MS.
+const PREFLIGHT_TRIES = Number(process.env.AGENT_MERGE_PREFLIGHT_TRIES || 3)
+const PREFLIGHT_DELAY_MS = Number(process.env.AGENT_MERGE_PREFLIGHT_DELAY_MS || 1500)
+const PR_VIEW_FIELDS = 'number,state,mergeStateStatus,mergeable,statusCheckRollup,baseRefName'
+
+/** GitHub's view of the PR for this branch — null when there is no open PR. */
+async function prView(s) {
+  const r = await run(['gh', 'pr', 'view', s.branch, '--json', PR_VIEW_FIELDS], {
+    cwd: s.path,
+    timeout: MERGE_TIMEOUT_MS,
+  })
+  if (!r.ok) return null // `gh` exits non-zero with "no pull requests found for branch"
+  try {
+    return JSON.parse(r.stdout)
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Does the PR branch contain the CURRENT tip of its base? That is the freshness
+ * question `mergeStateStatus` can only answer on a repo whose protection REQUIRES
+ * up-to-date branches — on an unprotected repo it reports CLEAN for a branch built
+ * on an old base, so ask git.
+ *
+ * Both sides are read from origin (the merge lands what GitHub has, not what this
+ * checkout happens to hold), refreshed with explicit refspecs so the ref lock
+ * stays narrow and never contends with a deploy pull — same discipline as
+ * sampleMerged(). Resolving both to SHAs first means a failing `--is-ancestor` is
+ * the ancestry ANSWER and not a bad-ref error.
+ *
+ * @returns true (fresh) / false (behind) / null (undeterminable — never refuse)
+ */
+async function branchIsFresh(s, base) {
+  if (!base) return null
+  const f = await run([
+    'git', '-C', s.path, 'fetch', '--quiet', '--no-tags', 'origin',
+    `+refs/heads/${base}:refs/remotes/origin/${base}`,
+    `+refs/heads/${s.branch}:refs/remotes/origin/${s.branch}`,
+  ])
+  if (!f.ok) return null
+  const sha = async (ref) => {
+    const r = await run(['git', '-C', s.path, 'rev-parse', '--verify', `refs/remotes/origin/${ref}^{commit}`])
+    return r.ok ? r.stdout.trim() : ''
+  }
+  const [baseSha, headSha] = [await sha(base), await sha(s.branch)]
+  if (!baseSha || !headSha) return null
+  return (await run(['git', '-C', s.path, 'merge-base', '--is-ancestor', baseSha, headSha])).ok
+}
+
+/** Ask GitHub + git whether this PR may be merged. Never merges anything. */
+async function preflight(s) {
+  let pr = null
+  for (let i = 1; i <= PREFLIGHT_TRIES; i++) {
+    pr = await prView(s)
+    if (!pr || String(pr.mergeStateStatus || '').toUpperCase() !== 'UNKNOWN') break
+    if (i < PREFLIGHT_TRIES) await sleep(PREFLIGHT_DELAY_MS)
+  }
+  const fresh = pr && String(pr.state || 'OPEN').toUpperCase() === 'OPEN'
+    ? await branchIsFresh(s, pr.baseRefName)
+    : null
+  return preflightVerdict({ pr, fresh, branch: s.branch, tries: PREFLIGHT_TRIES })
+}
+
+/**
+ * Merge one box-local dev agent's PR — `gh pr merge <branch> --merge`, run in the
+ * repo checkout the session's worktree belongs to. Exactly what the ship protocol
+ * (and an orchestrator's own Bash) runs by hand.
+ *
+ * Doing it HERE is the point: the caller of this route can be recorded as the
+ * merger (agent-routes' merge claim → the fleet note it would otherwise get told
+ * about its own action), which a raw `gh pr merge` in an agent's terminal can
+ * never be. GitHub can't tell us who merged — every merge goes through the same
+ * token — so the claim has to be a side effect of the merge action itself.
+ *
+ * A server-side PRE-FLIGHT fronts it (merge-preflight.mjs): stale / conflicted /
+ * blocked / red / still-running-checks / no-open-PR are refused with the state
+ * named, because this is the one ship path that otherwise revalidates nothing.
+ * `force: true` skips it — the operator sometimes knows better — but nothing
+ * else about a successful merge changes, the merge claim included.
+ */
+export async function mergePr({ id, force = false }) {
+  const s = registry.sessions[id]
+  if (!s) return { status: 404, ok: false, error: 'no such session' }
+  if ((s.kind || 'dev') !== 'dev' || !s.branch || !s.path) {
+    return { status: 400, ok: false, error: 'not a dev agent with a branch' }
+  }
+  if (!force) {
+    const v = await preflight(s)
+    if (!v.ok) {
+      audit({ action: 'merge-pr', id: s.id, repo: s.repo, branch: s.branch, ok: false, preflight: v.state, error: v.error })
+      return { status: 409, ok: false, error: v.error, preflight: v.state }
+    }
+  }
+  const r = await run(['gh', 'pr', 'merge', s.branch, '--merge'], { cwd: s.path, timeout: MERGE_TIMEOUT_MS })
+  const detail = ((r.stdout || '') + (r.stderr || '')).trim().slice(0, 500)
+  audit({ action: 'merge-pr', id: s.id, repo: s.repo, branch: s.branch, ok: r.ok, ...(force ? { force: true } : {}), ...(r.ok ? {} : { error: detail }) })
+  if (!r.ok) return { status: 502, ok: false, error: detail || 'gh pr merge failed' }
+  return { status: 200, ok: true, branch: s.branch, output: detail }
 }
 
 export async function listSessions() {
@@ -1130,6 +1381,17 @@ export async function listSessions() {
       s.shipState = ship.state
       s.shipInfo = ship.info
       changed = true
+      // Ship-time guard: the moment the agent declares itself ready, look at the
+      // repo's SHARED checkout (the one the live services run from) and warn if
+      // it isn't clean at its upstream — the tell for an agent that worked there
+      // instead of in its worktree. Warn only; see shared-checkout.mjs. Any other
+      // transition (→ shipped, or back) drops a stale warning.
+      if (ship.state === 'ready') checkSharedCheckout(s)
+      else delete s.shipWarning
+      // A NEW marker means the agent moved on (re-tasked after its PR landed),
+      // so the old merged verdict no longer describes the branch — drop it and
+      // let sampleMerged decide again.
+      delete s.shipMerged
     }
     out.push(publicView(s, status, tail || s.lastSeen || '', menuKind, transcript, appUp, menuChoice))
   }
@@ -1446,7 +1708,7 @@ export async function spawn({ task, repo, preamble, model, effort, context, imag
   // reads them on its first turn — same mechanism as a follow-up prompt's images.
   const taskBody = withImages(task, imagePaths)
   const prompt = preamble
-    ? `${injectApp(preamble.replaceAll('{statsFile}', statsFile(id)), repo, id)}${context ? `\n\n${context}` : ''}\n\n---\n# Your task\n${taskBody}`
+    ? `${injectApp(preamble.replaceAll('{statsFile}', statsFile(id)).replaceAll('{worktree}', worktree), repo, id)}${context ? `\n\n${context}` : ''}\n\n---\n# Your task\n${taskBody}`
     : taskBody
   const launch = LAUNCH_CMD
     .replace('{model}', shquote(model || DEFAULT_MODEL))
@@ -1707,7 +1969,7 @@ async function prepare(id, text, images) {
   const imgs = Array.isArray(images) ? images : []
   const hasText = typeof text === 'string' && text.length > 0
   if (!hasText && !imgs.length) return { err: { status: 400, ok: false, error: 'text or images required' } }
-  if (hasText && text.length > 8000) return { err: { status: 400, ok: false, error: 'text too long' } }
+  if (hasText && text.length > PROMPT_MAX_CHARS) return { err: { status: 400, ok: false, error: `text too long (max ${PROMPT_MAX_CHARS} chars)` } }
   if (imgs.length > MAX_IMAGES) return { err: { status: 400, ok: false, error: `too many files (max ${MAX_IMAGES})` } }
   if (!(await sessionAlive(s))) return { err: { status: 409, ok: false, error: 'session not running' } }
   let paths
@@ -1720,11 +1982,64 @@ async function prepare(id, text, images) {
 }
 
 // Type a single-line payload into the session and submit it (Enter).
+//
+// `send-keys -l` is a KEYBOARD, not a pipe: the bytes are parsed by Claude
+// Code's input as key input, so an ESC inside the text opens a terminal escape
+// sequence and takes the operator's words with it — an unterminated OSC-8
+// hyperlink from a pasted chat-view excerpt ate most of a 957-char prompt in the
+// incident this fixes, and the residue was submitted as the operator's message.
+// sanitizeForTyping strips the sequences (and only them) first; tui-input.mjs
+// carries the measurement.
+//
+// Then LOOK before submitting. The Enter used to be unconditional, which is the
+// whole reason that incident was silent rather than obvious: a mangled buffer
+// became a real user turn the model answered. If what we typed is not readable
+// back off the pane we clear the box and fail, so the caller sees an error and
+// the queue keeps the prompt for the next tick. Never delivered beats silently
+// replaced — and both are loud (audit + the card's error).
 async function deliver(s, payload) {
-  const t = await run(['tmux', 'send-keys', '-t', s.tmux, '-l', payload])
+  const safe = sanitizeForTyping(payload)
+  const stripped = payload.length - safe.length
+  // ⚠️ NEVER type into a non-empty box. Whatever is in there — our own residue
+  // from a refusal, a half-delivered prompt from a crash — the typed text
+  // concatenates onto it and the next Enter submits the pair. Clearing is
+  // VERIFIED, not counted: `C-u` kills a display ROW, so the count depends on
+  // the wrapped height of content we didn't put there (tui-input.mjs).
+  const io = {
+    readPane: () => captureTail(s, TAIL_LINES, true),
+    pressClear: () => run(['tmux', 'send-keys', '-t', s.tmux, TUI_CLEAR_KEY]),
+  }
+  let cleared = 0
+  if (TUI_VERIFY) {
+    const pre = await clearInputBox(io)
+    if (!pre.ok) {
+      audit({ action: 'deliver-box-stuck', id: s.id, repo: s.repo, len: safe.length, presses: pre.presses, residue: pre.residue, ok: false })
+      return { ok: false, error: 'input box is not empty and could not be cleared (nothing typed)' }
+    }
+    cleared = pre.presses
+  }
+  const t = await run(['tmux', 'send-keys', '-t', s.tmux, '-l', safe])
   if (!t.ok) return { ok: false, error: t.stderr.slice(0, 500) || 'send-keys failed' }
+  if (TUI_VERIFY && safe.length <= TUI_VERIFY_MAX_CHARS && !(await typedTextLanded(s, safe))) {
+    const post = await clearInputBox(io)
+    audit({ action: 'deliver-mangled', id: s.id, repo: s.repo, len: safe.length, stripped, presses: post.presses, emptied: post.ok, ok: false })
+    return { ok: false, error: 'input did not land in the session (not submitted)' }
+  }
   await run(['tmux', 'send-keys', '-t', s.tmux, 'Enter'])
-  return { ok: true }
+  return { ok: true, stripped, cleared }
+}
+
+// Read the typed text back off the pane. The pane lags the keystrokes, so this
+// looks more than once (see TUI_VERIFY_SETTLE_MS) — the happy path still
+// returns on the first look, and only a genuinely mangled buffer pays the wait.
+// The capture keeps its SGR (`-e`): the box's faint placeholder is what tells
+// an empty box from one holding text.
+async function typedTextLanded(s, payload) {
+  for (let i = 0; i < TUI_VERIFY_TRIES; i++) {
+    if (i) await sleep(TUI_VERIFY_SETTLE_MS)
+    if (deliveryLanded(await captureTail(s, TAIL_LINES, true), payload)) return true
+  }
+  return false
 }
 
 // Remember that an Atlas orchestrator — not the operator — injected this prompt.
@@ -1734,13 +2049,27 @@ async function deliver(s, payload) {
 // which colors those bubbles apart in the chat view. Capped + persisted so the
 // tagging survives a restart, like the rest of the session record.
 const STEER_KEYS_MAX = 60
-function recordSteer(s, text, steeredBy) {
+// `source` ('atlas' by default, 'system' for a dashboard-derived observation
+// like a reply receipt, 'agent' for peer mail) rides IN the entry (steerEntry)
+// so the chat view can name WHO injected the turn, not just "not the operator".
+// A bare entry still means 'atlas', which keeps already-persisted state working.
+// Without this a receipt renders as a turn the operator typed.
+function recordSteer(s, text, steeredBy, source) {
   if (!steeredBy || typeof text !== 'string' || !text.trim()) return
-  const key = steerKey(text)
+  const key = steerEntry(steerKey(text), source)
   if (!Array.isArray(s.steered)) s.steered = []
   if (s.steered.includes(key)) return
   s.steered.push(key)
   if (s.steered.length > STEER_KEYS_MAX) s.steered = s.steered.slice(-STEER_KEYS_MAX)
+}
+
+// Minimal public description of a box-local session — who it is, so the routes
+// layer can resolve a session's repo (the ship route's per-project prompt)
+// without exposing the registry. Null when unknown.
+export function describeSession(id) {
+  const s = registry.sessions[id]
+  if (!s) return null
+  return { id: s.id, kind: s.kind || 'dev', repo: s.repo, vault: s.vault, task: s.task, status: s.status }
 }
 
 export async function prompt({ id, text, images, force, steeredBy }) {
@@ -1761,7 +2090,7 @@ export async function prompt({ id, text, images, force, steeredBy }) {
   p.s.lastPrompt = { text: p.text, at: nowIso() }
   recordSteer(p.s, p.text, steeredBy)
   persist()
-  audit({ action: 'prompt', id, repo: p.s.repo, len: p.payload.length, images: p.paths.length, ...(steeredBy ? { steeredBy } : {}), ok: true })
+  audit({ action: 'prompt', id, repo: p.s.repo, len: p.payload.length, images: p.paths.length, ...(d.stripped ? { stripped: d.stripped } : {}), ...(d.cleared ? { cleared: d.cleared } : {}), ...(steeredBy ? { steeredBy } : {}), ok: true })
   return { status: 200, ok: true }
 }
 
@@ -1782,22 +2111,26 @@ export async function interrupt({ id, text, images, steeredBy }) {
   p.s.lastPrompt = { text: p.text, at: nowIso() }
   recordSteer(p.s, p.text, steeredBy)
   persist()
-  audit({ action: 'interrupt', id, repo: p.s.repo, len: p.payload.length, images: p.paths.length, ...(steeredBy ? { steeredBy } : {}), ok: true })
+  audit({ action: 'interrupt', id, repo: p.s.repo, len: p.payload.length, images: p.paths.length, ...(d.stripped ? { stripped: d.stripped } : {}), ...(d.cleared ? { cleared: d.cleared } : {}), ...(steeredBy ? { steeredBy } : {}), ok: true })
   return { status: 200, ok: true }
 }
 
 // Park a prompt to be delivered when the session next goes idle (the flush loop
 // below does the sending). Appends to the session's FIFO queue, so queueing again
 // while one is already parked keeps both (delivered in order). Images are saved now.
-export async function queuePrompt({ id, text, images, kind, summary, steeredBy }) {
+export async function queuePrompt({ id, text, images, kind, summary, steeredBy, source }) {
   const p = await prepare(id, text, images)
   if (p.err) return p.err
   if (!Array.isArray(p.s.queued)) p.s.queued = []
   if (p.s.queued.length >= MAX_QUEUED) return { status: 409, ok: false, error: `queue full (max ${MAX_QUEUED})` }
-  p.s.queued.push({ text: p.text, paths: p.paths, ...(kind ? { kind } : {}), ...(summary ? { summary } : {}) })
-  // Record now (by text); the parked prompt is delivered at the next idle and the
+  // `at` is the ENQUEUE time. A parked prompt waits for a delivery point the
+  // session may not reach for a while — so how long it waited is the one number
+  // that turns "the fleet updates feel laggy" into something measurable (the card
+  // shows it per chip; flushQueued audits it on delivery, with `via`).
+  p.s.queued.push({ text: p.text, paths: p.paths, at: nowIso(), ...(kind ? { kind } : {}), ...(summary ? { summary } : {}) })
+  // Record now (by text); the parked prompt is delivered later and the
   // fingerprint matches whenever that turn lands in the transcript.
-  recordSteer(p.s, p.text, steeredBy)
+  recordSteer(p.s, p.text, steeredBy, source)
   persist()
   audit({ action: 'queue', id, repo: p.s.repo, len: p.payload.length, images: p.paths.length, depth: p.s.queued.length, ...(kind ? { kind } : {}), ok: true })
   return { status: 200, ok: true }
@@ -1874,7 +2207,7 @@ export function enqueueShip({ id, text }) {
   if (!s) return { status: 404, ok: false, error: 'no such session' }
   if (s.kind === 'knowledge') return { status: 400, ok: false, error: 'knowledge chats have no PR to ship' }
   if (typeof text !== 'string' || !text.trim()) return { status: 400, ok: false, error: 'ship prompt required' }
-  if (text.length > 8000) return { status: 400, ok: false, error: 'ship prompt too long' }
+  if (text.length > PROMPT_MAX_CHARS) return { status: 400, ok: false, error: `ship prompt too long (max ${PROMPT_MAX_CHARS} chars)` }
   if (!s.lc) migrateSession(s)
   // Re-shipping a STUCK session: a prior ship that couldn't confirm its merge left
   // it in the needs_attention sink. Lift it back to a live state so the driver can
@@ -1969,7 +2302,7 @@ export async function sendNow({ id }) {
   s.phaseHold = Date.now() + PHASE_HOLD_MS
   s.lastPrompt = { text: q.text || '', at: nowIso() }
   persist()
-  audit({ action: 'queue-send-now', id, repo: s.repo, len: payload.length, images: (q.paths || []).length, ok: true })
+  audit({ action: 'queue-send-now', id, repo: s.repo, len: payload.length, images: (q.paths || []).length, ...(d.stripped ? { stripped: d.stripped } : {}), ...(d.cleared ? { cleared: d.cleared } : {}), ok: true })
   return { status: 200, ok: true }
 }
 
@@ -1985,25 +2318,51 @@ async function flushQueued() {
     const shipHead = shipHeadActiveId()
     for (const s of Object.values(registry.sessions)) {
       if (!Array.isArray(s.queued) || !s.queued.length || s.status === 'error') continue
-      // Don't deliver a parked prompt into an in-flight ship — it would land
-      // mid git-merge. The ship train delivers the ship prompt itself; this
-      // member's other queued prompt waits until it leaves the train.
-      if (s.id === shipHead) continue
+      // Backing off a head that keeps being refused (deliveryBackoffMs) — the
+      // message stays queued, we just stop asking every 3 s.
+      if (s.deliverRetryAt && Date.now() < s.deliverRetryAt) continue
       if (!(await sessionAlive(s))) continue
       const pane = await captureTail(s, TAIL_LINES)
-      if (isBusy(pane) || menuKindOf(pane)) continue
-      // One per idle tick: deliver the FIFO head, then leave the rest for later
-      // ticks (the agent goes busy on this one, so the next won't fire until it's
-      // idle again — each queued prompt gets its own turn, in order).
+      // The FIFO head only: one delivery per session per tick, in order — never a
+      // burst (mid-turn delivery changes WHEN the head goes out, not how many).
+      // The ship-train and menu guards live inside the same decision.
       const q = s.queued[0]
+      const dec = decideDelivery({
+        kind: q.kind,
+        busy: isBusy(pane),
+        menu: !!menuKindOf(pane),
+        shipHead: s.id === shipHead,
+        boundaryEnabled: BOUNDARY_DELIVERY,
+        sinceBoundaryMs: s.boundaryAt ? Date.now() - s.boundaryAt : null,
+      })
+      if (!dec.deliver) continue
       const payload = withImages(q.text || '', q.paths || [])
       const d = await deliver(s, payload)
-      if (!d.ok) continue
+      if (!d.ok) {
+        s.deliverFailures = (s.deliverFailures || 0) + 1
+        const backoffMs = deliveryBackoffMs(s.deliverFailures)
+        if (backoffMs) {
+          s.deliverRetryAt = Date.now() + backoffMs
+          console.error(`[agent-local] delivery to ${s.id} refused ${s.deliverFailures}x (${d.error}) — holding ${Math.round(backoffMs / 1000)}s; the message stays queued`)
+          audit({ action: 'queue-backoff', id: s.id, repo: s.repo, failures: s.deliverFailures, backoffMs, error: d.error, ok: false })
+        }
+        persist()
+        continue
+      }
+      delete s.deliverFailures
+      delete s.deliverRetryAt
       s.lastPrompt = { text: q.text || '', at: nowIso() }
+      // Stamp the mid-turn delivery so the next one is paced (BOUNDARY_MIN_GAP_MS)
+      // rather than following on the next 3 s tick.
+      if (dec.via === 'boundary') s.boundaryAt = Date.now()
       s.queued.shift()
       if (!s.queued.length) delete s.queued
       persist()
-      audit({ action: 'queue-flush', id: s.id, repo: s.repo, len: payload.length, images: (q.paths || []).length, ok: true })
+      // waitMs: enqueue → actual delivery. This is the real lag of a parked
+      // prompt, and the only place it is recorded. `via` splits the two
+      // populations (boundary vs idle); `kind` says which class jumped the queue.
+      const waitMs = q.at ? Date.now() - Date.parse(q.at) : null
+      audit({ action: 'queue-flush', id: s.id, repo: s.repo, len: payload.length, images: (q.paths || []).length, ...(d.stripped ? { stripped: d.stripped } : {}), ...(d.cleared ? { cleared: d.cleared } : {}), ...(waitMs != null && waitMs >= 0 ? { waitMs } : {}), via: dec.via, ...(q.kind ? { kind: q.kind } : {}), ok: true })
     }
   } finally {
     flushing = false
@@ -2295,9 +2654,9 @@ const KNOWLEDGE_CLOSE_PROMPT =
 // The Atlas chat closes the TYPED way: the wrap-up folds insights into the Atlas
 // with the typed edges/dates the operator could later query, consults the Legend
 // (reuse-or-register keys), and logs the ingest — not just an add-and-link note.
-const ATLAS_KNOWLEDGE_CLOSE_PROMPT =
+export const ATLAS_KNOWLEDGE_CLOSE_PROMPT =
   process.env.AGENT_ATLAS_KNOWLEDGE_CLOSE_PROMPT ||
-  'This chat is being closed. Final turn — two things. FIRST, tidy up the dev agents you spawned. cleanup_agent is the ⌦ teardown — it force-deletes the branch — so run it ONLY on an agent whose work is already SHIPPED/merged (check shipState in list_agents): it recaps → logs the session to the Atlas → removes the worktree + branch, leaving no orphan. For any spawned agent whose work is NOT yet shipped, do NOT delete it — leave it running and ASK the operator to confirm cleanup (name it here and send_message them), since its branch would otherwise be lost. SECOND, if this conversation produced insights, corrections, or research findings NOT yet in the Atlas, work them in now the TYPED way — update the most fitting page (or add one focused page), and think QUERY-FIRST: add the typed edges + dates the operator would later filter/traverse for (consult Wiki/Legend.md first; reuse a registered snake_case key, or coin + register a new one in the SAME edit), overwrite live state in place, and append a Wiki/log.md entry (## [YYYY-MM-DD] ingest | <title>). Then pull-rebase, commit only your files, and push. If everything durable is already saved (or nothing came up), just reply "nothing to save". Keep it brief — the session ends when you finish.'
+  'This chat is being closed. Final turn — three things. FIRST, tidy up the dev agents you spawned. cleanup_agent is the ⌦ teardown — it force-deletes the branch — so run it ONLY on an agent whose work is already SHIPPED/merged (check shipState in list_agents): it recaps → logs the session to the Atlas → removes the worktree + branch, leaving no orphan. For any spawned agent whose work is NOT yet shipped, do NOT delete it — leave it running and ASK the operator to confirm cleanup (name it here and send_message them), since its branch would otherwise be lost. SECOND, if this conversation produced insights, corrections, or research findings NOT yet in the Atlas, work them in now the TYPED way — update the most fitting page (or add one focused page), and think QUERY-FIRST: add the typed edges + dates the operator would later filter/traverse for (consult Wiki/Legend.md first; reuse a registered snake_case key, or coin + register a new one in the SAME edit), overwrite live state in place, and append a Wiki/log.md entry (## [YYYY-MM-DD] ingest | <title>). Then pull-rebase, commit only your files, and push. THIRD, before filing any NEW Tasks/ note, check whether the work that shipped CLOSED an open one — search Tasks/ for open notes (status not done) matching it by for_project, PR number or subject, and prefer closing over filing. Close on EVIDENCE only, never on age or plausibility: the PR is merged AND the task is genuinely what that work did, so set status: done + done: <YYYY-MM-DD>, bump updated, and append one dated ## Log line naming the PR and merged SHA; if completion still needs a deploy that has not happened, or the match is a judgement call, LEAVE IT OPEN and say so here. If everything durable is already saved (or nothing came up), just reply "nothing to save". Keep it brief — the session ends when you finish.'
 // Don't reap before the wrap-up turn has had a chance to START (the busy marker
 // takes a moment to appear after the prompt is typed)...
 const KNOWLEDGE_CLOSE_GRACE_MS = Number(process.env.AGENT_KNOWLEDGE_CLOSE_GRACE_MS || 20000)
@@ -2314,15 +2673,15 @@ const DEV_RECAP_PROMPT =
   'This session is closing. Final turn — no tools, no edits: reply with a TIGHT recap of THIS session for the Atlas knowledge base. What changed and why, the key decisions and any dead-ends, and anything that CONTRADICTS what the Atlas briefing told you at the start. A few sentences or a short list — durable knowledge only, not a play-by-play. The session ends when you finish.'
 
 // The ingest prompt handed to the paired worker once the dev recap is captured.
-function atlasIngestPrompt(recap, dev) {
-  return `The dev agent you briefed (\`${dev.id}\`, branch \`${dev.branch}\`, worktree \`${dev.worktree}\`) has finished. Its session recap:\n\n${recap}\n\nINGEST this per your INGEST instructions: update the most fitting page and ALWAYS append at least one Wiki/log.md entry; note any contradiction with what the Atlas previously claimed. If the recap names a concrete follow-up/next-step or the dev task was an explicit "add a task" request, also file a focused Tasks/<slug>.md tagged to its project (\`for_project: "[[<Project>]]"\`, matched against Wiki/Projects/) so it lands on the Kanban. You may read the dev branch's diff for detail. Commit to YOUR branch with a clear message — do NOT push and do NOT touch main; the dashboard merges your branch. End with ATLAS:INGESTED on its own line.`
+export function atlasIngestPrompt(recap, dev) {
+  return `The dev agent you briefed (\`${dev.id}\`, branch \`${dev.branch}\`, worktree \`${dev.worktree}\`) has finished. Its session recap:\n\n${recap}\n\nINGEST this per your INGEST instructions: update the most fitting page and ALWAYS append at least one Wiki/log.md entry; note any contradiction with what the Atlas previously claimed. CLOSE BEFORE YOU FILE: check whether this work RETIRES an open Tasks/ note (\`status\` not \`done\`, matched by \`for_project\` / PR number / subject) and close it per your TASKS instructions — on evidence only (merged, and genuinely what this work did); if it is a judgement call or still owes a deploy, leave it open and say so. If the recap names a concrete follow-up/next-step or the dev task was an explicit "add a task" request, also file a focused Tasks/<slug>.md tagged to its project (\`for_project: "[[<Project>]]"\`, matched against Wiki/Projects/) so it lands on the Kanban. You may read the dev branch's diff for detail. Commit to YOUR branch with a clear message — do NOT push and do NOT touch main; the dashboard merges your branch. End with ATLAS:INGESTED on its own line.`
 }
 
 // Ingest prompt for a REMOTE (workstation) dev agent. Same INGEST contract, but
 // the dev agent ran in a container the box can't reach — so the worker works from
 // the recap ALONE (it cannot read the remote diff).
-function atlasIngestPromptRemote(recap, dev) {
-  return `A dev agent (\`${dev.id}\`${dev.task ? `, task: "${dev.task}"` : ''}) running on a remote workstation has finished. Its session recap:\n\n${recap}\n\nINGEST this per your INGEST instructions: update the most fitting page and ALWAYS append at least one Wiki/log.md entry; note any contradiction with what the Atlas previously claimed. If the recap names a concrete follow-up/next-step or the dev task was an explicit "add a task" request, also file a focused Tasks/<slug>.md tagged to its project (\`for_project: "[[<Project>]]"\`, matched against Wiki/Projects/) so it lands on the Kanban. The dev agent ran on a remote box, so work ONLY from this recap — you cannot read its diff. Commit to YOUR branch with a clear message — do NOT push and do NOT touch main; the dashboard merges your branch. End with ATLAS:INGESTED on its own line.`
+export function atlasIngestPromptRemote(recap, dev) {
+  return `A dev agent (\`${dev.id}\`${dev.task ? `, task: "${dev.task}"` : ''}) running on a remote workstation has finished. Its session recap:\n\n${recap}\n\nINGEST this per your INGEST instructions: update the most fitting page and ALWAYS append at least one Wiki/log.md entry; note any contradiction with what the Atlas previously claimed. CLOSE BEFORE YOU FILE: check whether this work RETIRES an open Tasks/ note (\`status\` not \`done\`, matched by \`for_project\` / PR number / subject) and close it per your TASKS instructions — on evidence only (merged, and genuinely what this work did); if it is a judgement call or still owes a deploy, leave it open and say so. If the recap names a concrete follow-up/next-step or the dev task was an explicit "add a task" request, also file a focused Tasks/<slug>.md tagged to its project (\`for_project: "[[<Project>]]"\`, matched against Wiki/Projects/) so it lands on the Kanban. The dev agent ran on a remote box, so work ONLY from this recap — you cannot read its diff. Commit to YOUR branch with a clear message — do NOT push and do NOT touch main; the dashboard merges your branch. End with ATLAS:INGESTED on its own line.`
 }
 
 // Ephemeral Atlas ingest for a REMOTE (workstation) dev agent's session recap.
@@ -2416,6 +2775,7 @@ const flushTimer = setInterval(() => {
   if (DRIVE) driveAll().catch(() => {}) // the one lifecycle driver (subsumes ship-train + reaper)
   sampleAllStats()
   samplePhases().catch(() => {})
+  sampleMerged().catch(() => {}) // self-throttled to MERGED_CHECK_MS
 }, QUEUE_FLUSH_MS)
 if (flushTimer.unref) flushTimer.unref() // don't keep the process alive for this
 
@@ -2451,6 +2811,45 @@ export async function keys({ id, keys: ks }) {
   s.lastPrompt = { text: '(menu choice)', at: nowIso() }
   persist()
   audit({ action: 'keys', id, repo: s.repo, keys: ks, ok: true })
+  return { status: 200, ok: true }
+}
+
+// Verified selection of a pending choice-menu option — never a blind
+// arrow+Enter replay. Navigate the ❯ highlight toward the option whose TEXT is
+// `optionText`, never trusting `hintN` (the client's best guess at its row,
+// from the pane-parsed menuOptions) for anything but picking an initial
+// direction, confirming by content at every step (driveSelect, menu.mjs), and
+// press Enter ONLY once it's confirmed there. If it can't be confirmed within a
+// bounded number of steps, Enter is never sent and this returns an error the
+// card surfaces. A blind replay computed from a wrong/stale highlight is
+// exactly how a menu answer once landed on option 1 while the operator meant
+// option 5 — an unconfirmed pick is worse than none.
+//
+// There is deliberately no transcript correlation here: Claude Code writes a
+// pending AskUserQuestion's tool_use to disk only when it flushes it together
+// with the tool_result, i.e. after the answer — so a live pending menu has no
+// id to correlate against (see menu.mjs's module doc-comment). The pane is the
+// source, before and after.
+export async function selectChoice({ id, optionText, hintN }) {
+  const s = registry.sessions[id]
+  if (!s) return { status: 404, ok: false, error: 'no such session' }
+  if (typeof optionText !== 'string' || !optionText.trim()) return { status: 400, ok: false, error: 'optionText required' }
+  if (!(await sessionAlive(s))) return { status: 409, ok: false, error: 'session not running' }
+  const readHighlight = async () => {
+    const pane = await captureTail(s, TAIL_LINES)
+    return menuKindOf(pane) === 'choice' ? currentHighlight(pane) : null
+  }
+  const sendKey = async (key) => {
+    const r = await run(['tmux', 'send-keys', '-t', s.tmux, key])
+    if (r.ok) await sleep(SELECT_STEP_MS)
+    return r.ok
+  }
+  const result = await driveSelect({ target: optionText, hintN, sendKey, readHighlight })
+  if (!result.ok) return { status: 409, ok: false, error: result.error }
+  // A menu confirmation can unblock a run — attribute it (no free-text prompt).
+  s.lastPrompt = { text: '(menu choice)', at: nowIso() }
+  persist()
+  audit({ action: 'select', id, repo: s.repo, text: optionText, ok: true })
   return { status: 200, ok: true }
 }
 
