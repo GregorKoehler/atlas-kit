@@ -45,6 +45,37 @@
 	}
 	# (The token is harmless on the read routes below; only writes require it.)
 
+	# --- Optional addons: their write routes need the same injection -----------
+	# Addon routers are mounted WITHOUT core's bearer middleware, so each addon
+	# gates its own writes with the same DASHBOARD_BEARER_TOKEN check — which
+	# means the browser can only reach them through a handler here, exactly like
+	# a core write (docs/ADDONS.md, "routes"). These blocks are inert on a box
+	# where the addon is not enabled: the path simply 404s from Express.
+	# `api/test/addon-caddyfile-bearer.test.mjs` fails if a shipped addon
+	# registers a non-GET route that no block above matches first.
+	# news-ingest: POST /api/news/sweep. (Bare GET /api/news — the headlines the
+	# News card reads — does not match `/api/news/*` and falls through below.)
+	handle /api/news/* {
+		reverse_proxy localhost:3001 {
+			header_up Authorization "Bearer {env.DASHBOARD_BEARER_TOKEN}"
+		}
+	}
+	# instagram-ingest: POST /api/ingest/instagram. (GET /api/ingest/instagram/records
+	# is an open read and matches this same handler — the token is harmless on it.)
+	handle /api/ingest/* {
+		reverse_proxy localhost:3001 {
+			header_up Authorization "Bearer {env.DASHBOARD_BEARER_TOKEN}"
+		}
+	}
+	# voice: POST /api/voice/recap, /speak and /transcribe — each spends a model
+	# call or on-box CPU. Without this, the card degrades to the free browser
+	# path rather than failing (addons/voice/README.md).
+	handle /api/voice/* {
+		reverse_proxy localhost:3001 {
+			header_up Authorization "Bearer {env.DASHBOARD_BEARER_TOKEN}"
+		}
+	}
+
 	# --- Read routes (open; Cloudflare Access gates them at the edge) ---
 	handle /api/* {
 		reverse_proxy localhost:3001

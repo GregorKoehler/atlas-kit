@@ -28,8 +28,8 @@ holds it (`web/src/components/MicField.test.mjs`).
 echo 'ATLAS_ADDONS=voice' >> .env      # comma-separated if you run others
 scripts/serve.sh restart
 
-# 2. optional: let the dashboard reach the server-side routes (see below)
-#    infra/Caddyfile:
+# 2. only if your infra/Caddyfile predates this addon: let the dashboard reach
+#    the server-side routes (infra/Caddyfile.example ships this block; see below)
 #      handle /api/voice/* {
 #        reverse_proxy localhost:3001 {
 #          header_up Authorization "Bearer {env.DASHBOARD_BEARER_TOKEN}"
@@ -49,7 +49,10 @@ enrichment, and the card says so out loud when it hits a route it cannot reach.
 The browser never holds the dashboard's bearer token — the reverse proxy injects
 it, per route prefix. `POST /api/voice/recap`, `/speak` and `/transcribe` each
 spend something (a model call, or CPU on an engine), so they gate themselves with
-the same constant-time bearer check core uses. Without the handler above they
+the same constant-time bearer check core uses. `infra/Caddyfile.example` carries
+the `handle /api/voice/*` block, so a Caddyfile copied from the current example
+already has it — an older one needs it added by hand plus a `serve.sh restart`
+(Caddy reloads on restart, not on a web rebuild). Without the handler they
 answer `401` to the browser, the card falls back to speaking the free event line,
 and dictation falls back to the browser engine. Nothing breaks; the paid half is
 just unreachable from the page. (`curl` with the token works either way.)
