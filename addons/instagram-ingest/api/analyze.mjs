@@ -19,6 +19,7 @@
  * ------------------------------------------------------------------ */
 import { spawn } from 'node:child_process'
 import { model, effort, timeouts } from './config.mjs'
+import { requireClaudeBin } from '../../../api/src/claude-bin.mjs'
 
 const MAX_TITLE = 120
 const MIN_BODY_CHARS = 40
@@ -132,7 +133,7 @@ function runClaude(prompt, cwd) {
   return new Promise((resolve, reject) => {
     let child
     try {
-      child = spawn('claude', args, {
+      child = spawn(requireClaudeBin(), args, {
         cwd, // the vault, so the staged image paths in the prompt resolve
         stdio: ['pipe', 'pipe', 'pipe'],
         env: { ...process.env, ANTHROPIC_API_KEY: '' }, // subscription auth, never API-key billing

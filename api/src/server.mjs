@@ -28,6 +28,7 @@ import { usageRouter } from './usage-routes.mjs'
 import { hostRouter } from './host-stats-routes.mjs'
 import { appProxyHttp, attachAppUpgrade, isAppPath } from './agent-app-proxy.mjs'
 import { loadAddons, addonRouter } from './addons.mjs'
+import { claudeBinHealth, reportClaudeBinAtBoot } from './claude-bin.mjs'
 
 const PORT = Number(process.env.API_PORT || 3001)
 const HOST = process.env.API_HOST || '127.0.0.1'
@@ -66,7 +67,16 @@ function bearerAuth(req, res, next) {
   next()
 }
 
-app.get('/api/health', (_req, res) => res.json({ ok: true, service: 'atlas-kit-api' }))
+/* Resolve `claude` ONCE, at boot, and say so — loudly if it failed (see
+ * claude-bin.mjs for the cron/systemd PATH bug this exists for). The process
+ * still comes up: `ok` stays the liveness answer the watchdog and the docs
+ * check, and the `claude` block is where a broken CLI is visible instead of
+ * showing up later as an ENOENT in a tmux pane nobody is watching. */
+reportClaudeBinAtBoot()
+
+app.get('/api/health', (_req, res) =>
+  res.json({ ok: true, service: 'atlas-kit-api', claude: claudeBinHealth() }),
+)
 
 app.use(readRouter())
 app.use(agentRouter(bearerAuth))

@@ -91,8 +91,15 @@ The checks below are SETUP.md's "Verifying it works" list, distributed per step.
   ensure`. **Verify (the core check):** `curl -fsS http://127.0.0.1:8080/api/health` →
   `{"ok":true,...}`, and `systemctl is-enabled atlas-kit.service` → `enabled`.
 - **Step 7 — Claude Code CLI (subscription auth).** Already logged in from the bootstrap.
-  **Verify:** `claude --version` works and `grep -c '^ANTHROPIC_API_KEY=$' .env` confirms
-  the key is left blank (subscription-only — never set it).
+  **As root, also pin the binary at a standard path** (idempotent, so safe on a re-run):
+  `[ "$(command -v claude)" = /usr/local/bin/claude ] || ln -sfn "$(command -v claude)" /usr/local/bin/claude`.
+  ⚠️ Do not skip this: `npm i -g` follows npm's prefix (often `~/.local/bin`), and cron
+  and systemd give a service a bare PATH without it — the dashboard then works when YOU
+  restart it and spawns ENOENT agents when the watchdog does.
+  **Verify:** `claude --version` works, `curl -s http://127.0.0.1:8080/api/health` shows
+  `"claude":{"ok":true,…}` with the resolved path, and `grep -c '^ANTHROPIC_API_KEY=$' .env`
+  confirms the key is left blank (subscription-only — never set it). If the CLI lives
+  somewhere else entirely, set `CLAUDE_BIN=/abs/path/to/claude` in `.env` instead.
 - **Step 8 — vault + `VAULT_PATH`.** Create-from-template or clone the existing vault to
   the chosen path; confirm it has `Wiki/` + `Tasks/`. **Verify:** `curl -s
   http://127.0.0.1:8080/api/wiki/pages` returns the vault's pages (not an empty list on a

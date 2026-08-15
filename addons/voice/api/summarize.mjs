@@ -40,6 +40,7 @@
  * ------------------------------------------------------------------ */
 import { spawn } from 'node:child_process'
 import { createHash } from 'node:crypto'
+import { requireClaudeBin } from '../../../api/src/claude-bin.mjs'
 import { model, effort, timeouts, limits } from './config.mjs'
 
 /** The events a recap can be about — anything else is rejected at the route. */
@@ -185,7 +186,7 @@ function runClaude(prompt) {
   return new Promise((resolve, reject) => {
     let child
     try {
-      child = spawn('claude', args, {
+      child = spawn(requireClaudeBin(), args, {
         stdio: ['pipe', 'pipe', 'pipe'],
         env: { ...process.env, ANTHROPIC_API_KEY: '' }, // subscription auth, never API-key billing
       })

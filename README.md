@@ -240,6 +240,8 @@ web/          Vite + Preact + TypeScript dashboard (glass-HUD; one file per card
   src/styles/             design tokens (CSS vars) + Tailwind
 api/          Express API + the agent runtime + the MCP server
   src/agent-local.mjs     box-local executor (git worktree + tmux + claude, directly)
+  src/claude-bin.mjs      resolves ONE absolute `claude` path at boot (CLAUDE_BIN, PATH,
+                          ~/.local/bin, /usr/local/bin) — cron/systemd give a bare PATH
   src/agent-routes.mjs    /api/agents/* routes + the agent preambles
   src/atlas-commit-queue.mjs   the serial vault commit queue (pillar 3 + 5)
   src/atlas-query.mjs     the typed relational/temporal query engine (query_atlas)

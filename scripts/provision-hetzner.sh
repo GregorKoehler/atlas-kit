@@ -55,6 +55,15 @@ apt update && apt -y install cloudflared
 echo "== 5. claude CLI + gh =="
 npm i -g @anthropic-ai/claude-code
 claude --version
+# `npm i -g` installs into npm's prefix, which is NOT always /usr/local/bin — a
+# real install put it in ~/.local/bin, which cron (/etc/cron.d) and systemd do not
+# have on PATH. Pin it at the standard location as well, so a service started by
+# the watchdog finds it. Idempotent: -sfn just refreshes an existing symlink.
+CLAUDE_PATH="$(command -v claude || true)"
+if [ -n "$CLAUDE_PATH" ] && [ "$CLAUDE_PATH" != "/usr/local/bin/claude" ]; then
+  ln -sfn "$CLAUDE_PATH" /usr/local/bin/claude
+  echo "   symlinked /usr/local/bin/claude -> $CLAUDE_PATH"
+fi
 apt -y install gh
 
 pause "run 'gh auth login' (pick HTTPS so vault push/pull works too), then come back"
@@ -85,6 +94,11 @@ Wants=network-online.target
 [Service]
 Type=oneshot
 RemainAfterExit=yes
+# systemd's default PATH has no ~/.local/bin, which is where `npm i -g` can put
+# `claude` — without this a boot-time start spawns agents that die with ENOENT
+# while an interactive `serve.sh restart` works. (The API also resolves an
+# absolute claude binary itself; see api/src/claude-bin.mjs.)
+Environment=PATH=/root/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 ExecStart=/workspace/scripts/serve.sh ensure
 ExecStop=/workspace/scripts/serve.sh stop
 WorkingDirectory=/workspace

@@ -5,7 +5,13 @@
 # VAULT_PATH / vaults.json — adjust /workspace if you clone elsewhere.
 SHELL=/bin/bash
 HOME=/root
-PATH=/usr/local/bin:/usr/bin:/bin
+# ⚠️ Keep $HOME/.local/bin on this PATH. `npm i -g @anthropic-ai/claude-code` can
+# land the binary there, and cron's default PATH omits it — a dashboard restarted
+# by the watchdog below then spawns every agent with ENOENT while an interactive
+# `serve.sh restart` works. Cron does NOT expand variables here, so the home dir
+# is spelled out; adjust it if HOME above is not /root. (The API also resolves an
+# absolute `claude` itself — api/src/claude-bin.mjs — this is the other belt.)
+PATH=/root/.local/bin:/usr/local/bin:/usr/bin:/bin
 MAILTO=""
 
 # Self-heal watchdog — if the dashboard is ever DOWN (a failed restart, a crash,
