@@ -972,6 +972,13 @@ export interface AgentSession {
    * sample their own file; workstation agents publish it in their container and
    * the bridge surfaces the latest values, which the box accumulates the same way. */
   stats?: { label: string; value: number; max?: number; points?: number[] }[]
+  /** Files the agent has offered for download — anything it drops into its
+   * per-session downloads dir (see the downloads preamble). `mtime` is epoch ms;
+   * the card compares it against the last-downloaded mtime it keeps in
+   * localStorage to flag a fresh version. Capped, newest first, dotfiles
+   * skipped; absent/empty means nothing is ready yet. Box-local sessions list
+   * their dir directly; workstation sessions via one `find` per bridge poll. */
+  downloads?: { name: string; size: number; mtime: number }[]
   /** Ship state the agent signaled itself, via marker lines in its replies:
    * 'ready' (it judges the branch mergeable → the Ship button highlights) or
    * 'shipped' (its PR is merged → the Ship button becomes a check). `shipInfo`
@@ -1176,6 +1183,13 @@ export async function fetchAgentOutput(id: string, lines = 2000): Promise<string
     `${API_BASE}/agents/output?id=${encodeURIComponent(id)}&lines=${lines}`,
   )
   return r && typeof r.output === 'string' ? r.output : null
+}
+
+/** URL for one file a session offered for download (AgentSession.downloads) —
+ * a plain link, not a fetch: the bearer is injected server-side (the reverse
+ * proxy), so a bare `<a href>`/browser navigation works with no auth header. */
+export function agentDownloadUrl(id: string, name: string): string {
+  return `${API_BASE}/agents/download?id=${encodeURIComponent(id)}&name=${encodeURIComponent(name)}`
 }
 
 /** One reconstructed chat message from an agent's on-disk `.jsonl` history. */

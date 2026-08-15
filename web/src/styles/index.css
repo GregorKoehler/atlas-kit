@@ -700,6 +700,12 @@
   overflow-y: auto;
   overscroll-behavior: contain;
 }
+/* The strip that collapses that graph away. Phone-only: hidden above the mobile
+   breakpoint, where the graph costs a fraction of the viewport and always
+   shows. See the .agent__switch block in the mobile section for the rest. */
+.agent__switch-toggle {
+  display: none;
+}
 .agents-ov--switch {
   flex-direction: row;
   align-items: flex-start;
@@ -893,6 +899,126 @@
   border-radius: 2px;
   background: var(--accent-teal);
   transition: width 0.4s ease;
+}
+
+/* Downloads strip — files the agent dropped in its downloads dir (see the
+ * downloads preamble): sibling of the job/stats strips, but each chip is a
+ * clickable link (solid border, teal on hover like the PR/sync actions). The
+ * badge dot reuses the ship-ready pulse to flag a version newer than what the
+ * operator last downloaded (tracked client-side). */
+.agent__downloads {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.3rem;
+  padding: 0.2rem 0 0.1rem;
+  max-height: 4.5rem;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+.agent__dl {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.28rem;
+  font-family: var(--font-mono);
+  font-size: 0.58rem;
+  color: var(--text-dim);
+  padding: 0.05rem 0.35rem;
+  border: 1px solid var(--hairline);
+  border-radius: 4px;
+  white-space: nowrap;
+  text-decoration: none;
+}
+.agent__dl:hover {
+  color: var(--accent-teal);
+  border-color: var(--accent-teal);
+}
+/* A chip is an <a> when tapping it hands the file off, and a <button> when it
+   opens the in-app preview instead (AgentDownloads) — reset the button chrome so
+   the two are indistinguishable. */
+button.agent__dl {
+  background: none;
+  cursor: pointer;
+}
+.agent__dl-badge {
+  flex: none;
+  width: 0.32rem;
+  height: 0.32rem;
+  border-radius: 50%;
+  background: var(--status-green);
+  animation: ship-ready 1.6s ease-in-out infinite;
+}
+
+/* In-app image preview for a download chip (AgentDownloads). The whole point is
+   that it never navigates: in an installed (home-screen) PWA there is no URL bar
+   and no back button, so a navigation away from the dashboard is unrecoverable.
+   The action bar sits at the BOTTOM — thumb-reachable on a phone and clear of the
+   notch — and every safe-area inset is honoured. */
+.dlprev {
+  position: fixed;
+  inset: 0;
+  z-index: 120;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0.6rem;
+  padding: calc(1rem + env(safe-area-inset-top)) max(0.6rem, env(safe-area-inset-right))
+    calc(0.8rem + env(safe-area-inset-bottom)) max(0.6rem, env(safe-area-inset-left));
+  background: rgba(4, 8, 12, 0.88);
+  backdrop-filter: blur(4px);
+  -webkit-backdrop-filter: blur(4px);
+}
+/* Keep the default touch callout: long-press → "Save Image" is the one save route
+   that never leaves the app (AgentDownloads). */
+.dlprev__img {
+  min-height: 0;
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+  border-radius: 6px;
+}
+.dlprev__bar {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  max-width: 100%;
+}
+.dlprev__name {
+  font-family: var(--font-mono);
+  font-size: 0.62rem;
+  color: var(--text-dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.dlprev__save,
+.dlprev__close {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  /* Generous hit targets — this is the phone rescue path. */
+  min-width: 2.4rem;
+  min-height: 2.4rem;
+  padding: 0 0.7rem;
+  border: 1px solid var(--hairline);
+  border-radius: 6px;
+  background: rgba(10, 16, 22, 0.7);
+  color: var(--text-dim);
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+  text-decoration: none;
+  cursor: pointer;
+}
+.dlprev__close {
+  font-size: 1rem;
+}
+.dlprev__save:hover,
+.dlprev__close:hover {
+  color: var(--accent-teal);
+  border-color: var(--accent-teal);
 }
 
 /* --- Scorecard --------------------------------------------------- */
@@ -4619,6 +4745,9 @@ button.capture-job__title--link {
   margin-left: auto;
   font-size: 0.55rem;
   color: var(--text-faint);
+  /* Authored before the gauges/buttons (see .agent__headside); `order` puts it
+     back between them everywhere except the phone's full-screen head. */
+  order: 1;
 }
 .agent--running .agent__status {
   color: var(--status-green);
@@ -4687,6 +4816,65 @@ button.capture-job__title--link {
   color: var(--text-faint);
   font-family: var(--font-mono);
 }
+/* Claude 5-hour budget chip — rendered only in the full-screen viewer (head)
+   and the app-only overlay bar, so the window that gates a working session is
+   readable without leaving full screen. Borrows the context meter's bar/label
+   sizing above so the two gauges sit as one family. */
+.agent__budget {
+  display: flex;
+  align-items: center;
+  gap: 0.32rem;
+  flex: 0 0 auto;
+  align-self: center;
+}
+/* The last polls failed — the numbers are held over, so dim them rather than
+   presenting stale figures as live. */
+.agent__budget--stale {
+  opacity: 0.5;
+}
+/* Full-screen head: model · effort, context, 5H and RAM become one gauge stack.
+   Left-aligned rather than centred — the rows are all different widths, and
+   centring starts each at its own offset, which reads as a jumble; a shared left
+   edge lines the labels and bars up as a column. (It also wraps as ONE unit on
+   the phone breakpoint, where .agent__head is flex-wrap, because all the rows
+   are children of this span.) The chips centre themselves in the collapsed row's
+   baseline layout, so re-align them here. */
+.agent__run--stack {
+  /* Width reserved for the widest gauge label (RAM), so the three bars start on
+     one vertical line — the context meter has no label of its own and would
+     otherwise sit a label's width to the left of the other two. */
+  --gauge-label: 1.35rem;
+  align-items: flex-start;
+  gap: 0.22rem;
+}
+.agent__run--stack .agent__ctx,
+.agent__run--stack .agent__budget {
+  align-self: flex-start;
+}
+.agent__run--stack .agent__budget > .agent__ctx-label:first-child {
+  min-width: var(--gauge-label);
+}
+.agent__run--stack .agent__ctx {
+  padding-left: calc(var(--gauge-label) + 0.32rem); /* + the chips' own label→bar gap */
+}
+@media (max-width: 640px) {
+  /* The head already wraps on a phone (.agent__head is flex-wrap there) and the
+     stack wraps as one unit onto the metadata row, where it fits whole — so it
+     keeps its reset clock and its GB figure. The app-only overlay bar is the
+     tight one: a single non-wrapping row sharing space with the agent's title,
+     so there shed the widest part of each chip and keep label + bar + percentage. */
+  .agent-app-full__bar .agent__budget-reset,
+  .agent-app-full__bar .agent__ram-detail {
+    display: none;
+  }
+}
+/* Narrower still — RAM is the second gauge in that bar, so it goes before the
+   budget window that actually gates the session. */
+@media (max-width: 430px) {
+  .agent-app-full__bar .agent__ram {
+    display: none;
+  }
+}
 /* Per-row time readout — its own line under the head, indented past the status
    dot: live run elapsed / rough estimate + a thin progress bar that warms amber
    once over estimate (or the frozen "last run …"), plus the total alive clock. */
@@ -4753,6 +4941,16 @@ button.capture-job__title--link {
   opacity: 0.4;
   cursor: default;
 }
+/* Gauges + action buttons as one unit. `display: contents` everywhere but the
+   phone's full-screen head, so the collapsed row and desktop lay them out as
+   plain head children exactly as before. The two `order`s below restore the
+   reading order the source order no longer has — the status label is authored
+   AHEAD of this wrapper so that on the phone's full-screen head it can stay up
+   on the branch line while the wrapper takes a row of its own (see the mobile
+   block). */
+.agent__headside {
+  display: contents;
+}
 /* Per-row action cluster: PR link · sync · ship · speak · expand · cleanup · kill. */
 .agent__actions {
   margin-left: 0.25rem;
@@ -4760,6 +4958,7 @@ button.capture-job__title--link {
   align-items: center;
   gap: 0.1rem;
   flex: 0 0 auto;
+  order: 2;
 }
 .agent__act {
   border: none;
@@ -5084,7 +5283,8 @@ button.capture-job__title--link {
 .agent--expanded:not(.agent--fullscreen) .agent__timer,
 .agent--expanded:not(.agent--fullscreen) .agent__subs,
 .agent--expanded:not(.agent--fullscreen) .agent__jobs,
-.agent--expanded:not(.agent--fullscreen) .agent__stats {
+.agent--expanded:not(.agent--fullscreen) .agent__stats,
+.agent--expanded:not(.agent--fullscreen) .agent__downloads {
   order: 1;
 }
 .agent__transcript {
@@ -6041,6 +6241,119 @@ button.capture-job__title--link {
     overflow-y: auto;
     -webkit-overflow-scrolling: touch;
   }
+  /* The overlay's own chrome pays for the last of it: on a phone the transcript
+     IS the product, so trim the outer padding and the gaps between switcher,
+     head, transcript and prompt bar. The safe-area insets are added on top of
+     the padding and stay exactly as they were — the notch and the home
+     indicator keep their full clearance. */
+  .agent--fullscreen {
+    padding-top: calc(0.5rem + env(safe-area-inset-top));
+    padding-bottom: calc(0.5rem + env(safe-area-inset-bottom));
+    gap: 0.4rem;
+  }
+  /* Full-screen switcher, phone: the graph is worth its ~14% of the viewport
+     because switching is what this view is FOR — so it stays EXPANDED by
+     default and this strip is the one-tap way to fold it away for reading. The
+     strip also names the agent you're in, and the choice sticks
+     (switcherPref.ts). */
+  .agent__switch {
+    max-height: none;
+    overflow: visible;
+    padding-bottom: 0;
+  }
+  .agent__switch-toggle {
+    display: flex;
+    align-items: center;
+    gap: 0.45rem;
+    width: 100%;
+    font: inherit;
+    /* A full-width strip, comfortably tappable without eating the height the
+       graph gives back when it is collapsed. */
+    min-height: 2.25rem;
+    padding: 0 0.15rem;
+    border: none;
+    background: none;
+    cursor: pointer;
+    text-align: left;
+  }
+  .agent__switch-label {
+    flex: 0 0 auto;
+  }
+  .agent__switch-current {
+    flex: 1 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+    font-size: 0.72rem;
+    color: var(--text-bright);
+  }
+  .agent__switch-caret {
+    flex: 0 0 auto;
+    font-size: 0.7rem;
+    color: var(--text-faint);
+  }
+  .agent__switch:not(.agent__switch--open) .agents-ov {
+    display: none;
+  }
+  /* Expanded: the graph keeps its own scroll cap so a big fleet still can't
+     squeeze the transcript away (it moved here off .agent__switch, which now
+     also holds the always-visible strip). */
+  .agent__switch--open .agents-ov--switch {
+    max-height: 7.5rem;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    padding-bottom: 0.45rem;
+  }
+  /* Full-screen viewer, phone — give the transcript back the screen.
+     The gauge stack (model · effort, context, 5H, RAM) is a NARROW left column,
+     so the whole right half of its rows was empty while the button cluster took
+     a full row of its own below it. Pull the buttons up into that empty half:
+     .agent__headside becomes the head's own last row (the status label stays up
+     on the branch line, which is why it's authored ahead of it), the stack takes
+     what's left of that row, and the cluster wraps INSIDE a fixed 5 × 2.75rem
+     column — two rows of ≥44px targets. Nothing shrinks; it re-flows. It also
+     stops the cluster overflowing: nine 2.75rem buttons need 396px and a 390px
+     phone has ~361px, so the first button used to sit clipped past the left
+     edge, unreachable. */
+  .agent--fullscreen .agent__headside {
+    display: flex;
+    order: 3;
+    flex: 1 1 100%;
+    align-items: flex-start;
+    gap: 0;
+    min-width: 0;
+  }
+  .agent--fullscreen .agent__headside .agent__run--stack {
+    flex: 1 1 auto;
+    align-self: flex-start;
+    min-width: 0;
+  }
+  .agent--fullscreen .agent__headside .agent__actions {
+    /* Fixed at five buttons wide so the wrap point can't drift with the stack's
+       content (a wider RAM figure must not squeeze the cluster to four across,
+       which would cost a third row and undo the win). */
+    flex: 0 0 13.75rem;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+    align-content: flex-start;
+    margin-left: auto;
+    gap: 0;
+  }
+  /* …and the status label rides up beside the branch instead of costing a line
+     of its own. Flex picks its wrap points from HYPOTHETICAL sizes (before any
+     shrinking), and a branch name is one unbreakable token — at its content
+     width it overflowed the line by well under a pixel and pushed the label
+     down. A 60% basis is small enough that the label always fits beside it, and
+     big enough that the branch still can't ride up onto the title's line; it
+     then grows into whatever is left and ellipsizes only if it must. */
+  .agent--fullscreen .agent__branch {
+    flex: 1 1 60%;
+    min-width: 0;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+  }
   .agent__actions {
     flex: 1 0 100%;
     justify-content: flex-end;
@@ -6099,7 +6412,8 @@ button.capture-job__title--link {
      stays short and the transcript is in reach (they scroll internally past it). */
   .agent__subs,
   .agent__jobs,
-  .agent__stats {
+  .agent__stats,
+  .agent__downloads {
     max-height: 3.4rem;
   }
 

@@ -1,6 +1,7 @@
 import { useState } from 'preact/hooks'
 import { shipAgent, unshipAgent, queueAgent, type AgentSession } from '../../lib/api'
 import { focusAgent } from '../../lib/agentFocus'
+import { AgentDownloads } from '../AgentDownloads'
 
 /**
  * The dev agents an Atlas orchestrator chat spawned, surfaced inside that chat so
@@ -63,65 +64,68 @@ export function AtlasSpawnedAgents({
     <div className="kagents__spawned" role="group" aria-label="spawned dev agents">
       <div className="kagents__spawned-head hud-label">Spawned dev agents</div>
       {children.map((c) => (
-        <div className="kagents__spawned-row" key={c.id}>
-          <button
-            type="button"
-            className="kagents__spawned-open"
-            onClick={() => focusAgent(c.id)}
-            title="open this agent's full-screen view"
-          >
-            <span className={`kagents__tab-dot kagents__tab-dot--${c.status}`} />
-            <span className="kagents__spawned-label">{label(c)}</span>
-            <span className="kagents__spawned-repo hud-label">{c.repo}</span>
-          </button>
-          {c.shipState === 'shipped' ? (
-            <span
-              className="agent__act agent__shipped"
-              title={`shipped${c.shipInfo ? `: ${c.shipInfo}` : ''} — PR merged by the agent`}
-            >
-              ✓
-            </span>
-          ) : c.shipQueue?.active ? (
-            <span className="agent__act agent__ship--active" title="shipping… — merging this PR; the ship queue advances when it lands">
-              <span className="agent__spin" aria-label="shipping" />
-            </span>
-          ) : c.shipQueue && c.shipQueue.pos > 1 ? (
-            // Genuinely behind other ships — show its place (pos 1 is the head,
-            // rendered as "ship pending" below, not a "#1 / 0 ahead" queue slot).
+        <div key={c.id}>
+          <div className="kagents__spawned-row">
             <button
               type="button"
-              className="agent__act agent__shipq"
-              onClick={() => unship(c)}
-              disabled={busy === c.id}
-              title={`#${c.shipQueue.pos} in the ship queue — ships after the ${c.shipQueue.pos - 1} ahead merge; click to cancel`}
+              className="kagents__spawned-open"
+              onClick={() => focusAgent(c.id)}
+              title="open this agent's full-screen view"
             >
-              ⤴<sup className="agent__shipq-pos tnum">{c.shipQueue.pos}</sup>
+              <span className={`kagents__tab-dot kagents__tab-dot--${c.status}`} />
+              <span className="kagents__spawned-label">{label(c)}</span>
+              <span className="kagents__spawned-repo hud-label">{c.repo}</span>
             </button>
-          ) : c.shipQueue ? (
-            // Head of the train (nothing ahead), not yet merging — ship pending until
-            // the agent goes idle. In-flight, not a queue slot; still cancellable.
-            <button
-              type="button"
-              className="agent__act agent__shipq"
-              onClick={() => unship(c)}
-              disabled={busy === c.id}
-              title="ship pending — merges as soon as the agent is idle; click to cancel"
-            >
-              <span className="agent__spin" aria-label="ship pending" />
-            </button>
-          ) : (
-            <button
-              type="button"
-              className={`agent__act agent__ship${c.shipState === 'ready' ? ' agent__ship--ready' : ''}`}
-              onClick={() => ship(c)}
-              disabled={busy === c.id}
-              title={`${
-                c.shipState === 'ready' ? 'agent reports this is READY TO SHIP — ' : ''
-              }ship: queue re-sync onto the latest default branch → push → merge the PR. Tells me (this chat) it's in process; I'll note here when it lands.`}
-            >
-              ⤴
-            </button>
-          )}
+            {c.shipState === 'shipped' ? (
+              <span
+                className="agent__act agent__shipped"
+                title={`shipped${c.shipInfo ? `: ${c.shipInfo}` : ''} — PR merged by the agent`}
+              >
+                ✓
+              </span>
+            ) : c.shipQueue?.active ? (
+              <span className="agent__act agent__ship--active" title="shipping… — merging this PR; the ship queue advances when it lands">
+                <span className="agent__spin" aria-label="shipping" />
+              </span>
+            ) : c.shipQueue && c.shipQueue.pos > 1 ? (
+              // Genuinely behind other ships — show its place (pos 1 is the head,
+              // rendered as "ship pending" below, not a "#1 / 0 ahead" queue slot).
+              <button
+                type="button"
+                className="agent__act agent__shipq"
+                onClick={() => unship(c)}
+                disabled={busy === c.id}
+                title={`#${c.shipQueue.pos} in the ship queue — ships after the ${c.shipQueue.pos - 1} ahead merge; click to cancel`}
+              >
+                ⤴<sup className="agent__shipq-pos tnum">{c.shipQueue.pos}</sup>
+              </button>
+            ) : c.shipQueue ? (
+              // Head of the train (nothing ahead), not yet merging — ship pending until
+              // the agent goes idle. In-flight, not a queue slot; still cancellable.
+              <button
+                type="button"
+                className="agent__act agent__shipq"
+                onClick={() => unship(c)}
+                disabled={busy === c.id}
+                title="ship pending — merges as soon as the agent is idle; click to cancel"
+              >
+                <span className="agent__spin" aria-label="ship pending" />
+              </button>
+            ) : (
+              <button
+                type="button"
+                className={`agent__act agent__ship${c.shipState === 'ready' ? ' agent__ship--ready' : ''}`}
+                onClick={() => ship(c)}
+                disabled={busy === c.id}
+                title={`${
+                  c.shipState === 'ready' ? 'agent reports this is READY TO SHIP — ' : ''
+                }ship: queue re-sync onto the latest default branch → push → merge the PR. Tells me (this chat) it's in process; I'll note here when it lands.`}
+              >
+                ⤴
+              </button>
+            )}
+          </div>
+          <AgentDownloads id={c.id} files={c.downloads ?? []} />
         </div>
       ))}
     </div>

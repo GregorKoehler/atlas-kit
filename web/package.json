@@ -7,7 +7,8 @@
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "node --test --test-reporter=spec \"src/**/*.test.mjs\""
   },
   "dependencies": {
     "framer-motion": "^11.11.17",

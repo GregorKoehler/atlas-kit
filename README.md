@@ -45,6 +45,10 @@ branch. You can **prompt** it, **queue** a message (lands at its next idle),
 **schedule** one for a future time, **interrupt & steer** a running turn, **kill**
 (keep the worktree for review), or **cleanup** (remove worktree + branch). Idle vs.
 busy is detected from the terminal; numbered menus are answerable from the card.
+You can **attach files** to a spawn or a prompt, and anything the agent drops into
+its own per-session downloads dir comes back as a **⬇ chip** on its card — images
+open in an in-app preview so an installed (home-screen) PWA is never navigated
+away from, everything else hands off without leaving the app.
 Extracted from the Gravis agent runtime — simplified but functional. See
 [docs/PROTOCOLS.md](docs/PROTOCOLS.md) for exactly what each of these does and where.
 

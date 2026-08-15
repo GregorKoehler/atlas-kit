@@ -8,9 +8,10 @@ on:
 
 # ── How tests are gated ──────────────────────────────────────────────────────
 # EVERY test file RUNS BY DEFAULT. The api job globs `api/test/**/*.test.mjs` and
-# subtracts an explicit, commented opt-out list. Adding a test file is therefore
-# enough to gate it, and a file can only stop running if someone names it and
-# says why, in the diff.
+# subtracts an explicit, commented opt-out list; the web job globs
+# `web/src/**/*.test.mjs` through `npm test`, with no opt-out list at all. Adding
+# a test file is therefore enough to gate it, and a file can only stop running if
+# someone names it and says why, in the diff.
 #
 # That inversion is the whole point: a hand-maintained list of test files decays
 # silently — files get added and never listed, and nobody notices that "green"
@@ -28,7 +29,7 @@ on:
 
 jobs:
   web:
-    name: web — typecheck + build
+    name: web — typecheck + build + tests
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -43,6 +44,10 @@ jobs:
       - run: npm ci
       - run: npm run typecheck
       - run: npm run build
+      # Every *.test.mjs under web/src — the script globs them, so adding a file
+      # is enough to gate it. They import the real `.ts` modules through node's
+      # type stripping, so there is no build step and no browser involved.
+      - run: npm test
 
   api:
     name: api — full test suite

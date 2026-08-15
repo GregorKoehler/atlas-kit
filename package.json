@@ -8,7 +8,7 @@
     "install:all": "cd api && npm install && cd ../web && npm install",
     "dev": "bash scripts/dev.sh",
     "build": "cd web && npm run build",
-    "test": "cd api && npm test"
+    "test": "cd api && npm test && cd ../web && npm test"
   },
   "license": "MIT"
 }
