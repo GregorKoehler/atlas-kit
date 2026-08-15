@@ -33,7 +33,8 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import { CHUNKER_VERSION, pageBody } from './chunk.mjs'
-import { MODEL_ID, DIMS, QUERY_PROMPT, embedRuntimeAvailable, resident, residentState, embed } from './embed.mjs'
+import { MODEL_ID, DIMS, QUERY_PROMPT, embedRuntimeAvailable, resident, embed } from './embed.mjs'
+import { callEncoder, encoderState, encoderWorkerEnabled } from './embed-client.mjs'
 import { readSweep } from './sweep.mjs'
 import { healNote } from './heal.mjs'
 
@@ -71,25 +72,32 @@ const SNIPPET_CHARS = 320
 /* --- the loaded index, cached per vault ---------------------------------- *
  * Reloaded when meta.json's mtime moves, so a re-index is picked up without a
  * restart — the same "operator-local state is live, not code" contract the vault
- * registry has. */
-const cache = new Map() // vaultPath → { mtimeMs, meta, vecs, live, error }
+ * registry has.
+ *
+ * ⚠️ META AND VECTORS ARE LOADED SEPARATELY, and that split is what keeps the
+ * 35 MB vector file out of the main thread now that the sweep runs in the
+ * encoder worker (`embed-client.mjs`). Everything the main thread still asks —
+ * is there a usable index, how stale is it, which model built it — is answered
+ * from meta.json plus ONE stat of the vector file; only the thread that actually
+ * computes cosines reads the floats. Loading both on both sides would put 35 MB
+ * in the process twice and a `readFileSync` of it back on the loop. */
+const metaCache = new Map() // vaultPath → { mtimeMs, meta } | { mtimeMs, error }
+const vecCache = new Map() // vaultPath → { mtimeMs, meta, vecs, live } | { mtimeMs, error }
 
-/** The loaded index — `{ meta, vecs, live }`, or `{ error }`. Exported so the
- *  SPAWN-EVIDENCE leg (`evidence.mjs`) can pool the same vectors at CHUNK level
- *  instead of page level without a second loader: 35 MB read twice, cached
- *  twice, and drifting apart on the next provenance change is exactly the
- *  duplication this addon's structure avoids. */
-export function loadIndex(vaultPath) {
+/** The index's metadata and provenance — `{ meta, mtimeMs }` or `{ error }`.
+ *  Cheap: one JSON parse on change, then cached, and never the vectors. */
+export function loadMeta(vaultPath) {
   const dir = indexDirFor(vaultPath)
   const metaPath = path.join(dir, 'meta.json')
   let mtimeMs
   try {
     mtimeMs = fs.statSync(metaPath).mtimeMs
   } catch {
-    cache.delete(vaultPath)
+    metaCache.delete(vaultPath)
+    vecCache.delete(vaultPath)
     return { error: 'no index — run addons/semantic-search/scripts/index.mjs' }
   }
-  const hit = cache.get(vaultPath)
+  const hit = metaCache.get(vaultPath)
   if (hit && hit.mtimeMs === mtimeMs) return hit
   let entry
   try {
@@ -112,24 +120,55 @@ export function loadIndex(vaultPath) {
        * degrades to full-text-only silently — for a reason that is a bug — while
        * after an even number it works perfectly. A leg that is correct half the
        * time is harder to notice, and harder to trust once noticed, than one
-       * that is simply down. */
+       * that is simply down.
+       *
+       * ⚠️ Checked by SIZE here rather than by reading: "the index is usable" has
+       * to stay answerable on the thread that never loads the floats, or a
+       * truncated / wrongly-named vector file would only be discovered by the
+       * query that needed it. Same name, same error string, one stat. */
       const vectorsFile = meta.vectorsFile || 'vectors.f32'
-      const buf = fs.readFileSync(path.join(dir, vectorsFile))
-      const vecs = new Float32Array(buf.buffer, buf.byteOffset, buf.byteLength / 4)
-      if (vecs.length < meta.rows.length * meta.dims) {
-        entry = { mtimeMs, error: `${vectorsFile} shorter than meta.rows` }
-      } else {
-        // A written vector is L2-normalised and can never be all-zero; an
-        // unwritten slot always is. Computed once, not per query.
-        const live = []
-        for (let i = 0; i < meta.rows.length; i++) if (vecs[i * meta.dims] !== 0 || vecs[i * meta.dims + 1] !== 0) live.push(i)
-        entry = { mtimeMs, meta, vecs, live }
-      }
+      const bytes = fs.statSync(path.join(dir, vectorsFile)).size
+      entry = bytes / 4 < meta.rows.length * meta.dims ? { mtimeMs, error: `${vectorsFile} shorter than meta.rows` } : { mtimeMs, meta }
     }
   } catch (e) {
     entry = { mtimeMs, error: String(e?.message || e) }
   }
-  cache.set(vaultPath, entry)
+  metaCache.set(vaultPath, entry)
+  return entry
+}
+
+/** The loaded index — `{ meta, vecs, live }`, or `{ error }`. Exported so the
+ *  SPAWN-EVIDENCE leg (`evidence.mjs`) can pool the same vectors at CHUNK level
+ *  instead of page level without a second loader: 35 MB read twice, cached
+ *  twice, and drifting apart on the next provenance change is exactly the
+ *  duplication this addon's structure avoids.
+ *
+ *  ⚠️ Called on the ENCODER WORKER's thread in the API process (and inline in a
+ *  CLI). Nothing on the main thread reads the vectors any more. */
+export function loadIndex(vaultPath) {
+  const m = loadMeta(vaultPath)
+  if (m.error) return m
+  const hit = vecCache.get(vaultPath)
+  if (hit && hit.mtimeMs === m.mtimeMs) return hit
+  let entry
+  try {
+    const dir = indexDirFor(vaultPath)
+    const vectorsFile = m.meta.vectorsFile || 'vectors.f32'
+    const buf = fs.readFileSync(path.join(dir, vectorsFile))
+    const vecs = new Float32Array(buf.buffer, buf.byteOffset, buf.byteLength / 4)
+    if (vecs.length < m.meta.rows.length * m.meta.dims) {
+      entry = { mtimeMs: m.mtimeMs, error: `${vectorsFile} shorter than meta.rows` }
+    } else {
+      // A written vector is L2-normalised and can never be all-zero; an
+      // unwritten slot always is. Computed once, not per query.
+      const live = []
+      for (let i = 0; i < m.meta.rows.length; i++) if (vecs[i * m.meta.dims] !== 0 || vecs[i * m.meta.dims + 1] !== 0) live.push(i)
+      entry = { mtimeMs: m.mtimeMs, meta: m.meta, vecs, live }
+    }
+  } catch (e) {
+    entry = { mtimeMs: m.mtimeMs, error: String(e?.message || e) }
+  }
+  vecCache.set(vaultPath, entry)
   return entry
 }
 
@@ -164,7 +203,7 @@ function provenance(vaultPath, meta) {
  * a machine with an index and no runtime and a machine with a runtime and no
  * index fail for genuinely different reasons. */
 export function indexStatus(vaultPath) {
-  const idx = loadIndex(vaultPath)
+  const idx = loadMeta(vaultPath)
   if (idx.error) return { ok: false, reason: idx.error }
   return { ok: true, index: provenance(vaultPath, idx.meta) }
 }
@@ -219,6 +258,52 @@ function sectionSnippet(vaultPath, row) {
 }
 
 /**
+ * The CPU-BOUND HALF of the leg: embed the query, rank the pages. This is what
+ * runs in the encoder worker (`embed-worker.mjs`, op `search-hits`) — and
+ * inline, unchanged, in a CLI. Throws; the caller degrades.
+ *
+ * ⚠️ Its two internal races are the ones that could never fire in-process (a
+ * blocked loop cannot run its own timer) and still cannot fire from in here, for
+ * the same reason. They are kept because they are correct where the loop IS free
+ * — a CLI, and any future caller — but the deadline that actually protects a
+ * request is the caller's, on the main thread. Same error strings either way, so
+ * the leg's `reason` reads identically.
+ */
+export async function searchHits({ q, limit, vaultPath }) {
+  const idx = loadIndex(vaultPath)
+  if (idx.error) throw new Error(idx.error)
+  const ctx = await Promise.race([resident(), deadline(LOAD_TIMEOUT_MS, 'encoder load')])
+  const { vectors } = await Promise.race([embed(ctx, [QUERY_PROMPT(q)], { dims: idx.meta.dims }), deadline(TIMEOUT_MS, 'embed')])
+  return scanPages(idx, vectors[0], limit)
+}
+
+/**
+ * The same work, on the encoder worker, under a deadline that can now fire.
+ *
+ * ⚠️ ONE budget, chosen from whether the model is loaded, because the two phases
+ * are not separable from out here — and collapsing them into one number is what
+ * the comment on `LOAD_TIMEOUT_MS` warns against: a cold load is a measured
+ * ~2-3 s, so the 5 s embed budget would fail the first query after every
+ * eviction. Warm → 5 s ("hung"), cold or loading → 30 s. The mirrored state is
+ * what makes that choice honest: the worker announces a load and an idle unload
+ * as they happen.
+ *
+ * ⚠️ The encoder is SERIAL (one copy, by design), so a query behind a long spawn
+ * retrieval can now spend its budget queueing and degrade to full-text-only where
+ * it used to simply wait. That is the deadline doing its job — the full-text leg
+ * is already in hand — and `queueMs`/`semanticQueueMs` is how it stays visible.
+ */
+async function hitsFromWorker(query, limit, vaultPath, model) {
+  const warm = model.loaded
+  const r = await Promise.race([
+    callEncoder('search-hits', { q: query, limit, vaultPath }),
+    deadline(warm ? TIMEOUT_MS : LOAD_TIMEOUT_MS, warm ? 'embed' : 'encoder load'),
+  ])
+  if (!r.ok) throw new Error(r.reason)
+  return r.value
+}
+
+/**
  * The semantic leg, in the shape core's `searchAllLegs()` expects. NEVER throws
  * into the route: any failure degrades to `{ available: false, reason }`,
  * because a dead encoder must not take the full-text leg down with it.
@@ -230,18 +315,15 @@ function sectionSnippet(vaultPath, row) {
  */
 export async function semanticSearch({ q, limit = 24, vaultPath }) {
   const status = semanticStatus(vaultPath)
-  if (!status.available) return { available: false, items: [], reason: status.reason, model: residentState() }
+  if (!status.available) return { available: false, items: [], reason: status.reason, model: encoderState() }
   const query = String(q || '').trim()
-  if (!query) return { available: true, items: [], index: status.index, model: residentState() }
-  const idx = loadIndex(vaultPath)
+  if (!query) return { available: true, items: [], index: status.index, model: encoderState() }
   const t0 = performance.now()
   // Sampled BEFORE the query so `loaded:false` means "this query paid the cold
   // load", which is the reading that answers "why was that one slow".
-  const model = residentState()
+  const model = encoderState()
   try {
-    const ctx = await Promise.race([resident(), deadline(LOAD_TIMEOUT_MS, 'encoder load')])
-    const { vectors } = await Promise.race([embed(ctx, [QUERY_PROMPT(query)], { dims: idx.meta.dims }), deadline(TIMEOUT_MS, 'embed')])
-    const hits = scanPages(idx, vectors[0], limit)
+    const hits = encoderWorkerEnabled() ? await hitsFromWorker(query, limit, vaultPath, model) : await searchHits({ q: query, limit, vaultPath })
     const items = hits.map(({ score, row }) => {
       const folder = path.dirname(row.path)
       const isWiki = row.path === 'Wiki' || row.path.startsWith('Wiki' + path.sep)

@@ -55,8 +55,10 @@
  *
  * COST, and why it is bounded rather than assumed. This runs SYNCHRONOUSLY while
  * an agent starts, unlike `/api/search` where a user is already waiting on a
- * page. The caller is the API process itself, so the encoder is the SAME
- * resident copy `/api/search` uses — no second ~660 MB model. What is added is
+ * page. The caller is the API process itself, so the encoder is the SAME copy
+ * `/api/search` uses — one worker thread owns it for the whole process
+ * (`embed-client.mjs`), so there is no second ~660 MB model and no CPU-bound
+ * stretch on the event loop either. What is added is
  * ONE batched embed of N sub-asks plus ONE brute-force pass over the chunk
  * table. N is capped, and the whole leg sits under ONE deadline: if the encoder
  * is cold, hung, uninstalled or the index is missing, this returns
@@ -66,6 +68,7 @@
  * ------------------------------------------------------------------ */
 import { loadIndex, semanticStatus } from './semantic.mjs'
 import { resident, embed, QUERY_PROMPT } from './embed.mjs'
+import { callEncoder, encoderWorkerEnabled } from './embed-client.mjs'
 import { pageBody, windowRanges } from './chunk.mjs'
 
 /* `Wiki/index.md` is a large list of one-line page summaries, so a 2048-char
@@ -341,10 +344,28 @@ export function scan(idx, qvs, root, { perAskPages = PER_ASK_PAGES, perPage = PE
 }
 
 /**
+ * The CPU-BOUND HALF: embed the asks (ONE batch) and scan. This is what runs in
+ * the encoder worker (`embed-worker.mjs`, op `evidence-rows`) — and inline,
+ * unchanged, in a CLI. Throws; `semanticCandidates` turns anything that goes
+ * wrong into `available:false` with the reason.
+ *
+ * ⚠️ It reads the 35 MB index and the chosen pages' bodies too, not just the
+ * encoder — the sweep and the page reads are part of the stretch that used to
+ * hold the loop, so they belong on the same side of the boundary as the model.
+ */
+export async function evidenceRows({ asks, root, perAskPages = PER_ASK_PAGES, perPage = PER_PAGE, closedPaths, doneWeight = 1 }) {
+  const idx = loadIndex(root)
+  if (idx.error) throw new Error(idx.error)
+  const ctx = await resident()
+  const { vectors } = await embed(ctx, asks.map(QUERY_PROMPT), { dims: idx.meta.dims })
+  return scan(idx, vectors, root, { perAskPages, perPage, closedPaths, doneWeight })
+}
+
+/**
  * The dense leg for one spawn task — core's `semanticCandidates` contract.
  *
  * → { available, reason?, rows: [{ path, title, section, similarity, pageScore,
- *     closed?, text }], pages, asks, ms, index? }
+ *     closed?, text }], pages, asks, ms, queueMs?, index? }
  *
  * `closedPaths` (a Set of vault-relative paths) + `doneWeight` are the status
  * half: the caller already walks the tree for its keyword pass, so this leg is
@@ -368,13 +389,17 @@ export async function semanticCandidates({ asks, root, perAskPages = PER_ASK_PAG
   const status = semanticStatus(root)
   if (!status.available) return { available: false, reason: status.reason, rows: [], pages: 0, asks: 0, ms: Date.now() - t0 }
 
-  const run = (async () => {
-    const idx = loadIndex(root)
-    if (idx.error) return { error: idx.error }
-    const ctx = await resident()
-    const { vectors } = await embed(ctx, list.map(QUERY_PROMPT), { dims: idx.meta.dims })
-    return { rows: scan(idx, vectors, root, { perAskPages, perPage, closedPaths, doneWeight }) }
-  })().catch((e) => ({ error: String(e?.message || e) }))
+  const args = { asks: list, root, perAskPages, perPage, closedPaths, doneWeight }
+  /* 🔴 THE DEADLINE BELOW ONLY BECAME REAL WHEN THIS MOVED OFF THE MAIN THREAD.
+   * In-process the whole thing was one CPU-bound stretch on the event loop, so
+   * the `setTimeout` it races could not fire. Now the loop is free to count, so a
+   * cold or wedged encoder costs the spawn `deadlineMs` and nothing more, and the
+   * block is the keyword-only one it has always been on such a box. */
+  const run = encoderWorkerEnabled()
+    ? callEncoder('evidence-rows', args).then((r) => (r.ok ? { rows: r.value, queueMs: r.queueMs } : { error: r.reason }))
+    : evidenceRows(args)
+        .then((rows) => ({ rows }))
+        .catch((e) => ({ error: String(e?.message || e) }))
 
   const verdict = await Promise.race([run, deadline(deadlineMs)])
   const ms = Date.now() - t0
@@ -389,6 +414,10 @@ export async function semanticCandidates({ asks, root, perAskPages = PER_ASK_PAG
     pages: new Set(verdict.rows.map((r) => r.path)).size,
     asks: list.length,
     ms,
+    // How long the request sat behind another retrieval before the (serial,
+    // single-copy) encoder started it — the one new cost of sharing a worker,
+    // and the only way to tell a slow embed from a queued one in audit.log.
+    ...(verdict.queueMs != null ? { queueMs: verdict.queueMs } : {}),
     index: status.index,
   }
 }

@@ -174,10 +174,11 @@ test('a knowledge spawn with NO attachments is byte-identical to the pre-attachm
   assert.equal(local.knowledgePrompt({ id, question: 'what is X?' }), 'what is X?')
 })
 
-/* --- wiring guard ------------------------------------------------------ *
- * Source-level, because the seam has no test double: agent-routes.mjs imports
- * its executor statically (no DI). The regression it pins was SILENT — the
- * knowledge branch accepted attachments and dropped them. */
+/* --- wiring guards ----------------------------------------------------- *
+ * Source-level, because neither seam has a test double here: agent-routes.mjs
+ * imports its executor statically (no DI), and the cards have no DOM harness.
+ * Both regressions these pin were SILENT — a dropped attachment, and a chip
+ * that navigates the installed PWA away with no way back. */
 
 const src = (p) => fs.readFileSync(new URL(`../../${p}`, import.meta.url), 'utf-8')
 
@@ -201,4 +202,63 @@ test('every agent kind is told where to drop a download', () => {
   // knowledge, box-local dev, and workstation dev — three assembly sites.
   const uses = routes.match(/\$\{DOWNLOADS_PREAMBLE\}/g) || []
   assert.ok(uses.length >= 3, `DOWNLOADS_PREAMBLE must reach all three preamble stacks (found ${uses.length})`)
+})
+
+test('the shared chip component never hands the PWA a bare navigating anchor', () => {
+  const s = src('web/src/components/AgentDownloads.tsx')
+  // ONE hand-off for every presentation — the strip AND the full-screen sheet.
+  // The previewable/non-previewable split is the whole mobile rescue, so a
+  // second render site adding its own copy is the regression to catch.
+  assert.equal(
+    (s.match(/isPreviewable\(/g) ?? []).length,
+    1,
+    'exactly one previewability decision (DownloadItem) — a presentation must not fork it',
+  )
+  assert.equal(
+    (s.match(/<DownloadItem/g) ?? []).length,
+    2,
+    'the strip and the sheet both render their files through that one component',
+  )
+  // An image opens the in-app overlay from a <button>, not a link.
+  assert.match(s, /isPreviewable\(file\.name\) \? \(\s*<button/, 'the previewable item is a button, not an href')
+  // Everything else keeps the app: `download` (honoured → real download) with a
+  // _blank fallback (standalone webview → browser overlay, which has a Done button).
+  assert.match(s, /target="_blank"/)
+  assert.match(s, /rel="noopener"/)
+})
+
+test('the preview overlay AND the sheet close on all FOUR routes, on ONE history entry', () => {
+  const s = src('web/src/components/AgentDownloads.tsx')
+  assert.match(s, /history\.pushState/, '1+4: an entry so the phone back gesture closes the overlay instead of leaving the app')
+  assert.match(s, /addEventListener\('popstate'/)
+  assert.match(s, /if \(!popped\) history\.back\(\)/, 'closing another way must pop the entry so the stack cannot accumulate')
+  // ONE entry for the whole stack (the sheet can carry the preview on top), and
+  // the pop dismisses both — two entries cannot be made safe when both handlers
+  // sit on `window`. So the push is gated on `open`, not on `preview` alone.
+  assert.match(s, /const open = sheetOpen \|\| !!preview/, 'one entry covers sheet + preview')
+  assert.match(s, /e\.key !== 'Escape'\) return/, 'Escape (desktop)')
+  assert.match(
+    s,
+    /addEventListener\('keydown', onKey, true\)/,
+    'in the CAPTURE phase — the full-screen viewer closes itself on Escape from a bubble listener registered first, so this would otherwise tear the whole viewer down',
+  )
+  assert.match(s, /className="dlprev" onClick=\{\(\) => setPreview\(null\)\}/, 'backdrop tap (preview)')
+  assert.match(s, /className="dlsheet-backdrop" onClick=/, 'backdrop tap (sheet)')
+  assert.match(s, /aria-label="close preview"/, 'the ✕ control (preview)')
+  assert.match(s, /className="dlsheet__close"/, 'the ✕ control (sheet)')
+  assert.match(s, /download=\{preview\.name\}/, 'and an explicit Save that performs the real download')
+})
+
+test('the sheet flag is reset with the files — a NEW download must not re-open it unprompted', () => {
+  const s = src('web/src/components/AgentDownloads.tsx')
+  // `sheetOpen` is derived (`compact && sheet && files.length > 0`), so an agent
+  // whose last file vanishes correctly unmounts the sheet and unwinds its history
+  // entry — but the `sheet` flag it was opened with would survive, and the next
+  // file the agent drops flips it back on its own: a bottom sheet appearing over
+  // the transcript on the phone with nobody having tapped anything.
+  assert.match(
+    s,
+    /useEffect\(\(\) => \{\s*if \(!files\.length\) setSheet\(false\)\s*\}, \[files\.length\]\)/,
+    'clear `sheet` when it can no longer be open, rather than stranding it',
+  )
 })

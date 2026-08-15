@@ -162,9 +162,15 @@ which is the fusion above).
 evidenceLeg: {
   subAsks(task),                      // → [string, …]
   async semanticCandidates({ asks, root, enabled, closedPaths, doneWeight }),
-  //   → { available, reason?, rows, pages, ms, index? }
+  //   → { available, reason?, rows, pages, ms, queueMs?, index? }
 }
 ```
+
+`queueMs` is optional. A leg that runs its encoder off the main thread — as
+`semantic-search` does, in one `worker_thread` shared by every call site — reports
+how long the request queued behind another retrieval, and core logs it as
+`semanticQueueMs` on the `atlas-evidence` audit line. Omit it and the line is
+byte-identical to core's.
 
 ### `scorecardStats` — tiles at read time
 

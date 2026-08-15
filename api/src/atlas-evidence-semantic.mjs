@@ -27,10 +27,14 @@
  * The contract, so an addon can satisfy it without reading core:
  *   subAsks(task)          → [string, …]   the task split into sub-asks
  *   semanticCandidates({ asks, root, enabled, closedPaths, doneWeight })
- *                          → { available, reason?, rows, pages, ms, index? }
+ *                          → { available, reason?, rows, pages, ms, queueMs?, index? }
  *     rows: [{ path, title, section?, text, similarity, pageScore, closed }]
  *           best first; `text` is a WHOLE chunk, `closed` marks a done task
  *           (core charges it the same DONE_WEIGHT toll the keyword leg does).
+ *     queueMs is OPTIONAL: a leg that runs its encoder off the main thread (the
+ *           semantic-search addon does) reports how long the request queued
+ *           behind another retrieval, and core logs it as `semanticQueueMs`. A
+ *           leg that omits it leaves the audit line byte-identical.
  * ------------------------------------------------------------------ */
 import { addonEvidenceLeg } from './addons.mjs'
 
