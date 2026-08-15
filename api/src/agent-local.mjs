@@ -177,6 +177,9 @@ const MAX_STATS_BYTES = Number(process.env.AGENT_STATS_MAX_BYTES || 64 * 1024)
 const MAX_STAT_ENTRIES = Number(process.env.AGENT_STATS_MAX_ENTRIES || 6)
 const MAX_STAT_POINTS = Number(process.env.AGENT_STATS_MAX_POINTS || 120)
 const MAX_STAT_LABEL = 28
+// Downloads dir (see listDownloads): caps on what one session may offer.
+const MAX_DOWNLOAD_FILES = Number(process.env.AGENT_DOWNLOADS_MAX_FILES || 20)
+const MAX_DOWNLOAD_BYTES = Number(process.env.AGENT_DOWNLOAD_MAX_BYTES || 100 * 1024 * 1024)
 // After an interrupt we send Escape, then wait this long for Claude Code's TUI to
 // stop the turn and return to an empty prompt before typing the added context (a
 // send too soon races the still-streaming pane). Queued prompts are flushed on a
@@ -337,7 +340,8 @@ function decodeUpload(name, dataUrl) {
 // checkout's git status stays clean) and return their absolute paths. The agent
 // reads them by path via the Read tool — it runs with --dangerously-skip-
 // permissions, so any absolute path is readable. Throws on an invalid file.
-function saveImages(id, images) {
+// Exported for the attachment round-trip test (api/test/agent-downloads.test.mjs).
+export function saveImages(id, images) {
   const dir = path.join(STATE_DIR, 'uploads', id)
   fs.mkdirSync(dir, { recursive: true })
   const paths = []
@@ -866,6 +870,59 @@ function generateMicrosFor(s, pending) {
 function statsFile(id) {
   return path.join(STATE_DIR, 'stats', `${id}.json`)
 }
+
+/* Downloads — a per-session dir the agent can drop files into to offer the
+ * operator a download (see DOWNLOADS_PREAMBLE in agent-routes.mjs), mirroring
+ * the live-stats channel above but for files instead of numbers: no history to
+ * accumulate, so the listing is just re-read fresh (cheap readdir + stat,
+ * capped, dotfiles skipped) wherever a session's live fields are sampled.
+ *
+ * `String(id)` rather than a bare `id`: the prompt builders below substitute
+ * `{downloadsDir}` unconditionally, and knowledgePrompt() is called without an
+ * id by the pure prompt-contract tests — path.join would throw on undefined. */
+function downloadsDir(id) {
+  return path.join(STATE_DIR, 'downloads', String(id))
+}
+export function listDownloads(id) {
+  let entries
+  try {
+    entries = fs.readdirSync(downloadsDir(id), { withFileTypes: true })
+  } catch {
+    return []
+  }
+  const files = []
+  for (const e of entries) {
+    if (!e.isFile() || e.name.startsWith('.')) continue
+    let st
+    try {
+      st = fs.statSync(path.join(downloadsDir(id), e.name))
+    } catch {
+      continue
+    }
+    files.push({ name: e.name, size: st.size, mtime: st.mtimeMs })
+  }
+  files.sort((a, b) => b.mtime - a.mtime)
+  return files.slice(0, MAX_DOWNLOAD_FILES)
+}
+// Resolve one session's download by name for the GET route in agent-routes.mjs.
+// `name` is the already URL-decoded query value (Express's query parser / the
+// bridge's URLSearchParams both decode percent-encoding once — decoding again
+// here would double-decode and mangle a filename with a literal `%`); it must be
+// a plain basename (blocks `../` traversal and absolute paths) that appears in
+// the CURRENT capped listing, and under the size cap. Returns
+// { status, ok, path?, name?, error? }, the same shape the other route-backing
+// functions (output/history/…) use.
+export function downloadFile({ id, name }) {
+  const s = registry.sessions[id]
+  if (!s) return { status: 404, ok: false, error: 'no such session' }
+  const decoded = String(name || '')
+  if (!decoded || decoded === '.' || decoded === '..' || decoded !== path.basename(decoded))
+    return { status: 400, ok: false, error: 'invalid name' }
+  const file = listDownloads(id).find((f) => f.name === decoded)
+  if (!file) return { status: 404, ok: false, error: 'no such download' }
+  if (file.size > MAX_DOWNLOAD_BYTES) return { status: 413, ok: false, error: 'file too large' }
+  return { status: 200, ok: true, path: path.join(downloadsDir(id), decoded), name: decoded }
+}
 // Fold a raw {label:value} stats object into the card's accumulated items array,
 // carrying each counter's `points` history forward from prevItems. Shared by the
 // box-local file sampler (sampleLiveStats) and the WORKSTATION accumulator
@@ -1026,7 +1083,7 @@ function pruneShipTrain() {
   return changed
 }
 
-function publicView(s, status, lastOutput, menuKind, transcript, appUp, menuChoice) {
+function publicView(s, status, lastOutput, menuKind, transcript, appUp, menuChoice, downloads) {
   const shipQ = shipTrainPosOf(s.id)
   return {
     id: s.id,
@@ -1133,6 +1190,9 @@ function publicView(s, status, lastOutput, menuKind, transcript, appUp, menuChoi
     // carry their accumulated history for the card's mini-plot, [done,total]
     // entries carry `max` for a completion bar.
     ...(s.stats && s.stats.length ? { stats: s.stats } : {}),
+    // Files the agent has offered for download (listDownloads above): capped,
+    // dotfiles skipped, newest first. Absent/empty → the card shows no chip.
+    ...(downloads && downloads.length ? { downloads } : {}),
     // Agent-signaled ship state (ATLAS:READY-TO-SHIP / ATLAS:SHIPPED markers):
     // the card highlights the Ship button on 'ready' and swaps it for a check
     // on 'shipped'; `shipInfo` carries the SHIPPED detail (PR number + SHA).
@@ -1454,7 +1514,9 @@ export async function listSessions() {
       // let sampleMerged decide again.
       delete s.shipMerged
     }
-    out.push(publicView(s, status, tail || s.lastSeen || '', menuKind, transcript, appUp, menuChoice))
+    out.push(
+      publicView(s, status, tail || s.lastSeen || '', menuKind, transcript, appUp, menuChoice, listDownloads(s.id)),
+    )
   }
   if (changed) persist()
   out.sort((a, b) => (a.startedAt < b.startedAt ? 1 : -1))
@@ -1727,13 +1789,20 @@ export async function reviveAll() {
  * (api/test/atlas-evidence-spawn.test.mjs): `context` is the pre-formed Atlas
  * evidence block, injected BETWEEN the standing preamble and the task — and with
  * none the prompt must stay BYTE-IDENTICAL to what an unbriefed spawn has always
- * had. `{statsFile}`/`{worktree}` are this session's own paths (only the executor
- * knows the id); attached-file paths fold into the task text as a single-line
- * tail, the same mechanism a follow-up prompt's images use. */
+ * had. `{statsFile}`/`{downloadsDir}`/`{worktree}` are this session's own paths
+ * (only the executor knows the id); attached-file paths fold into the task text
+ * as a single-line tail, the same mechanism a follow-up prompt's images use. */
 export function devPrompt({ id, task, repo, preamble, context, worktree, imagePaths = [] }) {
   const taskBody = withImages(task, imagePaths)
   if (!preamble) return taskBody
-  const head = injectApp(preamble.replaceAll('{statsFile}', statsFile(id)).replaceAll('{worktree}', worktree), repo, id)
+  const head = injectApp(
+    preamble
+      .replaceAll('{statsFile}', statsFile(id))
+      .replaceAll('{downloadsDir}', downloadsDir(id))
+      .replaceAll('{worktree}', worktree),
+    repo,
+    id,
+  )
   return `${head}${context ? `\n\n${context}` : ''}\n\n---\n# Your task\n${taskBody}`
 }
 
@@ -1837,8 +1906,11 @@ export async function spawn({ task, repo, preamble, model, effort, context, imag
   // The slug/branch derive from `task` only; the preamble and the retrieved Atlas
   // evidence (`context`) go into the prompt the agent actually receives — see
   // devPrompt — so branch names stay clean. The stats dir is pre-created so a
-  // bare `>` redirect from the agent's first background script just works.
+  // bare `>` redirect from the agent's first background script just works;
+  // `{downloadsDir}` (DOWNLOADS_PREAMBLE) is this session's download dir,
+  // pre-created the same way so a `cp` into it works on the first turn.
   fs.mkdirSync(path.join(STATE_DIR, 'stats'), { recursive: true })
+  fs.mkdirSync(downloadsDir(id), { recursive: true })
   const prompt = devPrompt({ id, task, repo, preamble, context, worktree, imagePaths })
   // Prompt by FILE, not in the tmux command (promptFileLaunch): the retrieved
   // Atlas evidence makes this prompt tens of KB, far past tmux's ~16 KB command
@@ -1873,15 +1945,23 @@ export async function spawn({ task, repo, preamble, model, effort, context, imag
 }
 
 /* The opening prompt a knowledge chat is launched with. Pure and exported so the
- * contract is testable without driving tmux: with no evidence it must stay
- * byte-identical to what it has always been.
+ * contract is testable without driving tmux (api/test/atlas-chat-evidence.test.mjs,
+ * api/test/agent-downloads.test.mjs): with no evidence and no attachments it must
+ * stay byte-identical to what it has always been, and with attachments the saved
+ * paths must reach the first turn so the chat can Read them.
  *
  * `context` is the pre-formed Atlas evidence block (chatEvidence), placed between
  * the standing preamble and the question. The question keeps its own
  * `# Operator question` heading BELOW the evidence, so what the operator actually
- * asked can never read as part of the briefing. */
-export function knowledgePrompt({ question, preamble, context }) {
-  return preamble ? `${preamble}${context ? `\n\n${context}` : ''}\n\n---\n# Operator question\n${question}` : question
+ * asked can never read as part of the briefing. `{downloadsDir}` in the preamble
+ * (DOWNLOADS_PREAMBLE) becomes this chat's own download dir. */
+export function knowledgePrompt({ id, question, preamble, context, imagePaths = [] }) {
+  // Attached-file paths fold into the question text (a single-line tail) so the
+  // chat reads them on its first turn — same mechanism as a dev spawn's.
+  const body = withImages(question, imagePaths)
+  return preamble
+    ? `${preamble.replaceAll('{downloadsDir}', downloadsDir(id))}${context ? `\n\n${context}` : ''}\n\n---\n# Operator question\n${body}`
+    : body
 }
 
 /* A knowledge chat's launch line. Exported for the same reason atlasWorkerLaunch
@@ -1910,7 +1990,7 @@ export function knowledgeLaunch({ id, sid, vaultKey, model, effort, prompt }) {
  * preamble's add-and-link + pull-rebase-then-commit rules are the boundary.
  * Gated on the same opt-in as the rest of box-local execution (the repo
  * allowlist file): no allowlist → no execution on this box, of either kind. */
-export async function spawnKnowledge({ question, preamble, model, effort, vault }) {
+export async function spawnKnowledge({ question, preamble, model, effort, vault, images }) {
   if (!question || typeof question !== 'string') return { status: 400, ok: false, error: 'question required' }
   if (!localRepoKeys().length) return { status: 503, ok: false, error: 'box-local executor disabled' }
   // `vault` (a key) is optional → the default vault, so a plain Knowledge Base
@@ -1928,6 +2008,19 @@ export async function spawnKnowledge({ question, preamble, model, effort, vault 
   let id = base
   for (let n = 2; registry.sessions[id]; n++) id = `${base}-${n}`
 
+  // Save any attached files to this session's upload dir — AFTER the id is
+  // resolved (saveImages keys the dir by it) and BEFORE anything is registered or
+  // launched, so a bad attachment fails fast with nothing left behind. Their
+  // paths fold into the opening question below, exactly as spawn() does.
+  let imagePaths = []
+  if (Array.isArray(images) && images.length) {
+    try {
+      imagePaths = saveImages(id, images)
+    } catch (e) {
+      return { status: 400, ok: false, error: e.message }
+    }
+  }
+
   const tmux = `agentbox-${id}`
   const claudeSessionId = randomUUID()
   const session = {
@@ -1937,6 +2030,10 @@ export async function spawnKnowledge({ question, preamble, model, effort, vault 
     status: 'running', startedAt: nowIso(), lc: initLifecycle(LC.SPAWNED),
   }
 
+  // `{downloadsDir}` (DOWNLOADS_PREAMBLE) is this chat's download dir, same
+  // contract as a dev agent's — pre-created so the agent can write into it right
+  // away.
+  fs.mkdirSync(downloadsDir(id), { recursive: true })
   // The retrieved Atlas candidate set, folded into the chat's FIRST turn — the
   // same retrieval a dev spawn gets (chatEvidence → atlasEvidence). '' on any
   // failure and on every non-atlas vault, and then this prompt is byte-identical
@@ -1944,7 +2041,7 @@ export async function spawnKnowledge({ question, preamble, model, effort, vault 
   // the Atlas IS the default vault, so a chat spawned without one is still an
   // Atlas chat.
   const context = await chatEvidence({ vaultKey: vlt.key, question, id })
-  const prompt = knowledgePrompt({ question, preamble, context })
+  const prompt = knowledgePrompt({ id, question, preamble, context, imagePaths })
   const launch = knowledgeLaunch({
     id, sid: claudeSessionId, vaultKey: vlt.key,
     model: model || DEFAULT_MODEL, effort: effort || DEFAULT_EFFORT, prompt,
@@ -1965,7 +2062,7 @@ export async function spawnKnowledge({ question, preamble, model, effort, vault 
 
   registry.sessions[id] = session
   persist()
-  audit({ action: 'spawn', kind: 'knowledge', id, vault: vlt.key, model: model || DEFAULT_MODEL, effort: effort || DEFAULT_EFFORT, ok: true })
+  audit({ action: 'spawn', kind: 'knowledge', id, vault: vlt.key, model: model || DEFAULT_MODEL, effort: effort || DEFAULT_EFFORT, images: imagePaths.length, ok: true })
   return { status: 200, ok: true, id }
 }
 
@@ -3090,8 +3187,8 @@ export async function kill({ id }) {
 }
 
 // Remove a dev agent's on-disk artifacts: its git worktree + branch, plus any
-// uploads/stats files. (Knowledge agents have none — their "worktree" IS the
-// vault root.) Shared by cleanup() and the ⌦-initiated graceful close.
+// uploads/stats/downloads files. (Knowledge agents have no worktree — theirs IS
+// the vault root.) Shared by cleanup() and the ⌦-initiated graceful close.
 async function removeAgentArtifacts(s) {
   if (s.kind !== 'knowledge') {
     await run(['git', '-C', s.path, 'worktree', 'remove', s.worktree, '--force'])
@@ -3100,8 +3197,9 @@ async function removeAgentArtifacts(s) {
   try {
     fs.rmSync(path.join(STATE_DIR, 'uploads', s.id), { recursive: true, force: true })
     fs.rmSync(statsFile(s.id), { force: true })
+    fs.rmSync(downloadsDir(s.id), { recursive: true, force: true })
   } catch {
-    /* best-effort: leftover upload/stats files are harmless */
+    /* best-effort: leftover upload/stats/downloads files are harmless */
   }
 }
 

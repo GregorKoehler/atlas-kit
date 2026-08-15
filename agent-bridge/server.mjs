@@ -18,6 +18,7 @@
  *   GET  /health
  *   GET  /sessions               → { generated, sessions:[...] }
  *   GET  /output?id=&lines=      → { id, output }
+ *   GET  /download?id=&name=     → raw bytes of a file the agent offered
  *   POST /spawn   { task, repo, preamble?, model?, effort?, images? }  → { ok, id }
  *   POST /prompt  { id, text, images? }  → { ok }   (images: data-URL uploads)
  *   POST /kill    { id }          → { ok }
@@ -190,6 +191,11 @@ const MAX_IMAGE_BYTES = Number(process.env.BRIDGE_MAX_IMAGE_BYTES || 8 * 1024 * 
 // latest {label:value}; the box accumulates the history. Cap what one session may
 // publish (matches the box-local cap).
 const MAX_STATS_BYTES = Number(process.env.BRIDGE_STATS_MAX_BYTES || 64 * 1024)
+// Downloads dir a session can drop files into inside its container (see
+// DOWNLOADS_PREAMBLE in the dashboard). Caps on what one session may offer,
+// matching the box-local caps.
+const MAX_DOWNLOAD_FILES = Number(process.env.BRIDGE_DOWNLOADS_MAX_FILES || 20)
+const MAX_DOWNLOAD_BYTES = Number(process.env.BRIDGE_DOWNLOAD_MAX_BYTES || 100 * 1024 * 1024)
 // Bytes of each session's Claude Code transcript we tail out of the container per
 // poll to derive sub-agents / background jobs / context fill (mirrors the box's
 // 1 MiB CONTEXT_TAIL_BYTES). Kept under dockerExec's 4 MiB maxBuffer.
@@ -215,6 +221,12 @@ const APP_SPAN = Number(process.env.BRIDGE_APP_SPAN || 16)
 const APP_ROUTING = process.env.BRIDGE_APP_ROUTING || 'auto'
 const APP_PROBE_MS = Number(process.env.BRIDGE_APP_PROBE_MS || 300)
 const ROUTABLE_PROBE_MS = Number(process.env.BRIDGE_ROUTABLE_PROBE_MS || 600)
+// listSessions() probes each session with several sequential docker exec/tmux/TCP
+// round trips — a bounded-concurrency fan-out instead of a serial loop keeps the
+// box's AGENT_BRIDGE_TIMEOUT_MS poll well under budget as the session count
+// grows. Bounded (not an unbounded Promise.all) so a big fleet doesn't fork
+// dozens of `docker exec` processes at once.
+const LIST_CONCURRENCY = Number(process.env.BRIDGE_LIST_CONCURRENCY || 8)
 
 // The running code's commit SHA, sampled once at startup — GET /health returns
 // it so the box's redeploy poll can verify a redeploy actually picked up new
@@ -229,6 +241,21 @@ try {
 /* --- tiny helpers -------------------------------------------------- */
 const nowIso = () => new Date().toISOString()
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
+
+// Run `fn` over `items` with at most `limit` in flight at once — dependency-free
+// (this package is deliberately dependency-free), so no p-limit.
+async function mapLimit(items, limit, fn) {
+  const out = new Array(items.length)
+  let next = 0
+  async function worker() {
+    while (next < items.length) {
+      const i = next++
+      out[i] = await fn(items[i], i)
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker))
+  return out
+}
 
 function timingSafeEqual(a, b) {
   const ab = Buffer.from(a)
@@ -695,6 +722,82 @@ async function readContainerStats(s) {
   return obj && typeof obj === 'object' && !Array.isArray(obj) ? obj : null
 }
 
+// The downloads dir a session can drop files into, inside its container.
+// `{downloadsDir}` in the agent's preamble is substituted with this at spawn
+// (mirrors {statsFile} above), pre-created there. Unlike the stats file (one
+// flat file) this is a per-session SUBDIRECTORY, so the agent can drop several
+// files without name collisions.
+function downloadsDir(id) {
+  return `/tmp/agent-downloads/${id}`
+}
+
+// List files in a session's downloads dir: one cheap `find` per alive session
+// per /sessions poll (mirrors readContainerStats above). No history to keep —
+// unlike stats there's nothing to accumulate, just the current listing, capped
+// + dotfiles skipped, newest first.
+async function readContainerDownloads(s) {
+  const r = await dockerExec(s.container, [
+    'find', downloadsDir(s.id), '-maxdepth', '1', '-type', 'f', '-printf', '%f\t%s\t%T@\n',
+  ])
+  if (!r.ok) return null // dir absent (no downloads yet) / unreadable
+  const files = []
+  for (const line of (r.stdout || '').split('\n')) {
+    if (!line) continue
+    const [name, sizeStr, mtimeStr] = line.split('\t')
+    const size = Number(sizeStr)
+    const mtime = Number(mtimeStr)
+    if (!name || name.startsWith('.') || !Number.isFinite(size) || !Number.isFinite(mtime)) continue
+    files.push({ name, size, mtime: Math.round(mtime * 1000) }) // %T@ is seconds → ms
+  }
+  files.sort((a, b) => b.mtime - a.mtime)
+  return files.slice(0, MAX_DOWNLOAD_FILES)
+}
+
+// Small extension→MIME table for the download's Content-Type — a courtesy;
+// Content-Disposition: attachment is what actually forces the save-as regardless
+// of type. Unrecognized extensions fall back to a generic binary type.
+const MIME_TYPES = {
+  '.txt': 'text/plain', '.md': 'text/markdown', '.html': 'text/html', '.htm': 'text/html',
+  '.json': 'application/json', '.csv': 'text/csv', '.pdf': 'application/pdf',
+  '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.gif': 'image/gif',
+  '.webp': 'image/webp', '.svg': 'image/svg+xml', '.zip': 'application/zip',
+  '.mp3': 'audio/mpeg', '.mp4': 'video/mp4', '.wav': 'audio/wav',
+}
+function mimeFor(name) {
+  return MIME_TYPES[path.posix.extname(name).toLowerCase()] || 'application/octet-stream'
+}
+
+// Stream a file out of a session's downloads dir, binary-safe. dockerExec/
+// dockerExecInput above run through execFile's default utf8 string decoding of
+// stdout (fine for the small JSON/text payloads they carry) — that would CORRUPT
+// arbitrary binary downloads (PDFs, images, …), so this spawns `docker exec … cat`
+// directly and pipes its raw stdout, never buffering or decoding it as a string.
+// `name` is the already URL-decoded query value (URLSearchParams decodes once —
+// decoding again would double-decode and mangle a literal `%`); it must be a
+// plain basename that appears in the CURRENT capped listing.
+async function streamDownload(res, id, name) {
+  const s = registry.sessions[id]
+  if (!s) return send(res, 404, { ok: false, error: 'no such session' })
+  if (!name || name === '.' || name === '..' || name !== path.posix.basename(name))
+    return send(res, 400, { ok: false, error: 'invalid name' })
+  const files = await readContainerDownloads(s)
+  const file = files && files.find((f) => f.name === name)
+  if (!file) return send(res, 404, { ok: false, error: 'no such download' })
+  if (file.size > MAX_DOWNLOAD_BYTES) return send(res, 413, { ok: false, error: 'file too large' })
+  res.writeHead(200, {
+    'Content-Type': mimeFor(name),
+    'Content-Length': String(file.size),
+    'Content-Disposition': `attachment; filename="${name.replace(/"/g, '')}"`,
+    'Cache-Control': 'no-store',
+  })
+  const child = spawnProcess('docker', ['exec', s.container, 'cat', path.posix.join(downloadsDir(id), name)], {
+    stdio: ['ignore', 'pipe', 'ignore'],
+  })
+  child.on('error', () => res.end())
+  child.stdout.on('error', () => res.end())
+  child.stdout.pipe(res)
+}
+
 // Read a session's newest Claude Code transcript from INSIDE its container and
 // derive the same fields the box-local executor scans off its own disk:
 // context-window fill, the sub-agents it spawned (Task/Agent), and the
@@ -759,7 +862,7 @@ function contextWindowFor(s) {
 }
 
 // The card-facing shape of a session.
-function publicView(s, status, lastOutput, menuKind, appUp, stats, menuChoice) {
+function publicView(s, status, lastOutput, menuKind, appUp, stats, menuChoice, downloads) {
   return {
     id: s.id,
     task: s.task,
@@ -837,6 +940,9 @@ function publicView(s, status, lastOutput, menuKind, appUp, stats, menuChoice) {
     // Raw latest live-stats the agent published in its container (readContainerStats);
     // the box accumulates each counter's history and builds the card's mini-plots.
     ...(stats ? { stats } : {}),
+    // Files the agent has offered for download (readContainerDownloads above):
+    // capped, dotfiles skipped, newest first. Absent/empty → no chip on the card.
+    ...(downloads && downloads.length ? { downloads } : {}),
     // Agent-signaled ship state (ATLAS:READY-TO-SHIP / ATLAS:SHIPPED markers,
     // scanned sticky off the container transcript) — so a workstation dev agent's
     // card lights the same ready ⤴ / shipped ✓ iconography as a box-local one.
@@ -872,18 +978,25 @@ function agentCapacity() {
 }
 
 /* --- endpoint handlers --------------------------------------------- */
+// Each session needs several sequential docker exec/tmux/TCP round trips
+// (sessionAlive, captureTail, readContainerTranscript, readContainerStats,
+// readContainerDownloads, appUpFor) — O(sessions) serially crossed the box's
+// AGENT_BRIDGE_TIMEOUT_MS poll budget once the fleet grew past ~10 agents.
+// mapLimit runs sessions concurrently (bounded — see LIST_CONCURRENCY) so wall
+// time is ~one session's chain per batch, not the sum of all of them. Each
+// session only touches its OWN registry entry, so concurrent mutation of
+// `changed` (a plain bool) and per-session fields is safe — JS never interleaves
+// the synchronous stretches between awaits.
 async function listSessions() {
-  const out = []
   let changed = false
   // Probe each SESSION's own live-app port (per-session now, not per-repo).
   const appUpFor = async (id) => {
     const t = await appTarget(id)
     return t ? await probeTcp(t.host, t.port) : false
   }
-  for (const s of Object.values(registry.sessions)) {
+  const out = await mapLimit(Object.values(registry.sessions), LIST_CONCURRENCY, async (s) => {
     if (s.status === 'error') {
-      out.push(publicView(s, 'error', s.error || 'spawn failed', null, await appUpFor(s.id)))
-      continue
+      return publicView(s, 'error', s.error || 'spawn failed', null, await appUpFor(s.id))
     }
     const alive = await sessionAlive(s)
     // One pane capture serves both the status (is it still working?) and the tail.
@@ -914,12 +1027,14 @@ async function listSessions() {
     // Surface the agent's live stats (only while alive — a dead/lost session has
     // nothing to publish, and its /tmp file may be gone with the container).
     const stats = alive ? await readContainerStats(s) : null
+    // Same for its downloads listing.
+    const downloads = alive ? await readContainerDownloads(s) : null
     // Scan the container transcript for sub-agents / background jobs / context
     // fill (sticky logs persisted on the session). Only while alive — a dead
     // session has nothing new, and its transcript may be gone with the container.
     if (alive && mergeTranscript(s, await readContainerTranscript(s))) changed = true
-    out.push(publicView(s, status, tail || s.lastSeen || '', menuKind, await appUpFor(s.id), stats, menuChoice))
-  }
+    return publicView(s, status, tail || s.lastSeen || '', menuKind, await appUpFor(s.id), stats, menuChoice, downloads)
+  })
   if (changed) persist()
   // newest first
   out.sort((a, b) => (a.startedAt < b.startedAt ? 1 : -1))
@@ -1210,9 +1325,12 @@ async function spawn({ task, repo, preamble, model, effort, images }) {
   }
 
   // 1. worktree base dir, 2. fresh worktree on a new branch. Also pre-create the
-  // live-stats dir so a bare `>` redirect to {statsFile} from the agent just works.
+  // live-stats dir so a bare `>` redirect to {statsFile} from the agent just
+  // works, and this session's downloads dir ({downloadsDir}) so a `cp`/redirect
+  // there works too.
   await dockerExec(container, ['mkdir', '-p', worktreeBase])
   await dockerExec(container, ['mkdir', '-p', '/tmp/agent-stats'])
+  await dockerExec(container, ['mkdir', '-p', downloadsDir(id)])
   const wt = await dockerExec(container, [
     'git', '-C', target.path, 'worktree', 'add', '-b', branch, worktree,
   ])
@@ -1231,9 +1349,10 @@ async function spawn({ task, repo, preamble, model, effort, images }) {
   // agent receives — so branch names stay clean.
   // {appAddress}/{appPort}/{appBasePath} in the preamble become this SESSION's
   // concrete values (0.0.0.0, its allocated port, the per-session base path), and
-  // {statsFile} its container-side live-stats path (mirrors the box-local executor).
+  // {statsFile}/{downloadsDir} its container-side live-stats/downloads paths
+  // (mirrors the box-local executor).
   const prompt = preamble
-    ? `${injectApp(preamble.replaceAll('{statsFile}', statsFile(id)).replaceAll('{worktree}', worktree), repo, id, appPort)}\n\n---\n# Your task\n${withImages(task, imagePaths)}`
+    ? `${injectApp(preamble.replaceAll('{statsFile}', statsFile(id)).replaceAll('{downloadsDir}', downloadsDir(id)).replaceAll('{worktree}', worktree), repo, id, appPort)}\n\n---\n# Your task\n${withImages(task, imagePaths)}`
     : withImages(task, imagePaths)
   // The prompt travels by FILE, not inside the tmux command — written into the
   // container with `cat` over stdin, then read back by the session's own shell
@@ -1607,6 +1726,7 @@ async function cleanup({ id }) {
   await dockerExec(s.container, ['git', '-C', s.path, 'branch', '-D', s.branch])
   await dockerExec(s.container, ['rm', '-rf', `/tmp/agent-uploads/${id}`])
   await dockerExec(s.container, ['rm', '-f', statsFile(id)])
+  await dockerExec(s.container, ['rm', '-rf', downloadsDir(id)])
   delete registry.sessions[id]
   persist()
   audit({ action: 'cleanup', id, repo: s.repo, branch: s.branch, worktree: s.worktree, ok: true })
@@ -1851,6 +1971,11 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'GET' && p === '/history') {
       const r = await history({ id: url.searchParams.get('id'), rev: url.searchParams.get('rev') || '' })
       return send(res, r.status, r)
+    }
+    if (req.method === 'GET' && p === '/download') {
+      // Awaited (unlike a plain `return streamDownload(...)`) so a rejection
+      // lands in the surrounding try/catch, same as every other route here.
+      return await streamDownload(res, url.searchParams.get('id'), url.searchParams.get('name'))
     }
     if (req.method === 'GET' && p === '/redeploy-status') {
       const r = redeployStatus()

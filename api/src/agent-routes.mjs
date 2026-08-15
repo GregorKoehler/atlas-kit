@@ -19,6 +19,7 @@
  * output) are routed by repo (spawn) or by which executor owns the id.
  * ------------------------------------------------------------------ */
 import fs from 'node:fs'
+import http from 'node:http'
 import os from 'node:os'
 import path from 'node:path'
 import { execFile } from 'node:child_process'
@@ -207,6 +208,17 @@ Rewrite that file (overwrite the whole thing) with a flat JSON object whenever t
 - "label": number → a counter tile; its sampled history is drawn as a small cumulative-style plot.
 - "label": [done, total] → a completion bar.
 Up to 6 entries; keys are the labels shown (keep them short). The natural writer is the long-running job itself — make the script you launch in the background rewrite the file each batch, e.g.: printf '{"pages": %d, "batch": [%d, %d]}' "$pages" "$i" "$total" > '{statsFile}'. Delete the file when the work is done to clear the display. Skip all of this for short or single-step tasks.`
+
+// Appended to EVERY agent's preamble (dev + knowledge, box-local AND
+// workstation). Mirrors STATS_PREAMBLE: the `{downloadsDir}` token is this
+// session's download dir, substituted per-location by each EXECUTOR at spawn
+// (a dir on the box, or a path inside the container) — the same split as
+// {statsFile}/{appAddress}. No history to publish here, just files.
+const DOWNLOADS_PREAMBLE =
+  process.env.AGENT_DOWNLOADS_PREAMBLE ||
+  `Downloads — if you produce a file the operator would want on their device (a report, an export, a generated image/PDF/HTML page, anything), offer it to them by copying or writing it into:
+{downloadsDir}
+The dashboard shows a small download chip per file there. Overwrite the same filename to publish an updated version — the chip flags it as updated; a new filename adds a new chip. Skip this entirely if your task produces nothing worth downloading.`
 
 // Appended to EVERY dev agent's preamble (box-local AND workstation). A standing
 // capability note: the agent may run a web app (Streamlit etc.) on its slot, which
@@ -988,9 +1000,10 @@ async function performSpawn(raw) {
     return { status: 400, body: { ok: false, error: `unknown "model" (expected ${Object.keys(AGENT_MODELS).join('/')})` } }
   if (effort !== undefined && !AGENT_EFFORTS.has(effort))
     return { status: 400, body: { ok: false, error: `unknown "effort" (expected ${[...AGENT_EFFORTS].join('/')})` } }
-  // Image attachments fold into the opening prompt (dev agents only — the
-  // executor saves them to disk and references their paths). Same shape/cap as
-  // a prompt's; knowledge chats ignore them. (Scheduled spawns carry no images.)
+  // File attachments fold into the opening prompt — the executor saves them to
+  // disk and references their paths. Same shape/cap as a prompt's, for BOTH
+  // kinds: dev spawns and knowledge/Atlas chats. Validated HERE, above the kind
+  // branch, so one cap covers both. (Scheduled spawns carry no attachments.)
   const imgs = Array.isArray(images) ? images : []
   if (imgs.length > MAX_IMAGES)
     return { status: 400, body: { ok: false, error: `too many files (max ${MAX_IMAGES})` } }
@@ -1005,13 +1018,16 @@ async function performSpawn(raw) {
   // ORCHESTRATION layer (the control MCP tools) is atlas-only — only the main
   // Atlas chat also gets ATLAS_CONTROL_PREAMBLE.
   if (kind === 'knowledge') {
-    const preamble =
+    const basePreamble =
       vault === 'atlas'
         ? `${ATLAS_KNOWLEDGE_PREAMBLE}\n\n${ATLAS_CONTROL_PREAMBLE}`
         : isTypedVault(vault)
           ? ATLAS_KNOWLEDGE_PREAMBLE
           : KNOWLEDGE_PREAMBLE
-    const r = await local.spawnKnowledge({ question: task, preamble, model: modelId, effort: effortLevel, vault })
+    const preamble = `${basePreamble}\n\n${DOWNLOADS_PREAMBLE}`
+    const r = await local.spawnKnowledge({
+      question: task, preamble, model: modelId, effort: effortLevel, vault, images: imgs,
+    })
     if (r.ok && r.id) {
       if (parent) setSpawnParent(r.id, parent)
       generateTitle(r.id, task).then((m) => m?.size && local.setSize(r.id, m.size))
@@ -1033,7 +1049,7 @@ async function performSpawn(raw) {
     // limit applies only to the launch line.
     // ATLAS_SEARCH_PREAMBLE is box-local only: these agents launch with
     // dev.mcp.json, so they are the ones that actually hold the read tools.
-    const preamble = `${reconcile}\n\n${ATLAS_DEV_PREAMBLE}\n\n${ATLAS_SEARCH_PREAMBLE}\n\n${STATS_PREAMBLE}\n\n${MESSAGE_PREAMBLE}\n\n${APP_PREAMBLE}`
+    const preamble = `${reconcile}\n\n${ATLAS_DEV_PREAMBLE}\n\n${ATLAS_SEARCH_PREAMBLE}\n\n${STATS_PREAMBLE}\n\n${DOWNLOADS_PREAMBLE}\n\n${MESSAGE_PREAMBLE}\n\n${APP_PREAMBLE}`
     // '' on any failure (no atlas / no project / retrieval throw) — then the prompt
     // is byte-identical to an unbriefed spawn. The spawn NEVER waits on the Atlas.
     const context = await local.atlasEvidence({ task, repo })
@@ -1070,10 +1086,11 @@ async function performSpawn(raw) {
   // seconds (up to a 45 s timeout) before the agent even started. Retrieval is
   // in-process and sub-second. The recap ingest at close is unaffected
   // (ingestToAtlas spins up its own short-lived worker — it never used this one).
-  // STATS_PREAMBLE carries the `{statsFile}` token; the bridge substitutes it with
-  // a container-side path at spawn (mirroring how it fills APP_PREAMBLE's bind
-  // addr/port/base-path), so workstation agents publish live stats too.
-  const remotePreamble = `${reconcile}\n\n${ATLAS_DEV_PREAMBLE}\n\n${ATLAS_REMOTE_SEARCH_PREAMBLE}\n\n${STATS_PREAMBLE}\n\n${MESSAGE_PREAMBLE}\n\n${APP_PREAMBLE}`
+  // STATS_PREAMBLE/DOWNLOADS_PREAMBLE carry the `{statsFile}`/`{downloadsDir}`
+  // tokens; the bridge substitutes both with container-side paths at spawn
+  // (mirroring how it fills APP_PREAMBLE's bind addr/port/base-path), so
+  // workstation agents publish live stats and offer downloads too.
+  const remotePreamble = `${reconcile}\n\n${ATLAS_DEV_PREAMBLE}\n\n${ATLAS_REMOTE_SEARCH_PREAMBLE}\n\n${STATS_PREAMBLE}\n\n${DOWNLOADS_PREAMBLE}\n\n${MESSAGE_PREAMBLE}\n\n${APP_PREAMBLE}`
   const bridge = bridgeForRepo(repo)
   const label = bridge?.label || defaultLabel()
   // ONE /health call answers both questions this spawn asks of the bridge: which
@@ -2310,6 +2327,47 @@ export function agentRouter(bearerAuth) {
     const r = await callBridge('GET', `/history?id=${encodeURIComponent(id)}${rev ? `&rev=${encodeURIComponent(rev)}` : ''}`, undefined, BRIDGE_TIMEOUT_MS, bridgeForId(id))
     if (!r.ok) return res.status(r.status).json({ ok: false, error: r.body?.error || 'bridge unreachable' })
     res.json(r.body)
+  })
+
+  // Stream a file the agent dropped in its downloads dir (DOWNLOADS_PREAMBLE) —
+  // the card's download chip. Read-only, like /output and /history. Box-local
+  // sessions are validated + streamed straight off disk (local.downloadFile,
+  // whose "must equal its own basename" check is the traversal guard). A bridge
+  // session has no on-box file to stream, so this proxies raw bytes to the
+  // bridge's own /download route — NOT callBridge, which JSON-parses every
+  // response and would corrupt binary content.
+  router.get('/api/agents/download', async (req, res) => {
+    const id = String(req.query.id || '')
+    const name = String(req.query.name || '')
+    if (!id || !name) return res.status(400).json({ ok: false, error: 'missing "id" or "name"' })
+    if (local.hasSession(id)) {
+      const r = local.downloadFile({ id, name })
+      if (!r.ok) return res.status(r.status).json({ ok: false, error: r.error })
+      return res.download(r.path, r.name, (err) => {
+        if (err && !res.headersSent) res.status(500).json({ ok: false, error: 'download failed' })
+      })
+    }
+    const bridge = bridgeForId(id)
+    if (!bridge || !bridge.url || !bridge.token)
+      return res.status(503).json({ ok: false, error: 'bridge not configured' })
+    const u = new URL(bridge.url)
+    const up = http.request(
+      {
+        host: u.hostname,
+        port: Number(u.port) || (u.protocol === 'https:' ? 443 : 80),
+        path: `/download?id=${encodeURIComponent(id)}&name=${encodeURIComponent(name)}`,
+        headers: { authorization: `Bearer ${bridge.token}` },
+      },
+      (ur) => {
+        res.writeHead(ur.statusCode || 502, ur.headers)
+        ur.pipe(res)
+      },
+    )
+    up.on('error', () => {
+      if (!res.headersSent) res.status(502).json({ ok: false, error: 'bridge unreachable' })
+      else res.end()
+    })
+    up.end()
   })
 
   return router
