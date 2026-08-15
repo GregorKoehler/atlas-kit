@@ -36,8 +36,11 @@
 //   'steer'     — an orchestrator/MCP `queue_agent` (POST /api/agents/queue with
 //                 `steeredBy`), incl. an answer to something the agent asked.
 //   'operator'  — the operator's own Queue from the dashboard compose box.
-//   'agent-msg' — reserved for peer mail; classified here so the two executors
-//                cannot disagree later (the bus itself is a later addition).
+//   'agent-msg' — peer mail off the agent↔agent bus. Classified in ONE place so
+//                the two executors cannot disagree: the box stamps a remote send
+//                with this kind (agent-routes' deliverAgentMessage) and the
+//                bridge gates on it, so the two must match exactly or remote
+//                peer mail silently degrades to idle-only.
 //   'reply-receipt' — ⚠️ its TRUST class and its DELIVERY class are DIFFERENT
 //                 AXES, and they look contradictory on purpose; do not "fix" it
 //                 by moving this line down. Trust: an OBSERVATION, exactly like

@@ -194,6 +194,14 @@ export const KNOWLEDGE_TOOLS = new Set([
  * orchestrator's own MCP child) but the HTTP entry passes `false` outright, so a
  * remote connector can never reach them however the env is configured.
  *
+ * `propose` adds `propose_task` — a knowledge-only session's ONE write, and not a
+ * vault write: it files a Task Prospect the operator signs off. It needs its own
+ * flag rather than a place in KNOWLEDGE_TOOLS, because `knowledgeOnly` is the same
+ * flag the remote HTTP connector runs under (see mcp/http.mjs), and a connector
+ * has no business proposing work into the operator's inbox. So the dev + worker
+ * MCP configs set ATLAS_MCP_PROPOSE=1 and the HTTP entry passes `false` outright,
+ * exactly as it does for agentControl.
+ *
  * Filtering at registration (rather than at each call site) keeps the tool
  * definitions below untouched and means agent-control could not register even if
  * both flags were somehow set.
@@ -201,12 +209,13 @@ export const KNOWLEDGE_TOOLS = new Set([
 export function buildServer({
   knowledgeOnly = !!process.env.ATLAS_MCP_KNOWLEDGE_ONLY,
   agentControl = !!process.env.ATLAS_AGENT_CONTROL,
+  propose = !!process.env.ATLAS_MCP_PROPOSE,
 } = {}) {
   const full = new McpServer({ name: 'atlas-kit', version: '0.1.0' })
   const server = knowledgeOnly
     ? {
         registerTool: (name, def, handler) => {
-          if (KNOWLEDGE_TOOLS.has(name)) full.registerTool(name, def, handler)
+          if (KNOWLEDGE_TOOLS.has(name) || (propose && name === 'propose_task')) full.registerTool(name, def, handler)
         },
       }
     : full
@@ -456,6 +465,32 @@ export function buildServer({
   )
 
 
+  // Opt-in (ATLAS_MCP_PROPOSE, set by dev.mcp.json + worker.mcp.json): PROPOSE
+  // follow-up work instead of filing it. The one write a knowledge-only session
+  // gets, and it is not a vault write — nothing reaches `Tasks/` until the
+  // operator approves the prospect on the dashboard. Off for the remote HTTP
+  // connector, which shares the knowledgeOnly flag but not this one.
+  if (propose)
+    server.registerTool(
+      'propose_task',
+      {
+        description:
+          'PROPOSE a follow-up task instead of filing one. Use it when you notice work worth doing that is NOT what you were asked to do — the proposal lands in the operator\'s review inbox and only becomes a real `Tasks/<slug>.md` note if they approve it. NEVER write a task note into the vault yourself. Search the existing tasks first (query_atlas with type:"task") and prefer telling the operator about an existing one over proposing a duplicate. Pass `sourceKey` (any stable string identifying WHAT you noticed, e.g. "dev-agent:my-app:flaky-vault-push") and a source already approved or rejected is silently skipped rather than re-queued — so a repeat run cannot re-propose something already dismissed.',
+        inputSchema: {
+          title: z.string().describe('the task title — one line, imperative, specific'),
+          body: z.string().optional().describe('why it is worth doing and what it involves (a short paragraph)'),
+          due: z.string().optional().describe('optional due date, YYYY-MM-DD'),
+          project: z.string().optional().describe('the project this belongs to (a Wiki/Projects page name, no brackets)'),
+          projectIdea: z.string().optional().describe('the project IDEA this belongs to, if it is not a live project yet'),
+          area: z.string().optional().describe('the life/work area this belongs to, if no project fits'),
+          producer: z.string().optional().describe('who is proposing (e.g. "dev-agent", "atlas-agent") — display only'),
+          sourceKey: z.string().optional().describe('stable dedup key for what you noticed; a decided source is never re-queued'),
+          ...vaultParam,
+        },
+      },
+      tool((args) => apiPost('/api/prospects/new', args)),
+    )
+
   // Opt-in: only the Atlas ORCHESTRATOR launches the MCP server with this flag
   // set (its control.mcp.json sets ATLAS_AGENT_CONTROL=1), so a normal vault
   // chat / dev-agent session never sees the agent-control tools. `knowledgeOnly`
@@ -509,6 +544,10 @@ function registerAgentControl(server) {
     return body
   }
 
+  // This orchestrator's own session id, when it has one — used to mark which of
+  // a silenced bridge's stale sessions are its OWN children.
+  const me = process.env.ATLAS_SESSION
+
   // Compact one-row-per-agent projection for the monitoring feed — the full
   // session objects carry sub-agent/job/transcript detail that would flood the
   // model; keep the fields an orchestrator reasons over.
@@ -543,7 +582,9 @@ function registerAgentControl(server) {
     'list_agents',
     {
       description:
-        'List every agent the dashboard knows about (dev + knowledge, box-local AND remote bridges) with live status — your monitoring feed. Returns `localRepos` (box-local repo keys you may spawn a DEV agent on), `bridges` (remote hosts, each `{label, repos}` — a bridge\'s `repos` are ALSO spawnable dev-repo keys, e.g. a remote repo like `my-app`), and `sessions` (each with id, kind, repo/vault, status, phase, task, context usage, sub-agent/bg-job/queued counts, ship state). To spawn a DEV agent, pass any key from `localRepos` OR any `bridges[].repos` entry as `repo`. Use a session `id` with agent_transcript to read its work, or with prompt_agent/queue_agent/interrupt_agent/kill_agent to steer it.',
+        'List every agent the dashboard knows about (dev + knowledge, box-local AND remote bridges) with live status — your monitoring feed. Returns `localRepos` (box-local repo keys you may spawn a DEV agent on), `bridges` (remote hosts, each `{label, repos}` — a bridge\'s `repos` are ALSO spawnable dev-repo keys, e.g. a remote repo like `my-app`), and `sessions` (each with id, kind, repo/vault, status, phase, task, context usage, sub-agent/bg-job/queued counts, ship state). To spawn a DEV agent, pass any key from `localRepos` OR any `bridges[].repos` entry as `repo`. Use a session `id` with agent_transcript to read its work, or with prompt_agent/queue_agent/interrupt_agent/kill_agent to steer it.' +
+        ' — and read that bridge\'s `capacity` FIRST: `capacity.slots` is how many more agents that box will admit right now, so `slots: 0` means your next spawn there is refused (503) rather than queued. `capacity.known === false` means that bridge has not been redeployed since spawn capacity shipped and NOTHING is limiting agents on it — spawn conservatively there and tell the operator it needs `scripts/restart-agent-bridge.sh`.' +
+        ' ⚠️ A REMOTE agent missing from `sessions` does NOT mean it died — check its bridge: each entry in `bridges` carries `reachable`, and an unreachable one carries `lastSeen` (the last time it answered) plus `staleSessions` (the roster it answered with, `yours: true` on your own children). While a bridge is silent its agents are invisible to the box and are NOT in `sessions` — they are almost always still running (a saturated bridge box simply cannot answer inside the timeout). Report it as "the <label> bridge has not answered since <lastSeen>; its N agents were last seen <status>", NEVER as "your agents were killed", and do not respawn or re-task them until the bridge answers again.',
       inputSchema: {},
     },
     tool(async () => {
@@ -553,8 +594,30 @@ function registerAgentControl(server) {
         // Surface each bridge's spawnable dev-repo keys (`spawnRepos`), not just
         // the label — so an orchestrator can discover + spawn on remote repos
         // (a remote bridge's repos) the same as box-local ones.
+        // `reachable`/`lastSeen`/`staleSessions` are the "we could not ask" half:
+        // a silent bridge's agents are absent from `sessions`, and an
+        // orchestrator that reads that as "they were killed" tells the operator
+        // so — every one of them was alive. Carry the last roster the bridge
+        // answered with instead of leaving the gap unexplained.
         bridges: (r?.bridges ?? [])
-          .map((b) => (typeof b === 'string' ? { label: b, repos: [] } : { label: b?.label, repos: b?.spawnRepos ?? b?.repos ?? [] }))
+          .map((b) =>
+            typeof b === 'string'
+              ? { label: b, repos: [] }
+              : {
+                  label: b?.label,
+                  repos: b?.spawnRepos ?? b?.repos ?? [],
+                  reachable: b?.reachable !== false,
+                  // Remaining spawn capacity on that box — `slots` is how many
+                  // more agents it will admit right now. Surfaced so the limit is
+                  // read BEFORE a spawn is refused by it (a refusal costs a turn
+                  // and reads as a failure; a visible `slots: 0` is a plan).
+                  capacity: b?.capacity,
+                  lastSeen: b?.lastSeen,
+                  staleSessions: Array.isArray(b?.staleSessions)
+                    ? b.staleSessions.map((s) => ({ ...s, yours: me && s.spawnedBy === me ? true : undefined }))
+                    : undefined,
+                },
+          )
           .filter((b) => b.label),
         sessions: (r?.sessions ?? []).map(slim),
       }
@@ -578,7 +641,7 @@ function registerAgentControl(server) {
     'spawn_agent',
     {
       description:
-        'Start a NEW agent. A DEV agent (default) works in a git worktree of a repo and opens a PR — pass `repo` (a spawnable key from list_agents: a `localRepos` key OR any `bridges[].repos` entry, e.g. a remote repo like `my-app`) and a sharp, self-contained `task`. A KNOWLEDGE agent chats over a vault — pass kind:"knowledge" and optionally `vault`. Returns the new session id immediately; the agent then runs on its own. Spawning is allowlist-bounded and audited. NEVER spawn another Atlas orchestrator (a knowledge agent on vault "atlas").',
+        'Start a NEW agent. A DEV agent (default) works in a git worktree of a repo and opens a PR — pass `repo` (a spawnable key from list_agents: a `localRepos` key OR any `bridges[].repos` entry, e.g. a remote repo like `my-app`) and a sharp, self-contained `task`. A KNOWLEDGE agent chats over a vault — pass kind:"knowledge" and optionally `vault`. Returns the new session id immediately; the agent then runs on its own. Spawning is allowlist-bounded, memory-bounded and audited: a spawn onto a bridge box that is out of memory or at its agent ceiling is REFUSED with a 503 that states the numbers — that is a full box, not a broken tool, so do not retry it; free a session there or spawn elsewhere (list_agents shows each bridge\'s `capacity.slots`). NEVER spawn another Atlas orchestrator (a knowledge agent on vault "atlas").',
       inputSchema: {
         task: z.string().describe('the task (dev agent) or opening question (knowledge agent)'),
         repo: z.string().optional().describe('repo key for a DEV agent (a localRepos key or a bridges[].repos entry from list_agents); omit for a knowledge agent'),

@@ -21,6 +21,19 @@
  *   POST /spawn   { task, repo, preamble?, model?, effort?, images? }  → { ok, id }
  *   POST /prompt  { id, text, images? }  → { ok }   (images: data-URL uploads)
  *   POST /kill    { id }          → { ok }
+ *   POST /redeploy                → { ok, started }  pull this checkout + restart
+ *                                  this bridge's own service (the dashboard's
+ *                                  "Redeploy bridge" button)
+ *   GET  /redeploy-status         → { ok, redeploy }  its phase state file
+ *   POST /outbox  { verdicts? }   → { messages }  agent↔agent mail (and Atlas
+ *                                  queries) waiting for the box — see the
+ *                                  message channel below
+ *   POST /api/agents/message { to, text }  → { ok }  a CONTAINER agent's send,
+ *                                  authed by its own per-session scoped token —
+ *                                  one of the two routes not on the bridge bearer
+ *   POST /api/atlas/query { tool, args }   → { ok, result }  a CONTAINER agent's
+ *                                  READ-ONLY Atlas query, same scoped-token auth
+ *                                  and the same park-and-drain relay as mail
  *   ALL  /agent-app/<repo>/…     → reverse-proxy (HTTP + WebSocket) to the live
  *                                  app the agent runs in its container, reached
  *                                  via that container's already-published port
@@ -43,7 +56,7 @@ import net from 'node:net'
 import crypto from 'node:crypto'
 import fs from 'node:fs'
 import path from 'node:path'
-import { execFile } from 'node:child_process'
+import { execFile, execFileSync, spawn as spawnProcess } from 'node:child_process'
 // Transcript parsing shared with the box-local executor (agent-local.mjs). Pure
 // node-builtins module, so importing it across the sibling api/ dir keeps the
 // bridge install dependency-free (git clone has api/ alongside; no npm). The box
@@ -69,6 +82,16 @@ import { promptFileBody, promptFileCommand } from '../api/src/prompt-file-launch
 // drift (same reason decideDelivery is shared).
 import { isBusy } from '../api/src/pane-busy.mjs'
 import { sanitizeForTyping, deliveryLanded, clearInputBox, TUI_CLEAR_KEY, TUI_VERIFY, TUI_VERIFY_MAX_CHARS, TUI_VERIFY_SETTLE_MS, TUI_VERIFY_TRIES } from '../api/src/tui-input.mjs'
+// The `agent-msg` / `atlas-query` wrapper sources — ONE copy, written into each
+// container here and onto the box's PATH by agent-local.mjs, so the command an
+// agent runs is identical wherever it runs.
+import { MSG_WRAPPER_SRC } from '../api/src/agent-msg-wrapper.mjs'
+import { ATLAS_QUERY_WRAPPER_SRC } from '../api/src/atlas-query-wrapper.mjs'
+// The spawn-admission rule, shared for the third time and the most important one:
+// THIS box is the authority on its own memory, and the box-side pre-flight check
+// must refuse for exactly the same arithmetic (see agent-capacity.mjs).
+import { capacityVerdict, capacityMessage, readMemStatus } from '../api/src/agent-capacity.mjs'
+import { buildRedeploySystemdRunArgs, isUnitCollisionError } from './redeploy.mjs'
 
 const PORT = Number(process.env.BRIDGE_PORT || 7878)
 // Default to loopback: refuse to be reachable until the operator deliberately
@@ -76,6 +99,9 @@ const PORT = Number(process.env.BRIDGE_PORT || 7878)
 const HOST = process.env.BRIDGE_HOST || '127.0.0.1'
 const TOKEN = process.env.BRIDGE_TOKEN || ''
 const HERE = path.dirname(new URL(import.meta.url).pathname)
+// The repo root (agent-bridge/'s parent) — where scripts/restart-agent-bridge.sh
+// and its own .git live, for the redeploy action + startup SHA below.
+const ROOT = path.join(HERE, '..')
 const REPOS_FILE = process.env.BRIDGE_REPOS || path.join(HERE, 'repos.json')
 const STATE_FILE = process.env.BRIDGE_STATE || path.join(HERE, 'state.json')
 const AUDIT_LOG = process.env.BRIDGE_AUDIT_LOG || path.join(HERE, 'audit.log')
@@ -141,6 +167,19 @@ const PROMPT_MAX_CHARS = Number(process.env.BRIDGE_PROMPT_MAX_CHARS || 50000)
 // `s.queued` is a FIFO of parked prompts; cap its depth so a stuck agent that
 // never flushes can't grow the persisted state without bound.
 const MAX_QUEUED = Number(process.env.BRIDGE_MAX_QUEUED || 20)
+/* Spawn admission on THIS box (agent-capacity.mjs). A bridge box is usually not a
+ * dedicated agent host — it may also run your production stack, a CI runner and
+ * per-PR preview containers — so the ceiling is deliberately lower than the
+ * box-local executor's, and the memory floor is the real brake either way.
+ * The box re-applies these same numbers before it even calls /spawn; they are
+ * reported on /health so there is ONE place to tune them: here, on the box they
+ * describe. `BRIDGE_AGENT_MEM_CHARGE_SWAP=0` is the single kill-switch for the
+ * swap charge (it turns it off in BOTH layers, since the box uses what we
+ * report). */
+const AGENT_MAX_LIVE = Number(process.env.BRIDGE_AGENT_MAX_CONCURRENT || 8)
+const AGENT_MEM_FLOOR_MB = Number(process.env.BRIDGE_AGENT_MEM_FLOOR_MB || 1200)
+const AGENT_MEM_PER_AGENT_MB = Number(process.env.BRIDGE_AGENT_MEM_PER_AGENT_MB || 500)
+const AGENT_MEM_CHARGE_SWAP = !/^(0|false|no|off)$/i.test(process.env.BRIDGE_AGENT_MEM_CHARGE_SWAP || '1')
 // Upload limits (the /prompt path can carry attached files). The request body
 // cap is raised for /prompt to fit base64 payloads (see readBody / the router).
 // The `images` wire field is historical; it now carries any file type.
@@ -176,6 +215,16 @@ const APP_SPAN = Number(process.env.BRIDGE_APP_SPAN || 16)
 const APP_ROUTING = process.env.BRIDGE_APP_ROUTING || 'auto'
 const APP_PROBE_MS = Number(process.env.BRIDGE_APP_PROBE_MS || 300)
 const ROUTABLE_PROBE_MS = Number(process.env.BRIDGE_ROUTABLE_PROBE_MS || 600)
+
+// The running code's commit SHA, sampled once at startup — GET /health returns
+// it so the box's redeploy poll can verify a redeploy actually picked up new
+// code (not just that systemd bounced the same binary back up).
+let startupSha = '?'
+try {
+  startupSha = execFileSync('git', ['-C', ROOT, 'rev-parse', '--short', 'HEAD'], { encoding: 'utf-8' }).trim()
+} catch {
+  /* not a git checkout (unlikely) — health still works, just no sha */
+}
 
 /* --- tiny helpers -------------------------------------------------- */
 const nowIso = () => new Date().toISOString()
@@ -798,6 +847,30 @@ function publicView(s, status, lastOutput, menuKind, appUp, stats, menuChoice) {
   }
 }
 
+/* --- spawn capacity ------------------------------------------------- *
+ * This box's own answer to "is there room for another agent here?", reported on
+ * /health (the channel the box already polls) and enforced in spawn() below.
+ *
+ * The live count comes from the REGISTRY, not from a probe: a docker exec per
+ * session is exactly what a saturated box cannot afford, and the /sessions poll
+ * already refreshes these statuses every few seconds. It therefore rounds UP (a
+ * session that just died still counts until the next poll), which is the safe
+ * direction for an admission gate.
+ * ------------------------------------------------------------------ */
+function liveSessionCount() {
+  return Object.values(registry.sessions).filter((s) => s.status !== 'done' && s.status !== 'error').length
+}
+function agentCapacity() {
+  return capacityVerdict({
+    live: liveSessionCount(),
+    maxAgents: AGENT_MAX_LIVE,
+    mem: readMemStatus(),
+    floorMb: AGENT_MEM_FLOOR_MB,
+    perAgentMb: AGENT_MEM_PER_AGENT_MB,
+    chargeSwap: AGENT_MEM_CHARGE_SWAP,
+  })
+}
+
 /* --- endpoint handlers --------------------------------------------- */
 async function listSessions() {
   const out = []
@@ -895,6 +968,176 @@ function menuKindOf(pane) {
   return null
 }
 
+/* --- agent↔agent message channel (the remote half) ------------------- *
+ * A container agent sends mail exactly like a box-local one — same `agent-msg`
+ * wrapper (one shared source), same per-session scoped token, same
+ * `/api/agents/message` path. What differs is only WHERE the wrapper posts:
+ * the box's API is bound to loopback on the box and is unreachable from here, so
+ * the container posts to THIS bridge, which parks the attempt and hands it to the
+ * box over the SAME box→bridge channel everything else uses (the box drains
+ * `POST /outbox` on its existing remote poll and posts the verdict back).
+ *
+ * The box is the only place that decides: lineage, the per-pair budget, the
+ * attribution header and the bus log all stay there, unchanged and identical for
+ * remote senders. The bridge only asserts WHO sent it — resolved from the
+ * session's own token, never from the request body — which is exactly the
+ * authority it already has over its sessions.
+ *
+ * The request BLOCKS until that verdict comes back (a few seconds; the box polls
+ * every 3 s), so a rejection is a real error the sending agent reads, not a
+ * silent drop. On timeout it returns "handed over, verdict unknown" rather than
+ * claiming success.
+ *
+ * Deliberately in-memory: a bridge restart drops at most the handful of
+ * in-flight attempts, and nothing here is worth a persist() on every attempt.
+ * Session tokens DO persist — they ride the session record, which spawn()
+ * already persists.
+ *
+ * A container agent's READ-ONLY Atlas query (`atlas-query`, atlasQuery below)
+ * rides the SAME channel — same scoped token, same park-and-drain, same
+ * blocking verdict — because it has the same problem. Its policy likewise lives
+ * on the box (api/src/atlas-query-relay.mjs).
+ * ------------------------------------------------------------------ */
+const MSG_BIN_DIR = process.env.BRIDGE_MSG_BIN_DIR || '/tmp/atlas-kit-bin'
+const MSG_WRAPPER = path.posix.join(MSG_BIN_DIR, 'agent-msg')
+const ATLAS_WRAPPER = path.posix.join(MSG_BIN_DIR, 'atlas-query')
+// Where a CONTAINER reaches this bridge. The bind address is the host's own
+// network IP (install-agent-bridge.sh), which a container reaches through its
+// default gateway = the host — the same host-routability the live-app proxy
+// relies on in the other direction. Override for setups where it isn't.
+const MSG_API = process.env.BRIDGE_MSG_API || `http://${HOST}:${PORT}`
+// How long a sending agent waits for the box's verdict before being told the
+// message was handed over but the outcome is unknown.
+const MSG_VERDICT_MS = Number(process.env.BRIDGE_MSG_VERDICT_MS || 20000)
+// Hard cap on parked attempts — a box that stops draining must not grow this
+// without bound. Oldest first, so the cap sheds the ones already timing out.
+const MSG_OUTBOX_MAX = Number(process.env.BRIDGE_MSG_OUTBOX_MAX || 50)
+const MSG_TEXT_MAX = Number(process.env.BRIDGE_MSG_TEXT_MAX || 20000)
+
+// Write the shared wrapper into the container (idempotent; cheap enough to redo
+// per spawn). Best-effort: a container without node just fails to run it, which
+// the agent sees as a plain command error.
+async function writeMsgWrapper(container) {
+  await dockerExec(container, ['mkdir', '-p', MSG_BIN_DIR])
+  const w = await dockerExecInput(container, ['sh', '-c', `cat > ${MSG_WRAPPER} && chmod 755 ${MSG_WRAPPER}`], Buffer.from(MSG_WRAPPER_SRC))
+  if (!w.ok) console.error('[bridge] agent-msg wrapper write failed:', w.stderr.slice(0, 200))
+}
+
+// Same for `atlas-query` — the Atlas READ query relay (atlasQuery below). Its
+// absence is exactly how an un-restarted bridge degrades: the command simply
+// isn't there, which the agent reads as a plain "not found" and works around.
+async function writeAtlasWrapper(container) {
+  await dockerExec(container, ['mkdir', '-p', MSG_BIN_DIR])
+  const w = await dockerExecInput(container, ['sh', '-c', `cat > ${ATLAS_WRAPPER} && chmod 755 ${ATLAS_WRAPPER}`], Buffer.from(ATLAS_QUERY_WRAPPER_SRC))
+  if (!w.ok) console.error('[bridge] atlas-query wrapper write failed:', w.stderr.slice(0, 200))
+}
+
+// Env assignments prefixed onto a session's launch command — its own id, its
+// scoped token, this bridge's message endpoint, the wrapper on PATH. Mirrors
+// agent-local.mjs's msgEnv; empty for sessions with no token (pre-field ones).
+function msgEnv(s) {
+  if (!s.msgToken) return ''
+  return `ATLAS_AGENT_ID=${shquote(s.id)} ATLAS_AGENT_TOKEN=${shquote(s.msgToken)} ATLAS_API=${shquote(MSG_API)} PATH=${shquote(MSG_BIN_DIR)}:$PATH `
+}
+
+// Resolve a scoped token to its session id. Only ever matches a session still in
+// the registry — which IS the revocation mechanism (mirrors agentByToken box-side).
+function agentIdByToken(token) {
+  if (!token || typeof token !== 'string') return ''
+  for (const s of Object.values(registry.sessions)) {
+    if (s.msgToken && timingSafeEqual(s.msgToken, token)) return s.id
+  }
+  return ''
+}
+
+let msgSeq = 0
+const outbox = [] // [{ seq, kind?, from, … }] — parked, waiting for the box
+const msgPending = new Map() // seq -> resolve(verdict)
+
+/* Park one attempt for the box and BLOCK on its verdict — shared by mail and
+ * Atlas queries, which ride the same relay. `timeoutNote` is what the caller is
+ * told if no verdict arrives in time (never a claim of success). */
+function parkForBox(item, timeoutNote) {
+  const seq = ++msgSeq
+  outbox.push({ seq, ...item, at: nowIso() })
+  while (outbox.length > MSG_OUTBOX_MAX) {
+    const dropped = outbox.shift()
+    const r = msgPending.get(dropped.seq)
+    if (r) {
+      msgPending.delete(dropped.seq)
+      r({ status: 503, ok: false, error: 'the dashboard is not draining this bridge — dropped' })
+    }
+  }
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => {
+      msgPending.delete(seq)
+      resolve({ status: 202, ok: true, note: timeoutNote })
+    }, MSG_VERDICT_MS)
+    msgPending.set(seq, (verdict) => {
+      clearTimeout(timer)
+      resolve(verdict)
+    })
+  })
+}
+
+// A container agent's send. Authed by ITS OWN scoped token (not the bridge
+// bearer), so this route is handled before the bridge-token gate.
+async function agentMessage(body, token) {
+  const from = agentIdByToken(token)
+  if (!from) return { status: 401, ok: false, error: 'unauthorized (use your own $ATLAS_AGENT_TOKEN)' }
+  const { to, text } = body || {}
+  if (!to || typeof to !== 'string') return { status: 400, ok: false, error: 'missing "to"' }
+  if (typeof text !== 'string' || !text.trim()) return { status: 400, ok: false, error: 'missing "text"' }
+  if (text.length > MSG_TEXT_MAX) return { status: 400, ok: false, error: `text too long (max ${MSG_TEXT_MAX} chars)` }
+  audit({ action: 'agent-message', id: from, to, len: text.length, ok: true })
+  return await parkForBox({ from, to, text }, `handed to the dashboard for ${to} — no verdict yet`)
+}
+
+/* A container agent's READ-ONLY Atlas query, on the same channel and the same
+ * scoped-token auth as mail: parked here, drained by the box on its remote poll,
+ * run there against the knowledge-only tool surface, answer pushed back as the
+ * verdict. The bridge decides NOTHING about it — the allowlist of reachable
+ * tools, the per-session budget, the result cap and the query log all live on
+ * the box (api/src/atlas-query-relay.mjs), exactly as the bus's policy does.
+ *
+ * Blocks until that answer arrives, because a query the agent has to poll for
+ * costs a model turn per poll — more than the query saves. */
+async function atlasQuery(body, token) {
+  const from = agentIdByToken(token)
+  if (!from) return { status: 401, ok: false, error: 'unauthorized (use your own $ATLAS_AGENT_TOKEN)' }
+  const { tool, args } = body || {}
+  if (!tool || typeof tool !== 'string') return { status: 400, ok: false, error: 'missing "tool"' }
+  if (args != null && (typeof args !== 'object' || Array.isArray(args))) return { status: 400, ok: false, error: '"args" must be a JSON object' }
+  audit({ action: 'atlas-query', id: from, tool, ok: true })
+  return await parkForBox(
+    { kind: 'atlas-query', from, tool, args: args || {} },
+    'no answer yet — the dashboard is down, or has not started draining this bridge again; try once more',
+  )
+}
+
+/* The box's half of that hand-off, on the bridge-bearer channel: it posts the
+ * verdicts for the batch it drained last, and takes whatever has been parked
+ * since. Draining is destructive — the box owns each message once it has it. */
+function takeOutbox({ verdicts } = {}) {
+  for (const v of Array.isArray(verdicts) ? verdicts : []) {
+    const resolve = msgPending.get(v?.seq)
+    if (!resolve) continue // already timed out — the agent has been told
+    msgPending.delete(v.seq)
+    resolve({
+      status: Number(v.status) || 200,
+      ok: v.ok !== false,
+      ...(v.error ? { error: v.error } : {}),
+      ...(v.note ? { note: v.note } : {}),
+      // An Atlas query's answer (atlasQuery above) — the one verdict that
+      // carries a payload rather than just an outcome.
+      ...(typeof v.result === 'string' ? { result: v.result } : {}),
+      ...(v.truncated ? { truncated: true } : {}),
+    })
+  }
+  const messages = outbox.splice(0, outbox.length)
+  return { status: 200, ok: true, messages }
+}
+
 async function spawn({ task, repo, preamble, model, effort, images }) {
   if (!task || typeof task !== 'string') return { status: 400, ok: false, error: 'task required' }
   if (!repo || typeof repo !== 'string') return { status: 400, ok: false, error: 'repo required' }
@@ -902,6 +1145,18 @@ async function spawn({ task, repo, preamble, model, effort, images }) {
   const repos = loadRepos()
   const target = repos[repo]
   if (!target) return { status: 400, ok: false, error: `unknown repo "${repo}"` }
+
+  // This box's own brake, checked before anything is created. The box runs the
+  // same check on what /health reported, but it is the caller: its reading can be
+  // seconds stale, an OLD box side reports nothing at all, and a direct call to
+  // this bridge bypasses it entirely. We are the authority on our own memory.
+  const cap = agentCapacity()
+  if (!cap.ok) {
+    const error = capacityMessage('this bridge box', cap)
+    audit({ action: 'spawn', repo, ok: false, error, capacity: cap })
+    console.error(`[spawn] refused: ${error}`)
+    return { status: 503, ok: false, error, capacity: cap }
+  }
 
   const base = slugify(task)
   if (!base) return { status: 400, ok: false, error: 'task has no usable slug' }
@@ -934,6 +1189,10 @@ async function spawn({ task, repo, preamble, model, effort, images }) {
     appPort,
     model: model || DEFAULT_MODEL,
     effort: effort || DEFAULT_EFFORT,
+    // Scoped agent↔agent message token (see the message-channel block above).
+    // Persisted with the session, so it survives a bridge restart; never in
+    // publicView (that's a whitelist) so it stays inside this host.
+    msgToken: crypto.randomBytes(24).toString('hex'),
     status: 'running',
     startedAt: nowIso(),
   }
@@ -992,10 +1251,13 @@ async function spawn({ task, repo, preamble, model, effort, images }) {
     audit({ action: 'spawn', id, repo, ok: false, error: session.error })
     return { status: 502, ok: false, error: session.error }
   }
+  await writeMsgWrapper(container) // `agent-msg` on the agent's PATH (message channel above)
+  await writeAtlasWrapper(container) // `atlas-query` too — same PATH, same relay
   const launch = promptFileCommand(
-    LAUNCH_CMD
-      .replace('{model}', shquote(model || DEFAULT_MODEL))
-      .replace('{effort}', shquote(effort || DEFAULT_EFFORT)),
+    msgEnv(session) +
+      LAUNCH_CMD
+        .replace('{model}', shquote(model || DEFAULT_MODEL))
+        .replace('{effort}', shquote(effort || DEFAULT_EFFORT)),
     promptPath,
   )
   const ns = await dockerExec(container, [
@@ -1424,6 +1686,88 @@ async function history({ id, rev }) {
   }
 }
 
+/* --- redeploy (the dashboard's phone-triggered "Redeploy bridge" button) --- *
+ * Runs scripts/restart-agent-bridge.sh — the SAME script an operator runs by
+ * hand over SSH, kept as the single source of redeploy truth — launched via a
+ * transient `systemd-run` unit, NOT a plain detached child. `detached: true`
+ * only opens a new SESSION; the child stays in THIS process's cgroup, and
+ * atlas-kit-agent-bridge.service's default KillMode=control-group means the
+ * script's own `systemctl restart` SIGTERMs it right after it writes `state
+ * deploying restart` — before pull/health/done ever land. That's why
+ * systemd-run is load-bearing: it escapes into its own transient unit/cgroup,
+ * which the restart can't reach. Falls back to the old best-effort detached
+ * spawn when systemd-run itself isn't available (a manual, non-systemd run of
+ * the bridge). Phase transitions (pull/restart/health, then done or error) land
+ * in REDEPLOY_STATE via the script's optional state() writer
+ * (REDEPLOY_STATE_FILE env — see the script's header); GET /redeploy-status
+ * reads it back for the box's poll. Fixed, parameterless: pulls this repo's own
+ * default branch and restarts this one systemd service — never arbitrary exec. */
+const REDEPLOY_SCRIPT = path.join(ROOT, 'scripts', 'restart-agent-bridge.sh')
+const REDEPLOY_STATE = process.env.BRIDGE_REDEPLOY_STATE || '/tmp/atlas-kit-bridge-redeploy-state.json'
+const REDEPLOY_LOG = process.env.BRIDGE_REDEPLOY_LOG || '/tmp/atlas-kit-bridge-redeploy.log'
+// Fixed transient-unit name — a collision here (still loaded/active) is a
+// concurrent redeploy in flight; see isUnitCollisionError below.
+const REDEPLOY_UNIT = process.env.BRIDGE_REDEPLOY_UNIT || 'atlas-kit-bridge-redeploy'
+// A redeploy already in flight (state "deploying") more recently than this is
+// refused as a 409 rather than launching a second overlapping pull; older than
+// this is treated as abandoned (e.g. the detached script died unnoticed) so a
+// wedged state file can't block redeploys forever.
+const REDEPLOY_STALE_MS = Number(process.env.BRIDGE_REDEPLOY_STALE_MS || 10 * 60 * 1000)
+
+function readRedeployState() {
+  try {
+    return JSON.parse(fs.readFileSync(REDEPLOY_STATE, 'utf-8'))
+  } catch {
+    return null
+  }
+}
+
+// Best-effort fallback for when systemd-run isn't on PATH (a manual,
+// non-systemd run of the bridge) — the pre-systemd-run behaviour, with the
+// same cgroup-kill caveat it existed under.
+function spawnRedeployDetached() {
+  spawnProcess('bash', ['-lc', `exec ${shquote(REDEPLOY_SCRIPT)} >>${shquote(REDEPLOY_LOG)} 2>&1`], {
+    cwd: ROOT,
+    detached: true,
+    stdio: 'ignore',
+    env: { ...process.env, REDEPLOY_STATE_FILE: REDEPLOY_STATE },
+  }).unref()
+}
+
+async function redeploy() {
+  const cur = readRedeployState()
+  if (cur && cur.phase === 'deploying' && Date.now() - Date.parse(cur.at || 0) < REDEPLOY_STALE_MS) {
+    return { status: 409, ok: false, error: `redeploy already in progress (${cur.step})`, redeploy: cur }
+  }
+  const args = buildRedeploySystemdRunArgs({
+    unit: REDEPLOY_UNIT,
+    stateFile: REDEPLOY_STATE,
+    pullUser: process.env.BRIDGE_PULL_USER,
+    script: REDEPLOY_SCRIPT,
+    log: REDEPLOY_LOG,
+    cwd: ROOT,
+  })
+  try {
+    execFileSync('systemd-run', args, { stdio: 'pipe', encoding: 'utf-8' })
+  } catch (e) {
+    if (e.code === 'ENOENT') {
+      spawnRedeployDetached()
+    } else if (isUnitCollisionError(e)) {
+      return { status: 409, ok: false, error: 'redeploy already in progress (unit active)', redeploy: cur }
+    } else {
+      const detail = String(e.stderr || e.message || e)
+      audit({ action: 'redeploy', ok: false, error: detail })
+      return { status: 500, ok: false, error: detail }
+    }
+  }
+  audit({ action: 'redeploy', ok: true })
+  return { status: 202, ok: true, started: true }
+}
+
+function redeployStatus() {
+  return { status: 200, ok: true, redeploy: readRedeployState() }
+}
+
 /* --- http plumbing ------------------------------------------------- */
 function send(res, status, body) {
   const s = JSON.stringify(body)
@@ -1461,8 +1805,34 @@ const server = http.createServer(async (req, res) => {
 
     if (req.method === 'GET' && p === '/health') {
       // `features` is how the box decides a spawn's prompt TRANSPORT before it
-      // sizes the prompt — see FEATURES.
-      return send(res, 200, { ok: true, service: 'agent-bridge', features: FEATURES })
+      // sizes the prompt — see FEATURES. `capacity` is this box's own memory +
+      // live-session reading (agentCapacity above), on the channel the box
+      // ALREADY polls — no new endpoint, no heartbeat. Its PRESENCE is also the
+      // capability signal: a bridge that predates this simply has no `capacity`
+      // key and the box then spawns as it always did (fail-open — see
+      // agent-routes.mjs). Deliberately not added to FEATURES too: two signals
+      // for one capability can disagree, and this one carries its own evidence.
+      return send(res, 200, { ok: true, service: 'agent-bridge', sha: startupSha, features: FEATURES, capacity: agentCapacity() })
+    }
+    // Agent→agent mail from a CONTAINER. Authed by the sending session's own
+    // scoped token, so it is handled before the bridge-bearer gate — an agent
+    // must never hold the bridge bearer (that would be spawn/kill on every repo).
+    if (req.method === 'POST' && p === '/api/agents/message') {
+      const body = await readBody(req, MSG_TEXT_MAX + 4096)
+      if (body == null) return send(res, 400, { ok: false, error: 'invalid JSON body' })
+      const m = (req.headers['authorization'] || '').match(/^Bearer\s+(.+)$/i)
+      const r = await agentMessage(body, m ? m[1].trim() : '')
+      const { status, ...rest } = r
+      return send(res, status, rest)
+    }
+    // A CONTAINER agent's read-only Atlas query — same scoped-token auth, so it
+    // is likewise handled before the bridge-bearer gate.
+    if (req.method === 'POST' && p === '/api/atlas/query') {
+      const body = await readBody(req)
+      if (body == null) return send(res, 400, { ok: false, error: 'invalid JSON body' })
+      const m = (req.headers['authorization'] || '').match(/^Bearer\s+(.+)$/i)
+      const { status, ...rest } = await atlasQuery(body, m ? m[1].trim() : '')
+      return send(res, status, rest)
     }
     if (!authed(req)) return send(res, 401, { ok: false, error: 'unauthorized' })
 
@@ -1482,10 +1852,17 @@ const server = http.createServer(async (req, res) => {
       const r = await history({ id: url.searchParams.get('id'), rev: url.searchParams.get('rev') || '' })
       return send(res, r.status, r)
     }
-    const POST_ROUTES = { '/spawn': spawn, '/prompt': prompt, '/interrupt': interrupt, '/queue': queuePrompt, '/unqueue': unqueue, '/send-now': sendNow, '/kill': kill, '/cleanup': cleanup, '/keys': keys, '/select': selectChoice }
+    if (req.method === 'GET' && p === '/redeploy-status') {
+      const r = redeployStatus()
+      return send(res, r.status, r)
+    }
+    const POST_ROUTES = { '/spawn': spawn, '/prompt': prompt, '/interrupt': interrupt, '/queue': queuePrompt, '/unqueue': unqueue, '/send-now': sendNow, '/kill': kill, '/cleanup': cleanup, '/keys': keys, '/select': selectChoice, '/redeploy': redeploy, '/outbox': takeOutbox }
     if (req.method === 'POST' && POST_ROUTES[p]) {
-      // spawn/prompt/interrupt/queue may carry base64 image attachments → a roomier cap.
-      const big = p === '/spawn' || p === '/prompt' || p === '/interrupt' || p === '/queue'
+      // spawn/prompt/interrupt/queue may carry base64 image attachments → a roomier
+      // cap. /outbox joins them: an Atlas-query verdict carries the ANSWER, and a
+      // drain can hand back several at once — at 64 KB the batch would be destroyed
+      // mid-body and every waiting agent would time out instead of being answered.
+      const big = p === '/spawn' || p === '/prompt' || p === '/interrupt' || p === '/queue' || p === '/outbox'
       const body = await readBody(req, big ? PROMPT_BODY_LIMIT : 64 * 1024)
       if (body == null) return send(res, 400, { ok: false, error: 'invalid JSON body' })
       const r = await POST_ROUTES[p](body)
@@ -1497,6 +1874,24 @@ const server = http.createServer(async (req, res) => {
     return send(res, 500, { ok: false, error: e?.message || String(e) })
   }
 })
+
+// Hold an idle keep-alive socket FAR longer than Node's 5 s default, because the
+// box can be unable to answer for tens of seconds while still holding the socket
+// it is about to POST on. The Atlas retrieval folded into every spawn prompt runs
+// IN-PROCESS in the box's Express, immediately BEFORE callBridge, and with a
+// semantic leg enabled it takes 14–22 s. The box polls /sessions every 3 s, so
+// its HTTP pool always holds a warm socket here; during that starved stretch the
+// socket ages past 5 s, we send FIN, the box's event loop never processes it, and
+// the POST /spawn that follows resets INSTANTLY (~100–250 ms, against a 30 s
+// timeout budget). Reads survived because the client retries idempotent GETs and
+// never POSTs, which is why only spawn broke. Measured over the complete history
+// of remote spawns (n=11, no overlap): retrievals of 560/593/1010/4536/4813 ms
+// all spawned; 13985/14636/17234/19538/20303/22398 ms all failed.
+// ⚠️ headersTimeout MUST stay ABOVE keepAliveTimeout — Node reintroduces exactly
+// this race if the headers deadline can fire first on a reused socket.
+const KEEPALIVE_TIMEOUT_MS = Number(process.env.BRIDGE_KEEPALIVE_TIMEOUT_MS || 60000)
+server.keepAliveTimeout = KEEPALIVE_TIMEOUT_MS
+server.headersTimeout = KEEPALIVE_TIMEOUT_MS + 5000
 
 // WebSocket upgrades for the live-app proxy (Streamlit's /_stcore/stream). The
 // box forwards the upgrade with the bridge bearer injected, so we gate it the

@@ -181,6 +181,11 @@ To run dev agents in Docker containers on your workstation instead of on the box
 1. On the workstation (joined to the tailnet), clone this repo and run
    `sudo scripts/install-agent-bridge.sh`. It seeds `agent-bridge/bridge.env`
    (`BRIDGE_TOKEN`, bind the tailnet IP), installs a systemd unit, and needs Node ≥ 18.
+   The unit carries `Nice`/`CPUWeight`/`OOMScoreAdjust` so the bridge keeps answering
+   when the box saturates — re-run this script (it's idempotent) to upgrade an older
+   unit that predates them. Uncomment `BRIDGE_PULL_USER=<your-user>` in `bridge.env`
+   if you want the dashboard's "Redeploy bridge" button to work (it runs as root,
+   which has no `gh` auth of its own).
 2. Map your repos in `agent-bridge/repos.json` (copy from `repos.example.json`) —
    `{ "<key>": { "container": "<docker name>", "path": "<repo path in container>" } }`.
    Each container must have `tmux + git + node + claude + gh` baked into its image.

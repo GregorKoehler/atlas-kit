@@ -62,6 +62,9 @@ if [ ! -f "$ENV_FILE" ]; then
     echo "# Bound to the tailnet IP so the bridge is NOT on the home LAN."
     echo "BRIDGE_HOST=$HOSTBIND"
     echo "# AGENT_LAUNCH_CMD='IS_SANDBOX=1 claude --dangerously-skip-permissions {task}'"
+    echo "# Required for the dashboard's \"Redeploy bridge\" button (git-auth for the"
+    echo "# bridge's own POST /redeploy — see scripts/restart-agent-bridge.sh):"
+    echo "# BRIDGE_PULL_USER=$(logname 2>/dev/null || echo '<your-user>')"
   } > "$ENV_FILE"
   chmod 600 "$ENV_FILE"
   say "wrote $ENV_FILE (bridge bearer + bind host)."
@@ -78,7 +81,11 @@ fi
 # NODE_BIN was resolved + version-checked in section 1.
 UNIT="/etc/systemd/system/${SERVICE}.service"
 if [ "$(id -u)" -eq 0 ]; then
-  cat > "$UNIT" <<EOF
+  # Rendered to a temp file first so a re-run can tell "unchanged" from
+  # "upgraded" — and so an upgrade actually gets APPLIED (see below).
+  NEW_UNIT="$(mktemp)"
+  trap 'rm -f "$NEW_UNIT"' EXIT
+  cat > "$NEW_UNIT" <<EOF
 [Unit]
 Description=Atlas Kit agent-bridge (drive dev-container Claude Code sessions)
 After=network-online.target docker.service tailscaled.service
@@ -89,22 +96,54 @@ Type=simple
 WorkingDirectory=$BRIDGE_DIR
 EnvironmentFile=$ENV_FILE
 ExecStart=$NODE_BIN $BRIDGE_DIR/server.mjs
-Restart=on-failure
+Restart=always
 RestartSec=3
+# --- the control plane must degrade LAST ------------------------------------
+# The bridge is HOW THIS BOX IS REACHED, and it shares the box with the very
+# workload it manages (dev agents, preview containers, a CI runner). On a small
+# box, load can climb into three figures with nothing crashed — every process
+# alive, production still serving — yet the box answers nothing over the network
+# for tens of minutes. The workload starves its own control plane.
+# These keep the bridge scheduled, and un-killed, under that load:
+#   Nice=-5           CPU scheduler priority over every default-nice tenant
+#   CPUWeight=10000   systemd's max (default 100) — only bites under contention
+#   OOMScoreAdjust    the kernel kills a tenant before it kills the bridge
+# Reaching the bridge is worthless if you cannot also log in: apply the
+# matching sshd drop-in by hand on a busy box.
+Nice=-5
+CPUWeight=10000
+OOMScoreAdjust=-500
 # It needs docker access; keep the rest minimal.
 NoNewPrivileges=true
 
 [Install]
 WantedBy=multi-user.target
 EOF
-  systemctl daemon-reload
-  systemctl enable --now "$SERVICE"
+  # Idempotent upgrade. `enable --now` starts a STOPPED unit but never restarts
+  # a RUNNING one, so without this a rewritten unit sits unapplied until the next
+  # redeploy — the silent no-op that lets a priority fix look installed while the
+  # old process keeps its old scheduling. try-restart applies it now (and is a
+  # no-op when the service isn't running).
+  if [ -f "$UNIT" ] && cmp -s "$NEW_UNIT" "$UNIT"; then
+    say "systemd unit already up to date: $UNIT"
+    systemctl enable --now "$SERVICE"
+  else
+    if [ -f "$UNIT" ]; then say "systemd unit changed — updating $UNIT"; else say "installing systemd unit: $UNIT"; fi
+    cat "$NEW_UNIT" > "$UNIT"
+    chmod 644 "$UNIT"
+    systemctl daemon-reload
+    systemctl enable --now "$SERVICE"
+    systemctl try-restart "$SERVICE"
+  fi
   say "installed + started systemd unit: $SERVICE"
+  say "priority in effect: $(systemctl show "$SERVICE" -p Nice -p CPUWeight -p OOMScoreAdjust 2>/dev/null | tr '\n' ' ')"
   say "logs: journalctl -u $SERVICE -f"
 else
   say "not root — skipped the systemd unit. To run manually:"
   say "  ( set -a; . '$ENV_FILE'; set +a; '$NODE_BIN' '$BRIDGE_DIR/server.mjs' )"
   say "or re-run with sudo to install the service."
+  say "  ⚠ a hand-started bridge gets NO control-plane priority (Nice/CPUWeight/"
+  say "    OOMScoreAdjust live in the unit) — on a busy box, install the service."
 fi
 
 say "done. Verify (from the box, over the tailnet):"

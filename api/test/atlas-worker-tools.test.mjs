@@ -50,6 +50,8 @@ test('worker.mcp.json asks for the knowledge-only profile and no agent control',
   const cfg = JSON.parse(fs.readFileSync(WORKER_CONFIG, 'utf-8'))
   const env = cfg.mcpServers['atlas-kit'].env
   assert.equal(env.ATLAS_MCP_KNOWLEDGE_ONLY, '1')
+  // Propose-only write: the worker may PROPOSE follow-up work, never file it.
+  assert.equal(env.ATLAS_MCP_PROPOSE, '1')
   assert.equal(env.ATLAS_AGENT_CONTROL, undefined)
 })
 

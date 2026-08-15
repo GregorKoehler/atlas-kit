@@ -138,10 +138,11 @@ test('the menu guard still gates every bridge delivery', () => {
 /* --- 5. the kind that actually reaches a bridge ------------------------ *
  * A persisted `kind` only helps if the box stamps one on the way out. One path
  * queues to a bridge with a kind today; the rest are deliberately untagged
- * (scheduled prompts, the remote ship prompt) and stay idle-only. The peer-mail
- * (`agent-msg`) path is classified here but has no route yet — the bus itself is
- * not part of this kit, so the classification exists so the two executors cannot
- * disagree once it arrives. */
+ * (scheduled prompts, the remote ship prompt) and stay idle-only. Peer mail is
+ * the second: the box stamps `kind:'agent-msg'` on the bridge branch of
+ * deliverAgentMessage, and the bridge gates on that same string — if the two
+ * ever drift, remote peer mail silently degrades to idle-only and waits out the
+ * whole turn it was sent to interrupt. */
 
 test('the box stamps a boundary-eligible kind on the path that reaches a bridge', () => {
   // POST /api/agents/queue — steer (has steeredBy) or operator, then forwarded.
@@ -150,5 +151,7 @@ test('the box stamps a boundary-eligible kind on the path that reaches a bridge'
   const queueRoute = routes.slice(start, start + 800)
   assert.match(queueRoute, /body\.kind = body\.steeredBy \? 'steer' : 'operator'/)
   assert.match(queueRoute, /callBridgeForId\('POST', '\/queue', body,/, 'the stamped body itself must be forwarded')
-  for (const k of ['steer', 'operator']) assert.equal(classifyKind(k), 'boundary')
+  // Peer mail to a REMOTE recipient: the same kind, stamped on the bridge call.
+  assert.match(routes, /callBridge\('POST', '\/queue', \{ id: to, text: body,[^}]*kind: 'agent-msg'[^}]*\}/)
+  for (const k of ['steer', 'operator', 'agent-msg']) assert.equal(classifyKind(k), 'boundary')
 })

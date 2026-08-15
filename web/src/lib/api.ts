@@ -570,6 +570,84 @@ export function displayCategory(
   return ''
 }
 
+/* --- Task Prospects — agent-proposed tasks the operator signs off ------- *
+ * before they hit the Kanban (api/src/atlas-prospects.mjs). Dev + knowledge
+ * agents propose; approve writes the REAL task via the exact /api/tasks/new
+ * path (optionally edited first); reject discards it — neither ever touches
+ * the vault until Approve. The write bearer is injected server-side (Caddy);
+ * the browser holds none. */
+export interface TaskProspect {
+  id: string
+  title: string
+  body: string
+  due: string | null
+  project: string | null
+  projectIdea: string | null
+  area: string | null
+  /** Provenance facet (the Legend `source` enum). */
+  source: string | null
+  vault: string
+  /** Sticky dedup key; null if the producer gave none. */
+  sourceKey: string | null
+  /** Which agent proposed it (e.g. "dev-agent", "atlas-agent"). */
+  producer: string | null
+  createdAt: string
+}
+
+/** The pending prospect queue (open, read-only — polled by the card). */
+export async function fetchProspects(): Promise<TaskProspect[]> {
+  const r = await getJson<{ items: TaskProspect[] }>(`${API_BASE}/prospects`)
+  return r?.items ?? []
+}
+
+/** Edit-then-approve overrides — an omitted field falls back to the prospect's
+ *  own value. */
+export interface ProspectEdits {
+  title?: string
+  body?: string
+  due?: string
+  project?: string
+  projectIdea?: string
+  area?: string
+}
+
+/** Approve a prospect → writes the real task via createTask (the exact
+ *  /api/tasks/new path), then stamps the sticky "approved" decision. */
+export async function approveProspect(
+  id: string,
+  edits?: ProspectEdits,
+): Promise<{ ok: boolean; path?: string; warning?: string; error?: string }> {
+  try {
+    const res = await fetch(`${API_BASE}/prospects/approve`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ id, ...(edits ? { edits } : {}) }),
+    })
+    const data = (await res.json().catch(() => ({}))) as { ok?: boolean; path?: string; warning?: string; error?: string }
+    if (!res.ok) return { ok: false, error: data.error || data.warning || `HTTP ${res.status}` }
+    return { ok: data.ok !== false, path: data.path, warning: data.warning }
+  } catch (e) {
+    return { ok: false, error: String(e) }
+  }
+}
+
+/** Reject a prospect — discarded, never touches the vault; stamps the sticky
+ *  "rejected" decision so it's never re-proposed. */
+export async function rejectProspect(id: string): Promise<{ ok: boolean; error?: string }> {
+  try {
+    const res = await fetch(`${API_BASE}/prospects/reject`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ id }),
+    })
+    const data = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string }
+    if (!res.ok) return { ok: false, error: data.error || `HTTP ${res.status}` }
+    return { ok: data.ok !== false }
+  } catch (e) {
+    return { ok: false, error: String(e) }
+  }
+}
+
 export async function fetchProjects(): Promise<Project[]> {
   const r = await getJson<{ projects: Project[] }>(`${API_BASE}/projects`)
   return r?.projects ?? []
@@ -929,6 +1007,57 @@ export interface AgentSession {
    * The card shows a "lost" badge instead of a normal "done". */
   interrupted?: boolean
 }
+/** How much room a bridge box has for another agent, as that box reports it on
+ *  its own /health (api/src/agent-capacity.mjs). `known: false` means the bridge
+ *  predates capacity reporting and NOTHING is limiting agents on it — a spawn
+ *  there is unchecked, not refused. */
+export interface BridgeCapacity {
+  known: boolean
+  /** Why the reading is missing — only on `known: false`. */
+  reason?: string
+  ok?: boolean
+  live?: number
+  maxAgents?: number
+  availMb?: number
+  swapUsedMb?: number
+  effectiveMb?: number
+  /** How many more agents that box would admit right now (the tighter bound). */
+  slots?: number
+}
+
+/** One remote bridge as GET /api/agents reports it.
+ *
+ *  ⚠️ `reachable: false` is "we could not ask", NOT "there is nothing there".
+ *  Its agents are absent from `sessions` while it is silent, and they are
+ *  almost always still running — so an unreachable bridge carries `lastSeen`
+ *  (when it last answered) and `staleSessions` (the roster it answered with),
+ *  and a surface must draw those rather than an empty list. */
+export interface BridgeView {
+  label: string
+  reachable: boolean
+  repos: string[]
+  /** Dev-repo keys this bridge ADVERTISES as spawnable. */
+  spawnRepos?: string[]
+  /** Set only while `reachable` is being held true off a cached poll (a blip
+   *  ridden out by the poll hysteresis). Absent on a normal fresh poll. */
+  stale?: boolean
+  /** ISO time this bridge last answered — only while unreachable. */
+  lastSeen?: string
+  /** The roster it last answered with — only while unreachable. Never merged
+   *  into `sessions`, never counted as live. */
+  staleSessions?: {
+    id: string
+    kind: string
+    repo?: string
+    status?: string
+    task?: string
+    title?: string
+    startedAt?: string
+    spawnedBy?: string
+  }[]
+  capacity?: BridgeCapacity
+}
+
 export interface AgentsView {
   generated: string
   /** Any bridge serving agents? (the box-local executor OR the workstation bridge). */
@@ -945,7 +1074,7 @@ export interface AgentsView {
    *  `spawnRepos` is the dev-repo keys the bridge ADVERTISES as spawnable (for the
    *  catch-all, from AGENT_BRIDGE_REPOS; surfaced to orchestrators via list_agents).
    *  Absent on older servers → treat as just the workstation. */
-  bridges?: { label: string; reachable: boolean; repos: string[]; spawnRepos?: string[] }[]
+  bridges?: BridgeView[]
   /** Persistent recency floor per bridge repo: repo key → ISO timestamp of the
    *  most recent dev-agent spawn. Unlike `sessions` it survives kill/cleanup, so
    *  project cards keep ranking by past agent activity after all a repo's
@@ -1256,6 +1385,37 @@ export function reviveAgent(id: string): Promise<AgentActionResult> {
  * agent that still fits in RAM. Resolves with { revived, held } on success. */
 export function reviveAllAgents(): Promise<AgentActionResult & { revived?: number; held?: number }> {
   return agentPost('revive-all', {}) as Promise<AgentActionResult & { revived?: number; held?: number }>
+}
+
+/** One bridge's redeploy status (GET /api/agents/bridge-status): is it
+ *  reachable, what SHA is it running, how far behind the default branch is it,
+ *  and the phase of any in-flight/last redeploy. `labels` lists every
+ *  configured bridge so one poll can drive a row per bridge. Omit `label` for
+ *  the default (catch-all) bridge. */
+export interface BridgeStatus {
+  ok: boolean
+  label: string
+  labels: string[]
+  reachable: boolean
+  sha: string
+  behind: number
+  changes: string[]
+  redeploy: { phase: string; step: string; sha?: string; at?: string } | null
+  error?: string
+}
+export function fetchBridgeStatus(label?: string, fresh?: boolean): Promise<BridgeStatus | null> {
+  const q = new URLSearchParams()
+  if (label) q.set('label', label)
+  if (fresh) q.set('fresh', '1')
+  const qs = q.toString()
+  return getJson<BridgeStatus>(`${API_BASE}/agents/bridge-status${qs ? `?${qs}` : ''}`)
+}
+
+/** Redeploy ONE bridge: it pulls its own checkout and restarts its own service.
+ *  Omit `label` to target the default bridge. One machine per deliberate press —
+ *  there is no "redeploy all". */
+export function redeployBridge(label?: string): Promise<AgentActionResult & { started?: boolean }> {
+  return agentPost('bridge-redeploy', label ? { label } : {}) as Promise<AgentActionResult & { started?: boolean }>
 }
 
 /** Schedule a spawn or a prompt for a future time `at` (ISO). The server stores

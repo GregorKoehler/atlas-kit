@@ -24,7 +24,7 @@ import fs from 'node:fs'
 import os from 'node:os'
 import net from 'node:net'
 import path from 'node:path'
-import { randomUUID } from 'node:crypto'
+import { randomUUID, randomBytes } from 'node:crypto'
 import { execFile } from 'node:child_process'
 import {
   projectKey, tailLines, scanContextTokens, scanShipMarker,
@@ -36,6 +36,7 @@ import { mergedVerdict, mergedInfo, MERGE_LOG_FORMAT } from './merged-check.mjs'
 import { preflightVerdict } from './merge-preflight.mjs'
 import { generateMicros } from './agent-titles.mjs'
 import { readHistory, steerKey, steerEntry } from './agent-history.mjs'
+import { MSG_WRAPPER_SRC } from './agent-msg-wrapper.mjs'
 import { parseChoiceMenu, currentHighlight, driveSelect } from './menu.mjs'
 import { resolveVault, defaultVaultKey, isTypedVault } from './vaults.mjs'
 import { enqueueAtlasMerge } from './atlas-commit-queue.mjs'
@@ -48,6 +49,7 @@ export { monthRunMsByRepo } from './agent-timings.mjs'
 // The queued-prompt delivery gate, shared with the bridge executor so the two
 // cannot drift: one per-kind classification, one menu/pacing rule, one test.
 import { decideDelivery, deliveryBackoffMs } from './queue-delivery.mjs'
+import { capacityVerdict, readMemStatus } from './agent-capacity.mjs'
 // Is a turn running? Two witnesses — the footer's `esc to interrupt` marker and
 // the spinner line above the input box — because the footer is rendered to the
 // pane width and drops that marker mid-turn. Shared, not copied.
@@ -1494,19 +1496,35 @@ async function liveAgentCount() {
 // free RAM (memHeadroom — same FLOOR + per-agent gate the revive path uses) is the
 // real brake, so spawns self-throttle to actual pressure rather than a guessed N.
 async function atCapacity() {
-  const live = await liveAgentCount()
-  if (live >= MAX_LIVE)
+  // The rule itself lives in agent-capacity.mjs — one implementation, shared with
+  // the remote gate in agent-routes.mjs and the bridge's own gate, so the box that
+  // has been protected all along and the bridge boxes that were not can never
+  // drift apart. The WORDING stays local: these two strings predate the sharing
+  // and this path is unchanged, deliberately, down to the message.
+  const v = capacityVerdict({
+    live: await liveAgentCount(),
+    maxAgents: MAX_LIVE,
+    mem: readMemStatus(),
+    floorMb: REVIVE_MEM_FLOOR_MB,
+    perAgentMb: REVIVE_MEM_PER_AGENT_MB,
+    // ⚠️ The box-local reading does NOT charge swap against availability, which
+    // the remote gate does (see agent-capacity.mjs). Not an oversight: this path
+    // is the one that must stay behaviourally identical, and a control-plane box
+    // may sit permanently some way into swap by design. Charging it here is a
+    // separate, measurable change — not a side effect of capping the bridges.
+    chargeSwap: false,
+  })
+  if (v.reason === 'ceiling')
     return {
       status: 503,
       ok: false,
-      error: `box at agent capacity (${live}/${MAX_LIVE} live) — close one or raise AGENT_LOCAL_MAX_CONCURRENT`,
+      error: `box at agent capacity (${v.live}/${v.maxAgents} live) — close one or raise AGENT_LOCAL_MAX_CONCURRENT`,
     }
-  const mem = memHeadroom()
-  if (!mem.ok)
+  if (v.reason === 'memory')
     return {
       status: 503,
       ok: false,
-      error: `box low on memory (${mem.avail} MB free) — close an agent first, then spawn`,
+      error: `box low on memory (${v.availMb} MB free) — close an agent first, then spawn`,
     }
   return null
 }
@@ -1514,23 +1532,20 @@ async function atCapacity() {
 // back to os.freemem() off Linux (dev only); Infinity if nothing is readable, so a
 // missing /proc never blocks a revive.
 function availMemMb() {
-  try {
-    const m = fs.readFileSync('/proc/meminfo', 'utf8').match(/^MemAvailable:\s+(\d+)/m)
-    if (m) return Math.round(Number(m[1]) / 1024)
-  } catch {
-    /* no /proc — fall through to the os fallback */
-  }
-  try {
-    return Math.round(os.freemem() / 1048576)
-  } catch {
-    return Infinity
-  }
+  return readMemStatus().availMb
 }
 // Room to launch one more agent? Returns {avail, ok} — ok once free RAM clears the
-// floor + one-agent headroom (REVIVE_MEM_* above).
+// floor + one-agent headroom (REVIVE_MEM_* above). Same shared rule as atCapacity.
 function memHeadroom() {
-  const avail = availMemMb()
-  return { avail, ok: avail >= REVIVE_MEM_FLOOR_MB + REVIVE_MEM_PER_AGENT_MB }
+  const v = capacityVerdict({
+    live: 0, // memory only — the count ceiling is atCapacity's business, not a revive's
+    maxAgents: Infinity,
+    mem: readMemStatus(),
+    floorMb: REVIVE_MEM_FLOOR_MB,
+    perAgentMb: REVIVE_MEM_PER_AGENT_MB,
+    chargeSwap: false,
+  })
+  return { avail: v.availMb, ok: v.ok }
 }
 // The Claude session id to `--resume`: the pinned one (knowledge/atlas) or the
 // newest transcript in this worktree's project dir (dev agents don't pin one —
@@ -1635,7 +1650,10 @@ async function launchResume(s) {
   // The Atlas orchestrator (vault:'atlas' chat) must resume WITH its agent-control
   // MCP config or it loses its spawn/prompt/kill steering tools; all else resumes plain.
   const tmpl = s.vault === 'atlas' ? ATLAS_CONTROL_RESUME_CMD : RESUME_CMD
-  const launch = tmpl
+  // Without this a revived agent silently loses `agent-msg` — the wrapper lives
+  // on PATH, and PATH is set by the launch line, so both paths must set it.
+  ensureMsgWrapper()
+  const launch = msgEnv(s) + tmpl
     .replace('{atlasSession}', shquote(s.id)) // no-op token on the plain template
     .replace('{model}', shquote(s.model || DEFAULT_MODEL))
     .replace('{effort}', shquote(s.effort || DEFAULT_EFFORT))
@@ -1719,6 +1737,51 @@ export function devPrompt({ id, task, repo, preamble, context, worktree, imagePa
   return `${head}${context ? `\n\n${context}` : ''}\n\n---\n# Your task\n${taskBody}`
 }
 
+/* --- agent↔agent message channel ------------------------------------ *
+ * Every box-local dev agent is launched with a PER-SESSION token in its env and
+ * a tiny `agent-msg` wrapper on its PATH. The token authenticates
+ * POST /api/agents/message as EXACTLY that session — deliberately NOT the global
+ * DASHBOARD_BEARER_TOKEN, which anyone reading the agent's env could then use to
+ * spawn/kill/prompt the whole fleet. It is only ever valid while the session is
+ * in the registry (agentByToken looks it up live), so killing the agent revokes
+ * it. See agent-messages.mjs for the bus log and agent-routes.mjs for the route.
+ * ------------------------------------------------------------------ */
+const MSG_BIN_DIR = path.join(STATE_DIR, 'bin')
+const MSG_WRAPPER = path.join(MSG_BIN_DIR, 'agent-msg')
+const MSG_API = process.env.AGENT_MESSAGE_API || 'http://127.0.0.1:3001'
+function ensureMsgWrapper() {
+  try {
+    fs.mkdirSync(MSG_BIN_DIR, { recursive: true })
+    let have = ''
+    try {
+      have = fs.readFileSync(MSG_WRAPPER, 'utf-8')
+    } catch {
+      /* not written yet */
+    }
+    if (have !== MSG_WRAPPER_SRC) fs.writeFileSync(MSG_WRAPPER, MSG_WRAPPER_SRC, { mode: 0o755 })
+    fs.chmodSync(MSG_WRAPPER, 0o755)
+  } catch (e) {
+    console.error('[agent-local] agent-msg wrapper write failed:', e.message)
+  }
+}
+// Env assignments prefixed onto a session's launch command (both the fresh spawn
+// and the resume path) — the scoped token, this session's own id, and the wrapper
+// dir on PATH. Empty for sessions with no token (knowledge chats, old sessions).
+function msgEnv(s) {
+  if (!s.msgToken) return ''
+  return `ATLAS_AGENT_ID=${shquote(s.id)} ATLAS_AGENT_TOKEN=${shquote(s.msgToken)} ATLAS_API=${shquote(MSG_API)} PATH=${shquote(MSG_BIN_DIR)}:$PATH `
+}
+// Resolve a scoped message token to its session. Linear over the live registry
+// (a handful of sessions) and only ever matches a session that still exists —
+// which IS the revocation mechanism.
+export function agentByToken(token) {
+  if (!token || typeof token !== 'string') return null
+  for (const s of Object.values(registry.sessions)) {
+    if (s.msgToken && s.msgToken === token) return describeSession(s.id)
+  }
+  return null
+}
+
 export async function spawn({ task, repo, preamble, model, effort, context, images }) {
   if (!task || typeof task !== 'string') return { status: 400, ok: false, error: 'task required' }
   const repos = loadRepos()
@@ -1754,6 +1817,9 @@ export async function spawn({ task, repo, preamble, model, effort, context, imag
   const session = {
     id, task, repo, branch, path: repoPath, worktree, tmux,
     model: model || DEFAULT_MODEL, effort: effort || DEFAULT_EFFORT,
+    // Scoped agent↔agent message token (see the message-channel block above).
+    // Dev agents only — they're the ones that need to talk to a parent/sibling.
+    msgToken: randomBytes(24).toString('hex'),
     status: 'running', startedAt: nowIso(), lc: initLifecycle(LC.SPAWNED),
   }
 
@@ -1777,10 +1843,12 @@ export async function spawn({ task, repo, preamble, model, effort, context, imag
   // Prompt by FILE, not in the tmux command (promptFileLaunch): the retrieved
   // Atlas evidence makes this prompt tens of KB, far past tmux's ~16 KB command
   // ceiling — and that failure is silent-by-shape.
+  ensureMsgWrapper() // `agent-msg` on the agent's PATH (message channel above)
   const launch = promptFileLaunch(
-    LAUNCH_CMD
-      .replace('{model}', shquote(model || DEFAULT_MODEL))
-      .replace('{effort}', shquote(effort || DEFAULT_EFFORT)),
+    msgEnv(session) +
+      LAUNCH_CMD
+        .replace('{model}', shquote(model || DEFAULT_MODEL))
+        .replace('{effort}', shquote(effort || DEFAULT_EFFORT)),
     id,
     prompt,
   )

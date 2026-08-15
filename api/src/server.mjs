@@ -36,6 +36,7 @@ const LARGE_BODY_ROUTES = new Set([
   '/api/agents/prompt',
   '/api/agents/interrupt',
   '/api/agents/queue',
+  '/api/agents/message', // agent↔agent mail: same text bound as a prompt
 ])
 const jsonSmall = express.json({ limit: '64kb' })
 

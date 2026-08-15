@@ -153,7 +153,7 @@ const spawnFn = (() => {
 test('the bridge writes the prompt into the container and launches from the FILE', () => {
   assert.match(src, /import \{ promptFileBody, promptFileCommand \} from '\.\.\/api\/src\/prompt-file-launch\.mjs'/, 'one shape, not a copy')
   assert.match(spawnFn, /dockerExecInput\(container, \['sh', '-c', `cat > \$\{shquote\(promptPath\)\}`\], Buffer\.from\(promptFileBody\(prompt\)\)\)/)
-  assert.match(spawnFn, /promptFileCommand\(\s*LAUNCH_CMD/)
+  assert.match(spawnFn, /promptFileCommand\(\s*msgEnv\(session\) \+\s*LAUNCH_CMD/)
   assert.doesNotMatch(code(spawnFn), /\.replace\('\{task\}'/, 'the prompt must never be interpolated into the tmux command again')
 })
 
@@ -175,7 +175,7 @@ test('a failed write fails the SPAWN — an unbriefed agent is the bug, not the 
 
 test('the bridge ADVERTISES the transport on /health — that is what the box negotiates on', () => {
   assert.match(src, /const FEATURES = \['prompt-file'\]/)
-  assert.match(src, /p === '\/health'\) \{[\s\S]{0,900}?return send\(res, 200, \{ ok: true, service: 'agent-bridge', features: FEATURES/)
+  assert.match(src, /p === '\/health'\) \{[\s\S]{0,1400}?return send\(res, 200, \{ ok: true, service: 'agent-bridge', sha: startupSha, features: FEATURES/)
 })
 
 /* --- 3. the box negotiates, per bridge, fail-closed ------------------- */

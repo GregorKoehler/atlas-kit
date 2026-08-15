@@ -26,6 +26,15 @@
 			header_up Authorization "Bearer {env.DASHBOARD_BEARER_TOKEN}"
 		}
 	}
+	# Task Prospects: /new, /approve and /reject are bearer-gated writes, so the
+	# review card's Approve/Reject buttons need the token injected here. (Bare
+	# GET /api/prospects — the pending queue — is an open read and falls through
+	# to the read handler below, like every other GET.)
+	handle /api/prospects/* {
+		reverse_proxy localhost:3001 {
+			header_up Authorization "Bearer {env.DASHBOARD_BEARER_TOKEN}"
+		}
+	}
 	# (The token is harmless on the read routes below; only writes require it.)
 
 	# --- Read routes (open; Cloudflare Access gates them at the edge) ---
