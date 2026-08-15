@@ -54,8 +54,18 @@ import {
   collectSubAgents, mergeSubAgentLog,
   collectBackgroundJobs, mergeBackgroundJobLog,
 } from '../api/src/subagent-scan.mjs'
-import { parseTranscript, stitchParsed, steerKey, tagSteered } from '../api/src/agent-history.mjs'
-import { parseChoiceMenu } from '../api/src/menu.mjs'
+import { parseTranscript, stitchParsed, steerKey, steerEntry, tagSteered } from '../api/src/agent-history.mjs'
+import { parseChoiceMenu, currentHighlight, driveSelect } from '../api/src/menu.mjs'
+// The queued-prompt delivery gate, shared with the box-local executor so the two
+// cannot drift: one per-kind classification, one menu/pacing rule, one test.
+import { decideDelivery, deliveryBackoffMs } from '../api/src/queue-delivery.mjs'
+// Is a turn running? Two witnesses — the footer's `esc to interrupt` marker and
+// the spinner line above the input box — because the footer is rendered to the
+// pane width and drops that marker mid-turn. IMPORTED, not copied: the box
+// executor gates delivery on the same verdict, and a bridge-local copy would
+// drift (same reason decideDelivery is shared).
+import { isBusy } from '../api/src/pane-busy.mjs'
+import { sanitizeForTyping, deliveryLanded, clearInputBox, TUI_CLEAR_KEY, TUI_VERIFY, TUI_VERIFY_MAX_CHARS, TUI_VERIFY_SETTLE_MS, TUI_VERIFY_TRIES } from '../api/src/tui-input.mjs'
 
 const PORT = Number(process.env.BRIDGE_PORT || 7878)
 // Default to loopback: refuse to be reachable until the operator deliberately
@@ -98,6 +108,17 @@ const PANE_COLS = Number(process.env.BRIDGE_PANE_COLS || 80)
 // marker, no menu) gets its pending prompt delivered — true end-of-turn delivery.
 const INTERRUPT_SETTLE_MS = Number(process.env.BRIDGE_INTERRUPT_SETTLE_MS || 400)
 const QUEUE_FLUSH_MS = Number(process.env.BRIDGE_QUEUE_FLUSH_MS || 3000)
+// Kill-switch for mid-turn (boundary) delivery, default on. Deliberately its OWN
+// `BRIDGE_*` env rather than the box's AGENT_BOUNDARY_DELIVERY: a bridge machine
+// is restarted separately from the box, so the two executors must be revertible
+// independently. `0` restores idle-only gating exactly.
+const BOUNDARY_DELIVERY = !/^(0|false|no|off)$/i.test(process.env.BRIDGE_BOUNDARY_DELIVERY || '1')
+// Verified choice-menu selection (mirrors the box-local executor's
+// selectChoice): the settle delay after each nav key before re-capturing the pane.
+const SELECT_STEP_MS = Number(process.env.BRIDGE_SELECT_STEP_MS || 250)
+// Sanity cap on a single prompt's text, delivered as one literal tmux
+// send-keys line — not a real terminal paste, so no bracketed-paste chunking.
+const PROMPT_MAX_CHARS = Number(process.env.BRIDGE_PROMPT_MAX_CHARS || 50000)
 // `s.queued` is a FIFO of parked prompts; cap its depth so a stuck agent that
 // never flushes can't grow the persisted state without bound.
 const MAX_QUEUED = Number(process.env.BRIDGE_MAX_QUEUED || 20)
@@ -683,12 +704,25 @@ function publicView(s, status, lastOutput, menuKind, appUp, stats, menuChoice) {
     // Parsed numbered options of a pending choice menu (+ which one the TUI's
     // `❯` sits on), so the chat view can offer them as clickable buttons, plus
     // the prompt text above them so the operator sees WHAT they're answering.
+    // …question/header/per-option `description`, and an `escape` flag on the
+    // TUI's own "Type something."/"Chat about this" rows, all read straight off
+    // the pane (menu.mjs's parseChoiceMenu). A menu this flow can't drive
+    // reliably (multi-question/multiSelect) sends no options at all, just
+    // `menuUnsupported` — the card falls back to "use the terminal view".
     ...(menuChoice
-      ? {
-          menuOptions: menuChoice.options,
-          menuHighlighted: menuChoice.highlighted,
-          ...(menuChoice.question ? { menuQuestion: menuChoice.question } : {}),
-        }
+      ? menuChoice.unsupported
+        ? {
+            menuUnsupported: true,
+            menuUnsupportedReason: menuChoice.reason,
+            ...(menuChoice.question ? { menuQuestion: menuChoice.question } : {}),
+            ...(menuChoice.header ? { menuHeader: menuChoice.header } : {}),
+          }
+        : {
+            menuOptions: menuChoice.options,
+            menuHighlighted: menuChoice.highlighted,
+            ...(menuChoice.question ? { menuQuestion: menuChoice.question } : {}),
+            ...(menuChoice.header ? { menuHeader: menuChoice.header } : {}),
+          }
       : {}),
     startedAt: s.startedAt,
     // Spawn-time picks (resolved model ID + effort level) — the card shows them
@@ -808,14 +842,10 @@ function lastLine(text) {
   return lines.length ? lines[lines.length - 1] : ''
 }
 
-// Claude Code prints "esc to interrupt" in its status line ONLY while a turn is
-// actively running; the moment it finishes and waits for the next prompt that
-// marker is gone. So a live tmux session showing it = working ('running'); a
-// live one without it = the agent is blocked on YOU ('idle' / needs input).
-const BUSY_MARKER = /esc to interrupt/i
-function isBusy(pane) {
-  return BUSY_MARKER.test(pane)
-}
+// `isBusy` is imported from ../api/src/pane-busy.mjs — two witnesses (the
+// footer's `esc to interrupt` marker and the spinner line above the input box),
+// one implementation shared with the box executor. A bridge-local copy is
+// exactly the drift that once left a bridge on the old rule after a box deploy.
 
 // Two interactive states the respond toolbar can drive — reported as `menuKind`
 // so the card shows only the confirm button that fits (and nothing when merely
@@ -958,7 +988,7 @@ async function prepare(id, text, images) {
   const imgs = Array.isArray(images) ? images : []
   const hasText = typeof text === 'string' && text.length > 0
   if (!hasText && !imgs.length) return { err: { status: 400, ok: false, error: 'text or images required' } }
-  if (hasText && text.length > 8000) return { err: { status: 400, ok: false, error: 'text too long' } }
+  if (hasText && text.length > PROMPT_MAX_CHARS) return { err: { status: 400, ok: false, error: `text too long (max ${PROMPT_MAX_CHARS} chars)` } }
   if (imgs.length > MAX_IMAGES) return { err: { status: 400, ok: false, error: `too many files (max ${MAX_IMAGES})` } }
   if (!(await sessionAlive(s))) return { err: { status: 409, ok: false, error: 'session not running' } }
   let paths
@@ -972,11 +1002,51 @@ async function prepare(id, text, images) {
 
 // Type a single-line payload into the session and submit it (Enter). Literal text
 // (-l) as a single argv → no shell parsing; then a real Enter.
+//
+// Same sanitise-then-verify as the box-local executor, from the same module —
+// `-l` is a keyboard, so an escape sequence in the text is parsed as keys and
+// swallows the words around it (see api/src/tui-input.mjs for the measurement).
+// One implementation, both executors: a second copy would drift and only one
+// would get maintained.
 async function deliver(s, payload) {
-  const t = await dockerExec(s.container, ['tmux', 'send-keys', '-t', s.tmux, '-l', payload])
+  const safe = sanitizeForTyping(payload)
+  const stripped = payload.length - safe.length
+  // ⚠️ Never type into a non-empty box — the typed text concatenates onto
+  // whatever is there and the Enter submits the pair. Clearing is VERIFIED, not
+  // counted: `C-u` kills a display ROW (api/src/tui-input.mjs carries the
+  // measurement and the accumulation it explains).
+  const io = {
+    readPane: () => captureTail(s, TAIL_LINES, true),
+    pressClear: () => dockerExec(s.container, ['tmux', 'send-keys', '-t', s.tmux, TUI_CLEAR_KEY]),
+  }
+  let cleared = 0
+  if (TUI_VERIFY) {
+    const pre = await clearInputBox(io)
+    if (!pre.ok) {
+      audit({ action: 'deliver-box-stuck', id: s.id, repo: s.repo, len: safe.length, presses: pre.presses, residue: pre.residue, ok: false })
+      return { ok: false, error: 'input box is not empty and could not be cleared (nothing typed)' }
+    }
+    cleared = pre.presses
+  }
+  const t = await dockerExec(s.container, ['tmux', 'send-keys', '-t', s.tmux, '-l', safe])
   if (!t.ok) return { ok: false, error: t.stderr.slice(0, 500) || 'send-keys failed' }
+  if (TUI_VERIFY && safe.length <= TUI_VERIFY_MAX_CHARS && !(await typedTextLanded(s, safe))) {
+    const post = await clearInputBox(io)
+    audit({ action: 'deliver-mangled', id: s.id, repo: s.repo, len: safe.length, stripped, presses: post.presses, emptied: post.ok, ok: false })
+    return { ok: false, error: 'input did not land in the session (not submitted)' }
+  }
   await dockerExec(s.container, ['tmux', 'send-keys', '-t', s.tmux, 'Enter'])
-  return { ok: true }
+  return { ok: true, stripped, cleared }
+}
+
+// Read the typed text back off the pane before submitting — the pane lags the
+// keystrokes, so look more than once. Mirrors the box-local executor.
+async function typedTextLanded(s, payload) {
+  for (let i = 0; i < TUI_VERIFY_TRIES; i++) {
+    if (i) await sleep(TUI_VERIFY_SETTLE_MS)
+    if (deliveryLanded(await captureTail(s, TAIL_LINES, true), payload)) return true
+  }
+  return false
 }
 
 // Remember that an Atlas orchestrator — not the operator — injected this prompt.
@@ -987,9 +1057,13 @@ async function deliver(s, payload) {
 // whether it recorded anything new (to gate the persist). Capped + persisted so
 // the tagging survives a bridge restart, like the rest of the session record.
 const STEER_KEYS_MAX = 60
-function recordSteer(s, text, steeredBy) {
+function recordSteer(s, text, steeredBy, source) {
   if (!steeredBy || typeof text !== 'string' || !text.trim()) return false
-  const key = steerKey(text)
+  // `source` rides IN the entry (steerEntry) so the chat view can colour a
+  // dashboard-derived line apart from an orchestrator's steer. A bare entry
+  // still means 'atlas', which keeps already-persisted state — and a box that
+  // predates this — working.
+  const key = steerEntry(steerKey(text), source)
   if (!Array.isArray(s.steered)) s.steered = []
   if (s.steered.includes(key)) return false
   s.steered.push(key)
@@ -1036,17 +1110,21 @@ async function interrupt({ id, text, images, steeredBy }) {
 // below sends it). Appends to the session's FIFO queue, so queueing again while one
 // is parked keeps both (delivered in order). Images are streamed into the container
 // now, at queue time.
-async function queuePrompt({ id, text, images, steeredBy }) {
+async function queuePrompt({ id, text, images, kind, steeredBy, source }) {
   const p = await prepare(id, text, images)
   if (p.err) return p.err
   if (!Array.isArray(p.s.queued)) p.s.queued = []
   if (p.s.queued.length >= MAX_QUEUED) return { status: 409, ok: false, error: `queue full (max ${MAX_QUEUED})` }
-  p.s.queued.push({ text: p.text, paths: p.paths })
+  // `at` is the ENQUEUE time — the start of the interval flushQueued audits as
+  // `waitMs`. `kind` is what WHEN is decided from (queue-delivery.mjs): the box
+  // stamps it before forwarding here, and dropping it would make every bridge
+  // entry read back as untagged, i.e. idle-only.
+  p.s.queued.push({ text: p.text, paths: p.paths, at: nowIso(), ...(kind ? { kind } : {}) })
   // Record now (by text); the parked prompt is delivered at the next idle and the
   // fingerprint matches whenever that turn lands in the container transcript.
-  recordSteer(p.s, p.text, steeredBy)
+  recordSteer(p.s, p.text, steeredBy, source)
   persist()
-  audit({ action: 'queue', id, repo: p.s.repo, len: p.payload.length, images: p.paths.length, depth: p.s.queued.length, ok: true })
+  audit({ action: 'queue', id, repo: p.s.repo, len: p.payload.length, images: p.paths.length, depth: p.s.queued.length, ...(kind ? { kind } : {}), ok: true })
   return { status: 200, ok: true }
 }
 
@@ -1092,7 +1170,7 @@ async function sendNow({ id }) {
     persist()
     return { status: 502, ok: false, error: d.error }
   }
-  audit({ action: 'queue-send-now', id, repo: s.repo, len: payload.length, images: (q.paths || []).length, ok: true })
+  audit({ action: 'queue-send-now', id, repo: s.repo, len: payload.length, images: (q.paths || []).length, ...(d.stripped ? { stripped: d.stripped } : {}), ...(d.cleared ? { cleared: d.cleared } : {}), ok: true })
   return { status: 200, ok: true }
 }
 
@@ -1106,19 +1184,51 @@ async function flushQueued() {
   try {
     for (const s of Object.values(registry.sessions)) {
       if (!Array.isArray(s.queued) || !s.queued.length || s.status === 'error') continue
+      // Backing off a head that keeps being refused (deliveryBackoffMs) — the
+      // message stays queued, we just stop asking every 3 s.
+      if (s.deliverRetryAt && Date.now() < s.deliverRetryAt) continue
       if (!(await sessionAlive(s))) continue
       const pane = await captureTail(s, TAIL_LINES)
-      if (isBusy(pane) || menuKindOf(pane)) continue
-      // One per idle tick: deliver the FIFO head, leave the rest for later ticks
-      // (the agent goes busy on this one, so each queued prompt gets its own turn).
+      // The FIFO head only: one delivery per session per tick, in order — never a
+      // burst (boundary delivery changes WHEN the head goes out, not how many).
       const q = s.queued[0]
+      const dec = decideDelivery({
+        kind: q.kind,
+        busy: isBusy(pane),
+        menu: !!menuKindOf(pane),
+        // No ship train here: the serial merge queue is box-local (a remote agent
+        // ships concurrently), so there is nothing on the bridge to hold delivery for.
+        shipHead: false,
+        boundaryEnabled: BOUNDARY_DELIVERY,
+        sinceBoundaryMs: s.boundaryAt ? Date.now() - s.boundaryAt : null,
+      })
+      if (!dec.deliver) continue
       const payload = withImages(q.text || '', q.paths || [])
       const d = await deliver(s, payload)
-      if (!d.ok) continue
+      if (!d.ok) {
+        s.deliverFailures = (s.deliverFailures || 0) + 1
+        const backoffMs = deliveryBackoffMs(s.deliverFailures)
+        if (backoffMs) {
+          s.deliverRetryAt = Date.now() + backoffMs
+          console.error(`[bridge] delivery to ${s.id} refused ${s.deliverFailures}x (${d.error}) — holding ${Math.round(backoffMs / 1000)}s; the message stays queued`)
+          audit({ action: 'queue-backoff', id: s.id, repo: s.repo, failures: s.deliverFailures, backoffMs, error: d.error, ok: false })
+        }
+        persist()
+        continue
+      }
+      delete s.deliverFailures
+      delete s.deliverRetryAt
+      // Stamp the mid-turn delivery so the next one is paced (BOUNDARY_MIN_GAP_MS)
+      // rather than following on the next 3 s tick — at idle the pacing came free
+      // (delivery made the agent busy), mid-turn nothing paces it.
+      if (dec.via === 'boundary') s.boundaryAt = Date.now()
       s.queued.shift()
       if (!s.queued.length) delete s.queued
       persist()
-      audit({ action: 'queue-flush', id: s.id, repo: s.repo, len: payload.length, images: (q.paths || []).length, ok: true })
+      // waitMs: enqueue → actual delivery. Same field names as the box's
+      // queue-flush line, so one grep separates boundary from idle across both.
+      const waitMs = q.at ? Date.now() - Date.parse(q.at) : null
+      audit({ action: 'queue-flush', id: s.id, repo: s.repo, len: payload.length, images: (q.paths || []).length, ...(d.stripped ? { stripped: d.stripped } : {}), ...(d.cleared ? { cleared: d.cleared } : {}), ...(waitMs != null && waitMs >= 0 ? { waitMs } : {}), via: dec.via, ...(q.kind ? { kind: q.kind } : {}), ok: true })
     }
   } finally {
     flushing = false
@@ -1147,6 +1257,31 @@ async function keys({ id, keys: ks }) {
   const r = await dockerExec(s.container, ['tmux', 'send-keys', '-t', s.tmux, ...ks])
   if (!r.ok) return { status: 502, ok: false, error: r.stderr.slice(0, 500) || 'send-keys failed' }
   audit({ action: 'keys', id, repo: s.repo, keys: ks, ok: true })
+  return { status: 200, ok: true }
+}
+
+// Verified selection of a pending choice-menu option — mirrors the box-local
+// executor's selectChoice: navigate the ❯ highlight toward the option whose
+// TEXT is `optionText`, never trusting `hintN` for anything but an initial
+// direction, confirming by content at every step (driveSelect, menu.mjs), and
+// press Enter ONLY once it's confirmed there.
+async function selectChoice({ id, optionText, hintN }) {
+  const s = registry.sessions[id]
+  if (!s) return { status: 404, ok: false, error: 'no such session' }
+  if (typeof optionText !== 'string' || !optionText.trim()) return { status: 400, ok: false, error: 'optionText required' }
+  if (!(await sessionAlive(s))) return { status: 409, ok: false, error: 'session not running' }
+  const readHighlight = async () => {
+    const pane = await captureTail(s, TAIL_LINES)
+    return menuKindOf(pane) === 'choice' ? currentHighlight(pane) : null
+  }
+  const sendKey = async (key) => {
+    const r = await dockerExec(s.container, ['tmux', 'send-keys', '-t', s.tmux, key])
+    if (r.ok) await sleep(SELECT_STEP_MS)
+    return r.ok
+  }
+  const result = await driveSelect({ target: optionText, hintN, sendKey, readHighlight })
+  if (!result.ok) return { status: 409, ok: false, error: result.error }
+  audit({ action: 'select', id, repo: s.repo, text: optionText, ok: true })
   return { status: 200, ok: true }
 }
 
@@ -1307,7 +1442,7 @@ const server = http.createServer(async (req, res) => {
       const r = await history({ id: url.searchParams.get('id'), rev: url.searchParams.get('rev') || '' })
       return send(res, r.status, r)
     }
-    const POST_ROUTES = { '/spawn': spawn, '/prompt': prompt, '/interrupt': interrupt, '/queue': queuePrompt, '/unqueue': unqueue, '/send-now': sendNow, '/kill': kill, '/cleanup': cleanup, '/keys': keys }
+    const POST_ROUTES = { '/spawn': spawn, '/prompt': prompt, '/interrupt': interrupt, '/queue': queuePrompt, '/unqueue': unqueue, '/send-now': sendNow, '/kill': kill, '/cleanup': cleanup, '/keys': keys, '/select': selectChoice }
     if (req.method === 'POST' && POST_ROUTES[p]) {
       // spawn/prompt/interrupt/queue may carry base64 image attachments → a roomier cap.
       const big = p === '/spawn' || p === '/prompt' || p === '/interrupt' || p === '/queue'
