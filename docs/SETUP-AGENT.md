@@ -97,6 +97,15 @@ The checks below are SETUP.md's "Verifying it works" list, distributed per step.
   the chosen path; confirm it has `Wiki/` + `Tasks/`. **Verify:** `curl -s
   http://127.0.0.1:8080/api/wiki/pages` returns the vault's pages (not an empty list on a
   populated vault) and `curl -s http://127.0.0.1:8080/api/tasks` returns its tasks.
+  **Then, once that check passes, seed the kit's own project card:** `node --env-file=.env
+  scripts/seed-self-card.mjs`. It writes `Wiki/Projects/Atlas-Kit.md` through the commit
+  queue, filling in the repo path, the `origin` URL and the spawn key if one is registered
+  — and it **never overwrites an existing page**, so it is safe on a re-run (Safety §1).
+  Say what it wrote. Skip it only if the operator says they don't want the card. **Verify:**
+  `curl -s http://127.0.0.1:8080/api/projects` lists **Atlas Kit** with `selfDeploy: true`
+  and a `repo` path — that pair is what puts the **Redeploy** button on the card
+  ([docs/UPDATING.md](UPDATING.md), which is also the answer to "how do I update this box
+  later?").
 - **Step 9 — cron.** `install -m 644 infra/atlas-kit.cron /etc/cron.d/atlas-kit`.
   **Verify:** the file exists and lists the watchdog + `refresh-atlas.mjs` +
   `clear-done.mjs` lines.
@@ -111,7 +120,9 @@ The checks below are SETUP.md's "Verifying it works" list, distributed per step.
   `BRIDGE_PULL_USER=<their-user>` so the dashboard's "Redeploy bridge" button works.
 - **Final — spawn readiness.** To make box-local dev agents spawnable, `cp
   api/src/agent-local-repos.example.json api/src/agent-local-repos.json` and add a repo
-  the operator has checked out here. Offer a smoke test: add a `Wiki/Projects/*.md` page
+  the operator has checked out here. If one of them is the kit's own checkout, add that key
+  as `agent_repo:` to the `Wiki/Projects/Atlas-Kit.md` seeded in step 8 — the seed ran
+  before this allowlist existed and never overwrites, so this one line is manual. Offer a smoke test: add a `Wiki/Projects/*.md` page
   with `type: project`, a non-empty `goal:` (that pair is what makes it a card — without
   it nothing renders) and an `agent_repo:` key, then spawn one agent from its project
   card — its `tmux` transcript should stream into the card. (Ask before spawning; it
@@ -231,5 +242,7 @@ When every chosen step's check has passed, report:
   `agent-local-repos.json`, give a project page an `agent_repo:`, click Spawn).
 - **Which addons are enabled**, if any — what each now costs on this box, and what still
   needs the operator (a cookie file that expires, a feed list to grow).
+- **How to update this box later** — the **Redeploy** button on the Atlas Kit card is the
+  one-click path; [docs/UPDATING.md](UPDATING.md) has it and the manual one.
 - **What was skipped** and why (no domain ⇒ no Cloudflare; no bridge; addons declined;
   etc.), and the one-liner to enable each later.

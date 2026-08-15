@@ -213,12 +213,17 @@ export function listProjects() {
       // The agent-repo KEY (a box-local or bridge repo key) this project's dev
       // agents spawn on (empty = no agent card, just a KB card).
       agentRepo: String(fm.agent_repo || ''),
-      repo: String(fm.repo || ''),
+      // The project's checkout ON THIS BOX (last-commit line, and the Redeploy
+      // button's target). `repo_path:` is the name to write; bare `repo:` is
+      // still read so pages written before it stay wired.
+      repo: String(fm.repo_path || fm.repo || ''),
       github: String(fm.github || ''),
       // Delivery flags — how this project actually goes live. `self_deploy: true`
       // means the operator takes a merge live from the dashboard; `deploy_manual`
       // is a note saying the live instance is redeployed by hand and NOT per PR.
       // Neither set ⇒ merging IS the delivery (ship-prompt.mjs's deliveryMode).
+      // With a `repo_path` alongside it, `self_deploy` also puts the Redeploy
+      // button on the card (deploy-routes.mjs runs the pull/build/restart there).
       selfDeploy: fm.self_deploy === true,
       deployManual: String(fm.deploy_manual || ''),
       now: String(fm.now || ''),

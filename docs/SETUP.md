@@ -163,6 +163,25 @@ cleanly (the llm-atlas template already does). Set your commit identity via
 Run agents against the vault by keeping its checkout writable and reachable by the box's
 `gh` auth; the box commits back through the serial queue.
 
+Then seed the kit's **own** project card, so the dashboard has a card for Atlas Kit itself
+from the first boot:
+
+```bash
+node --env-file=.env scripts/seed-self-card.mjs
+```
+
+It writes `Wiki/Projects/Atlas-Kit.md` from
+[`infra/atlas-kit-card.template.md`](../infra/atlas-kit-card.template.md) — through the
+same commit queue as everything else — filling in this checkout's path, your `origin` URL
+and the spawn key if one is registered. **Idempotent: it never overwrites an existing
+page**, so re-running it after you've rewritten the goal is a no-op. The card carries
+`self_deploy: true` + `repo_path:`, which is what gives it a **Redeploy** button
+([docs/UPDATING.md](UPDATING.md)).
+
+The spawn allowlist doesn't exist yet at this point, so the card ships without an
+`agent_repo:`. Once you add the kit's own checkout to `agent-local-repos.json` (below), add
+that key to the page by hand to get dev agents on this card — a re-run won't do it for you.
+
 ## 9. Cron jobs
 
 Install [`infra/atlas-kit.cron`](../infra/atlas-kit.cron) (the provisioning script does
@@ -230,7 +249,10 @@ it costs and the config only you can supply — a cookie file, a feed list:
 - `curl http://127.0.0.1:8080/api/health` → `{"ok":true,...}`.
 - Open `dashboard.<your-domain>` on your phone → you should hit the Access login, then
   the dashboard.
+- The home tab shows the **Atlas Kit** card seeded in step 8, with a **Redeploy** button.
 - Add a repo to `agent-local-repos.json`, then give a `Wiki/Projects/*.md` page
   `type: project`, a non-empty `goal:` (that pair is what makes it a card) and an
   `agent_repo:` key, and spawn an agent from its project card — its `tmux` transcript
   should stream into the card.
+
+Later, to move this box onto newer kit code: [docs/UPDATING.md](UPDATING.md).
