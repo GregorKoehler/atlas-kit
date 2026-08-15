@@ -259,7 +259,12 @@ just a recap). The lifecycle driver's `INGESTING`/`recap` case
 delivers `atlasIngestPrompt()` (line 2676) to the paired worker — its INGEST
 instructions (`ATLAS_WORKER_PREAMBLE` point 2, `ATLAS_WORKER_PREAMBLE` point 2): fold the
 recap into the most fitting `Wiki/` page, always append a `Wiki/log.md` entry, and
-optionally file a `Tasks/` item. Once the worker prints `ATLAS:INGESTED`, the
+optionally file a `Tasks/` item. One more convention rides along: when the project page
+the work is logged against carries a typed `contribution_log:` edge, the worker appends
+ONE high-level line (date, what, PR number) to the page that edge links — into the
+section it belongs to, append-only, in the SAME write batch as the `Wiki/log.md` entry.
+The operator-chatted Atlas orchestrator carries the same rule
+(`ATLAS_KNOWLEDGE_PREAMBLE`) as the manual path. Once the worker prints `ATLAS:INGESTED`, the
 `INGESTING`/`ingest` case (`agent-lifecycle.mjs:196–202`) fires `ACT.MERGE_ATLAS`
 (`agent-local.mjs:2528`), which merges the worker's branch into the live Atlas via
 `enqueueAtlasMerge()` ([§5](#5-the-serial-vault-commit-queue)) before reaping.

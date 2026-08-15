@@ -146,6 +146,21 @@ function liveRunMs(sessions: AgentSession[], now: number): number {
   return ms
 }
 
+// Split a fmtDur string ("3h22m", "12m30s", "45s") into digit and unit-letter
+// runs so the letters can render smaller than the digits. Presentational only —
+// fmtDur keeps returning the plain string the `title` tooltip uses.
+function durParts(text: string) {
+  return (text.match(/\d+|\D+/g) ?? []).map((part, i) =>
+    /^\d/.test(part) ? (
+      part
+    ) : (
+      <span className="agent-work__col-unit" key={i}>
+        {part}
+      </span>
+    ),
+  )
+}
+
 // Per-day working time as a bar chart over the active range (first day with
 // work → today; the server trims the empty lead-in). Each bar is labelled with
 // its duration; today is the rightmost bar (highlighted) and grows live.
@@ -162,7 +177,7 @@ function DailyWorkChart({ daily }: { daily: AgentStats['daily'] }) {
             <div className="agent-work__col" key={d.date} title={`${d.date}: ${fmtDur(d.runMs)}`}>
               {d.runMs > 0 ? (
                 <span className="agent-work__col-val tnum" style={{ bottom: `calc(${pct.toFixed(1)}% + 3px)` }}>
-                  {fmtDur(d.runMs)}
+                  {durParts(fmtDur(d.runMs))}
                 </span>
               ) : null}
               <span

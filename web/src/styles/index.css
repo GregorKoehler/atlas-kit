@@ -1033,6 +1033,12 @@
   color: var(--text-faint);
   white-space: nowrap;
 }
+/* Unit letters (h/m/s) ride smaller + fainter than the digits; em so they track
+   the label's own font-size. */
+.agent-work__col-unit {
+  font-size: 0.8em;
+  opacity: 0.7;
+}
 .agent-work__acc {
   display: block;
   flex: 1;

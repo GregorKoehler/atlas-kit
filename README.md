@@ -196,9 +196,14 @@ npm run dev                   # Express API + Vite dev server → http://127.0.0
 
 To spawn a **box-local dev agent**, copy `api/src/agent-local-repos.example.json` to
 `api/src/agent-local-repos.json` and add a repo you have checked out on this machine
-(this is the spawn allowlist — the security boundary). The dashboard's project cards
-read `Wiki/Projects/*.md` from your vault; give a project page an `agent_repo:` key to
-bind it to a spawnable repo.
+(this is the spawn allowlist — the security boundary).
+
+**What becomes a project card:** a page in your vault's `Wiki/Projects/` with
+`type: project` **and** a non-empty `goal:`. That pair is the opt-in — the folder is a
+normal Atlas folder and may hold project pages that aren't cards yet, so `goal:` (the
+line the card renders) is what promotes one. Everything else is optional: `now:`,
+`tag:` (the related-notes count), `repo:` (a local checkout path), `github:`, and
+`agent_repo:` — the spawnable-repo key that binds the card to a dev-agent surface.
 
 ## What this kit is **not**
 
