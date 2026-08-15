@@ -103,7 +103,11 @@ addon has to change to keep working.
 Mounted **after** every core router, so an addon can extend the API but never
 shadow a core route. It gets **no bearer gate**: core's write routes are behind
 `DASHBOARD_BEARER_TOKEN` and an addon that adds a write must gate it itself.
-Prefer read-only routes.
+Prefer read-only routes. (`instagram-ingest/api/register.mjs` is the worked
+example of both halves: the constant-time bearer check on its one write route,
+and how to get `express` at all — a bare `import 'express'` resolves from the
+importing file's directory, which for an addon walks up to a repo root with no
+`node_modules`, so it is `createRequire`'d out of core's tree.)
 
 ### `mcpTools` — read-only tools
 
@@ -220,3 +224,4 @@ done-clear. Two separate files so they can never clobber each other.
 | addon | what it adds | cost |
 |---|---|---|
 | [`semantic-search`](../addons/semantic-search/README.md) | Dense/vector retrieval as a second search leg (EmbeddingGemma-300M ONNX, section-chunk index, 5-min sweep), plus an off-by-default dense leg on the spawn-evidence block | ~1.4 GB disk out of tree, ~660 MB resident while warm, ~35 MB of vectors per ~11k chunks |
+| [`instagram-ingest`](../addons/instagram-ingest/README.md) | `POST /api/ingest/instagram` + a CLI + a Claude Code skill: one post or reel → a `Wiki/Sources/` page (caption verbatim, stills, a `claude -p` read), through the commit queue, with a persistent ingest log | `yt-dlp` (~30 MB out of tree) and **your own** Instagram cookies; the stills it commits are permanent git blobs. Nothing runs unless you call it |

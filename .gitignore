@@ -11,6 +11,8 @@ api/src/agent-local-repos.json
 api/src/bridges.json
 #   multi-vault registry (a single VAULT_PATH works without this file)
 api/src/vaults.json
+#   the instagram-ingest skill link, created by that addon's install.sh
+.claude/skills/instagram-ingest
 # agent-bridge operator-local config
 agent-bridge/repos.json
 agent-bridge/bridge.env
