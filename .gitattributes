@@ -1,0 +1,10 @@
+# Source is text, always. `api/src/agent-messages.mjs` embeds a literal NUL as
+# its pair-key separator (unambiguous for a `from\0to` join key), and git's
+# content heuristic reads that one byte as "binary" — so every diff touching
+# that file rendered as `Bin 5097 -> 5088 bytes`, unreviewable. This repo is
+# public and every merge is a review, so a source file must never be able to
+# hide its own diff.
+*.mjs   diff
+*.js    diff
+*.ts    diff
+*.tsx   diff
