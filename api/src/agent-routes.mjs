@@ -391,9 +391,10 @@ const AGENT_EFFORTS = new Set(['high', 'xhigh', 'max'])
 // they traverse and synthesize the typed graph, where the stronger model pays for
 // itself. DEV agents default to Sonnet at xhigh: that default belongs to the
 // dashboard's own spawn dropdown, which stays on the cheaper, faster model. A dev
-// agent spawned BY an Atlas orchestrator gets Opus at `high` instead — applied by
-// the MCP spawn_agent tool (spawnBody in mcp/tools.mjs), which passes model/effort
-// explicitly, because the route can't tell its two dev callers apart. Pure +
+// agent spawned BY an Atlas orchestrator gets Sonnet at `high` instead — applied
+// by the MCP spawn_agent tool (spawnBody in mcp/tools.mjs), which passes
+// model/effort explicitly, because the route can't tell its two dev callers
+// apart. Pure +
 // exported so the defaults are testable (api/test/agent-model-default.test.mjs).
 export function spawnPicks({ model, effort, kind } = {}) {
   return {

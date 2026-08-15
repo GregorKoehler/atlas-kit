@@ -2,7 +2,7 @@
  * The spawn-time model/effort DEFAULTS, and — the point — their SCOPING:
  *   - knowledge/Atlas chats           → Opus at xhigh
  *   - dev agents spawned via the MCP `spawn_agent` tool (i.e. BY an Atlas
- *     orchestrator)                   → Opus at high
+ *     orchestrator)                   → Sonnet at high
  *   - the dashboard's OWN dev spawn   → Sonnet at xhigh (the regression guard
  *     that proves the scoping held; the dev dropdown stays on the cheaper,
  *     faster model).
@@ -52,11 +52,11 @@ test('REGRESSION: the dashboard dev spawn (no model/effort) still resolves Sonne
   assert.match(list, /const \[model, setModel\] = useState\('sonnet'\)/)
 })
 
-test('MCP spawn_agent (dev) with no model/effort → Opus at high', () => {
+test('MCP spawn_agent (dev) with no model/effort → Sonnet at high', () => {
   const body = spawnBody({ task: 'fix the thing', repo: 'demo-repo' })
-  assert.equal(body.model, 'opus') // passed EXPLICITLY, not left to the route
+  assert.equal(body.model, 'sonnet') // passed EXPLICITLY, not left to the route
   assert.equal(body.effort, 'high')
-  assert.deepEqual(spawnPicks(body), { modelId: `claude-opus-5${CTX}`, effortLevel: 'high' })
+  assert.deepEqual(spawnPicks(body), { modelId: `claude-sonnet-5${CTX}`, effortLevel: 'high' })
 })
 
 test('MCP spawn_agent (knowledge) sends no model/effort — it inherits the route default', () => {

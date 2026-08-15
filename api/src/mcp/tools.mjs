@@ -642,11 +642,11 @@ export function buildServer({
 
 /**
  * The POST body for a spawn_agent call. A DEV agent spawned by an Atlas
- * orchestrator defaults to Opus at `high` effort — passed EXPLICITLY, because the
- * /api/agents/spawn route's dev default (Sonnet) belongs to the dashboard's own
- * spawn dropdown and must stay there; the route cannot tell its two dev callers
- * apart. A knowledge agent sends neither key, so it picks up the route's knowledge
- * default (Opus at xhigh). Pure + exported so the defaults are testable
+ * orchestrator defaults to Sonnet at `high` effort — the effort is passed
+ * EXPLICITLY (the route's dev default is xhigh), and the model with it, because
+ * the route cannot tell its two dev callers apart. A knowledge agent sends
+ * neither key, so it picks up the route's knowledge default (Opus at xhigh).
+ * Pure + exported so the defaults are testable
  * (api/test/agent-model-default.test.mjs).
  */
 export function spawnBody({ task, repo, kind, vault, model, effort, parent }) {
@@ -659,7 +659,7 @@ export function spawnBody({ task, repo, kind, vault, model, effort, parent }) {
     if (effort) body.effort = effort
   } else {
     body.repo = repo
-    body.model = model || 'opus'
+    body.model = model || 'sonnet'
     body.effort = effort || 'high'
   }
   return body
@@ -813,7 +813,7 @@ function registerAgentControl(server) {
         repo: z.string().optional().describe('repo key for a DEV agent (a localRepos key or a bridges[].repos entry from list_agents); omit for a knowledge agent'),
         kind: z.enum(['dev', 'knowledge']).optional().describe('default "dev"'),
         vault: z.string().optional().describe('for a knowledge agent: which vault (e.g. "atlas")'),
-        model: z.enum(['opus', 'fable', 'sonnet']).optional().describe('default opus for a dev agent you spawn; opus for a knowledge agent'),
+        model: z.enum(['opus', 'fable', 'sonnet']).optional().describe('default sonnet for a dev agent you spawn; opus for a knowledge agent'),
         effort: z.enum(['high', 'xhigh', 'max']).optional().describe('default high (dev) / xhigh (knowledge)'),
       },
     },
