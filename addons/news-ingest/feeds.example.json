@@ -1,0 +1,6 @@
+{
+  "_comment": "Copy to feeds.json (gitignored) and put YOUR OWN feeds in it — this one neutral example is a placeholder, not a recommendation. Each entry is {url, tag?, title?}: `tag` defaults to the feed's host and becomes the page's `feed:` frontmatter key plus a tag, `title` defaults to the feed's own <title>. A bare URL string works too. Every NEW item costs one `claude -p` call, so start with a few feeds and read README.md on the caps first.",
+  "feeds": [
+    { "url": "https://hnrss.org/frontpage", "tag": "hacker-news", "title": "Hacker News front page" }
+  ]
+}

@@ -856,6 +856,45 @@ export function fetchAddons(): Promise<AddonsView | null> {
   return getJson<AddonsView>(`${API_BASE}/addons`)
 }
 
+/* --- news-ingest (optional addon) ----------------------------------------- *
+ * Served by `addons/news-ingest` only when that addon is enabled on this box —
+ * the News card gates itself on GET /api/addons, so a kit without the addon
+ * never calls this. */
+export interface NewsItem {
+  key: string
+  /** When this box ingested it (ISO) — not the publication date. */
+  at: string
+  title: string
+  url: string
+  /** The feed's tag, as it appears in the page's frontmatter. */
+  feed: string
+  /** The vault page it was filed as, e.g. `Wiki/Sources/news-….md`. */
+  page: string
+}
+export interface NewsRun {
+  at: string
+  feeds: number
+  checked: number
+  new: number
+  written: number
+  deferred: number
+  errors: string[]
+  ok: boolean
+}
+export interface NewsView {
+  items: NewsItem[]
+  feeds: { tag: string; title: string; url: string }[]
+  /** The rolling digest page, e.g. `Wiki/News-Digest.md`. */
+  digest: string
+  lastRun: NewsRun | null
+  /** Feed-list problems plus the last sweep's — shown, never swallowed. */
+  errors: string[]
+}
+
+export function fetchNews(limit = 12): Promise<NewsView | null> {
+  return getJson<NewsView>(`${API_BASE}/news?limit=${limit}`)
+}
+
 /** Fire the server-side GitHub data refresh (cooldown-guarded server-side). */
 export async function refreshGithub(): Promise<void> {
   try {
