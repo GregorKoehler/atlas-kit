@@ -129,7 +129,19 @@ so a downed dashboard self-heals within ~2 minutes.
 ```bash
 npm i -g @anthropic-ai/claude-code
 claude            # then /login — sign in on your subscription (NOT an API key)
+
+# As root: pin the binary at a standard location too (idempotent — re-runnable).
+# `npm i -g` follows npm's prefix, which is often ~/.local/bin; cron (/etc/cron.d)
+# and systemd hand a service a bare PATH that does NOT include it, so a dashboard
+# restarted by the watchdog would spawn every agent with ENOENT while an
+# interactive `serve.sh restart` worked.
+[ "$(command -v claude)" = /usr/local/bin/claude ] || ln -sfn "$(command -v claude)" /usr/local/bin/claude
 ```
+
+The API also resolves an **absolute** `claude` once at boot (`CLAUDE_BIN` if set, else
+PATH, then `~/.local/bin`, then `/usr/local/bin`) and uses that path at every spawn —
+`curl -s .../api/health | jq .claude` shows which binary it settled on, or why it
+couldn't. Set `CLAUDE_BIN` in `.env` if yours lives anywhere else.
 
 Leave `ANTHROPIC_API_KEY` **blank** everywhere. `serve.sh` strips it from the service
 env and each agent launches with `env -u ANTHROPIC_API_KEY`, so nothing can fall back

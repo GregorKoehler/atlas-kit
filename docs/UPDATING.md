@@ -69,6 +69,23 @@ how a failure that happened while nothing was listening still reaches the card.
 
 Full log of the last run: `/tmp/atlas-kit-deploy-<project>.log`.
 
+**After a redeploy, agents spawn but die instantly / never start.** The redeploy (and the
+`*/2 min` watchdog cron behind it) restarts the services from a **non-interactive** PATH —
+cron's `/etc/cron.d` PATH and systemd's default both omit `~/.local/bin`, which is where
+`npm i -g @anthropic-ai/claude-code` may have put the binary. The same restart typed by
+hand inherits your login PATH and works, which is what makes it look intermittent.
+Check it directly:
+
+```bash
+curl -s http://127.0.0.1:8080/api/health | jq .claude   # {"ok":true,"path":"…","source":"…"}
+```
+
+`ok:false` there names the reason and every spawn refuses with it (the API also prints a
+refusal banner into `/tmp/atlas-kit-express.log` at boot). Fixes, any one of them: add the
+root symlink (`ln -sfn "$(command -v claude)" /usr/local/bin/claude`), set
+`CLAUDE_BIN=/abs/path/to/claude` in `.env`, or put the directory on the `PATH=` line of
+`/etc/cron.d/atlas-kit` — then `scripts/serve.sh restart`.
+
 The button is **bearer-gated** (`POST /api/deploy`), so Caddy has to inject the token —
 `infra/Caddyfile.example` does this for `/api/deploy*`. If your `infra/Caddyfile` predates
 that, copy the block over, or the button will 401.

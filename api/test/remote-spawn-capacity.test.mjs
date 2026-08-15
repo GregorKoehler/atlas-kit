@@ -45,10 +45,15 @@ process.env.AGENT_REMOTE_PHASE_POLL_MS = String(60 * 60 * 1000)
 // VAULTS_FILE at module load).
 process.env.VAULTS_FILE = path.join(tmp('atlas-kit-cap-reg-'), 'no-vaults.json')
 process.env.VAULT_PATH = path.join(os.tmpdir(), 'atlas-kit-cap-no-such-vault')
-// A successful spawn fires generateTitle(), a fire-and-forget `claude -p`. An
-// empty PATH makes it fail with ENOENT immediately instead of holding the test
-// process open on a real model call.
+// A successful spawn fires generateTitle(), a fire-and-forget `claude -p`. Both
+// lines below keep that from becoming a real model call that holds the test
+// process open: an empty PATH, AND an unresolvable CLAUDE_BIN — the resolver
+// (src/claude-bin.mjs) deliberately falls back to ~/.local/bin and
+// /usr/local/bin when PATH misses, so on a box with the CLI installed an empty
+// PATH alone would no longer be hermetic. CLAUDE_BIN is authoritative, so this
+// makes the refusal a fact this test sets rather than one it inherits.
 process.env.PATH = tmp('atlas-kit-cap-nopath-')
+process.env.CLAUDE_BIN = path.join(tmp('atlas-kit-cap-noclaude-'), 'claude')
 
 const { agentRouter, __resetBridgeCacheForTests, remoteCapacity } = await import('../src/agent-routes.mjs')
 

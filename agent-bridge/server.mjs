@@ -112,6 +112,11 @@ const AUDIT_LOG = process.env.BRIDGE_AUDIT_LOG || path.join(HERE, 'audit.log')
 // not, since its 1M variant needs usage credits — see AGENT_EXTENDED_CONTEXT in
 // agent-routes.mjs). A custom AGENT_LAUNCH_CMD without the placeholders simply
 // keeps whatever it hardcodes.
+// ⚠️ `claude` stays a BARE name here on purpose. Unlike the box-local executor
+// (which resolves an absolute path via api/src/claude-bin.mjs), this command runs
+// INSIDE the dev container via `docker exec` — the bridge host's filesystem, and
+// therefore any path it resolved, does not apply. The container's own PATH is the
+// only correct lookup. Set AGENT_LAUNCH_CMD to pin a path inside the container.
 const LAUNCH_CMD =
   process.env.AGENT_LAUNCH_CMD ||
   'IS_SANDBOX=1 claude --model {model} --effort {effort} --dangerously-skip-permissions {task}'

@@ -19,6 +19,7 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { spawn } from 'node:child_process'
+import { requireClaudeBin } from './claude-bin.mjs'
 
 const STATE_DIR = process.env.AGENT_LOCAL_DIR || path.join(os.homedir(), '.atlas-kit')
 const TITLES_FILE = path.join(STATE_DIR, 'titles.json')
@@ -78,7 +79,16 @@ ${String(task).slice(0, 4000)}`
 
 function runClaude(prompt) {
   return new Promise((resolve, reject) => {
-    const child = spawn('claude', ['-p', '--model', MODEL, '--output-format', 'text'], {
+    // The ABSOLUTE binary, never a PATH lookup: this process may have been
+    // started by cron/systemd, whose PATH omits ~/.local/bin (see claude-bin.mjs).
+    // Unresolvable throws here with the reason, instead of a bare ENOENT below.
+    let bin
+    try {
+      bin = requireClaudeBin()
+    } catch (e) {
+      return reject(e)
+    }
+    const child = spawn(bin, ['-p', '--model', MODEL, '--output-format', 'text'], {
       cwd: os.homedir(), // neutral cwd — don't pull in any project's CLAUDE.md
       stdio: ['pipe', 'pipe', 'pipe'],
       // Empty key → claude -p uses subscription auth, never API-key billing.

@@ -72,10 +72,14 @@ fs.writeFileSync(REGISTRY, JSON.stringify({ atlas: { path: ATLAS, label: 'Atlas'
 process.env.VAULTS_FILE = REGISTRY
 
 // A successful spawn fires generateTitle(), a fire-and-forget `claude -p` child.
-// An empty PATH makes it fail with ENOENT immediately (which generateTitle
-// already handles) instead of holding the test process open on a real model
-// call. Everything this file runs itself uses an absolute interpreter path.
+// An empty PATH plus an unresolvable CLAUDE_BIN makes it refuse immediately
+// (which generateTitle already handles) instead of holding the test process open
+// on a real model call. Both are needed: the resolver (src/claude-bin.mjs) falls
+// back to ~/.local/bin and /usr/local/bin when PATH misses, and CLAUDE_BIN is the
+// authoritative override that shuts that door. Everything this file runs itself
+// uses an absolute interpreter path.
 process.env.PATH = tmp('atlas-kit-promptfile-nopath-')
+process.env.CLAUDE_BIN = path.join(tmp('atlas-kit-promptfile-noclaude-'), 'claude')
 
 const { agentRouter, remoteEvidence } = await import('../src/agent-routes.mjs')
 const { atlasEvidence, TMUX_MAX_COMMAND_BYTES } = await import('../src/agent-local.mjs')

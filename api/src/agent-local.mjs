@@ -32,6 +32,7 @@ import {
   collectBackgroundJobs, mergeBackgroundJobLog,
 } from './subagent-scan.mjs'
 import { sharedCheckoutWarning } from './shared-checkout.mjs'
+import { claudeBinInfo, claudeShellWord } from './claude-bin.mjs'
 import { mergedVerdict, mergedInfo, MERGE_LOG_FORMAT } from './merged-check.mjs'
 import { preflightVerdict } from './merge-preflight.mjs'
 import { generateMicros } from './agent-titles.mjs'
@@ -89,15 +90,22 @@ const WORKSPACE = process.env.WORKSPACE_DIR || '/workspace'
 // (ATLAS_SEARCH_PREAMBLE) — tools nobody announces go unused.
 // ⚠️ `--strict-mcp-config` also REPLACES any `.mcp.json` the spawned repo ships.
 const DEV_MCP_CONFIG = `${WORKSPACE}/api/src/mcp/dev.mcp.json`
+// The launch templates spell `claude` as an ABSOLUTE, shell-quoted path resolved
+// once at boot (claude-bin.mjs). `sh -lc` rebuilds PATH from /etc/profile, which
+// does not include ~/.local/bin where a real install put the binary — so an API
+// started by the watchdog cron or by systemd used to spawn every agent into an
+// ENOENT while an interactive `serve.sh restart` worked. A custom
+// AGENT_*_LAUNCH_CMD is left exactly as the operator wrote it.
+const CLAUDE = claudeShellWord()
 export const LAUNCH_CMD =
   process.env.AGENT_LOCAL_LAUNCH_CMD ||
-  `IS_SANDBOX=1 env -u ANTHROPIC_API_KEY claude --model {model} --effort {effort} --mcp-config ${DEV_MCP_CONFIG} --strict-mcp-config --dangerously-skip-permissions {task}`
+  `IS_SANDBOX=1 env -u ANTHROPIC_API_KEY ${CLAUDE} --model {model} --effort {effort} --mcp-config ${DEV_MCP_CONFIG} --strict-mcp-config --dangerously-skip-permissions {task}`
 // Knowledge agents (vault chats) additionally pin `--session-id {sid}`: they all
 // share the vault as cwd, so without a pinned id the transcript reader's
 // newest-file heuristic would cross-read between concurrent chats.
 const KNOWLEDGE_LAUNCH_CMD =
   process.env.AGENT_KNOWLEDGE_LAUNCH_CMD ||
-  'IS_SANDBOX=1 env -u ANTHROPIC_API_KEY claude --model {model} --effort {effort} --session-id {sid} --dangerously-skip-permissions {task}'
+  `IS_SANDBOX=1 env -u ANTHROPIC_API_KEY ${CLAUDE} --model {model} --effort {effort} --session-id {sid} --dangerously-skip-permissions {task}`
 // The Atlas ORCHESTRATOR (the vault:'atlas' chat) is a knowledge agent that can
 // ALSO spawn/monitor/steer other agents. It loads the Atlas Kit MCP server via
 // control.mcp.json, which sets ATLAS_AGENT_CONTROL=1 in the MCP child's env —
@@ -110,7 +118,7 @@ const CONTROL_MCP_CONFIG = `${WORKSPACE}/api/src/mcp/control.mcp.json`
 // stamp every agent it spawns with `parent`, drawing the lineage constellation.
 const ATLAS_CONTROL_LAUNCH_CMD =
   process.env.AGENT_ATLAS_LAUNCH_CMD ||
-  `IS_SANDBOX=1 ATLAS_SESSION={atlasSession} env -u ANTHROPIC_API_KEY claude --model {model} --effort {effort} --session-id {sid} --mcp-config ${CONTROL_MCP_CONFIG} --strict-mcp-config --dangerously-skip-permissions {task}`
+  `IS_SANDBOX=1 ATLAS_SESSION={atlasSession} env -u ANTHROPIC_API_KEY ${CLAUDE} --model {model} --effort {effort} --session-id {sid} --mcp-config ${CONTROL_MCP_CONFIG} --strict-mcp-config --dangerously-skip-permissions {task}`
 // The PAIRED ATLAS WORKER is a restricted, dashboard-driven session — the same
 // knowledge-only READ profile a dev agent gets (worker.mcp.json), and never the
 // orchestrator's control tools. It writes the Atlas through its own worktree, not
@@ -118,7 +126,7 @@ const ATLAS_CONTROL_LAUNCH_CMD =
 const WORKER_MCP_CONFIG = `${WORKSPACE}/api/src/mcp/worker.mcp.json`
 const ATLAS_WORKER_LAUNCH_CMD =
   process.env.AGENT_ATLAS_WORKER_LAUNCH_CMD ||
-  `IS_SANDBOX=1 env -u ANTHROPIC_API_KEY claude --model {model} --effort {effort} --session-id {sid} --mcp-config ${WORKER_MCP_CONFIG} --strict-mcp-config --dangerously-skip-permissions {task}`
+  `IS_SANDBOX=1 env -u ANTHROPIC_API_KEY ${CLAUDE} --model {model} --effort {effort} --session-id {sid} --mcp-config ${WORKER_MCP_CONFIG} --strict-mcp-config --dangerously-skip-permissions {task}`
 // Extended (1M) context is the DEFAULT and applies to EVERY model — the
 // subscription serves the 1M window without usage credits — so the fallback model
 // + the meter's window default to it. AGENT_EXTENDED_CONTEXT=0 (or false/no/off)
@@ -242,7 +250,7 @@ const REVIVE_STAGGER_MS = Number(process.env.AGENT_LOCAL_REVIVE_STAGGER_MS || RE
 // (the task/preamble is already in the transcript), so none is re-supplied.
 export const RESUME_CMD =
   process.env.AGENT_LOCAL_RESUME_CMD ||
-  `IS_SANDBOX=1 env -u ANTHROPIC_API_KEY claude --model {model} --effort {effort} --mcp-config ${DEV_MCP_CONFIG} --strict-mcp-config --dangerously-skip-permissions --resume {sid}`
+  `IS_SANDBOX=1 env -u ANTHROPIC_API_KEY ${CLAUDE} --model {model} --effort {effort} --mcp-config ${DEV_MCP_CONFIG} --strict-mcp-config --dangerously-skip-permissions --resume {sid}`
 // Resume launch for the Atlas ORCHESTRATOR (the vault:'atlas' chat): like RESUME_CMD
 // but re-attaches the agent-control MCP config + ATLAS_SESSION, so a revived
 // orchestrator gets its spawn/prompt/kill tools back — a plain resume would bring the
@@ -250,7 +258,7 @@ export const RESUME_CMD =
 // `--session-id {sid} {task}` (the conversation is already in the transcript).
 const ATLAS_CONTROL_RESUME_CMD =
   process.env.AGENT_ATLAS_RESUME_CMD ||
-  `IS_SANDBOX=1 ATLAS_SESSION={atlasSession} env -u ANTHROPIC_API_KEY claude --model {model} --effort {effort} --mcp-config ${CONTROL_MCP_CONFIG} --strict-mcp-config --dangerously-skip-permissions --resume {sid}`
+  `IS_SANDBOX=1 ATLAS_SESSION={atlasSession} env -u ANTHROPIC_API_KEY ${CLAUDE} --model {model} --effort {effort} --mcp-config ${CONTROL_MCP_CONFIG} --strict-mcp-config --dangerously-skip-permissions --resume {sid}`
 // Serial ship train backstop: a member that goes busy and never prints
 // ATLAS:SHIPPED is detected as stopped the moment it returns to idle (see
 // pumpShipTrain); this only bounds a member that stays wedged-busy forever, so
@@ -1834,6 +1842,8 @@ async function reconcileOrphans() {
 async function launchResume(s) {
   const sid = resumeId(s)
   if (!sid) return { ok: false, stderr: 'no resumable Claude session found' }
+  const noClaude = claudeUnavailable()
+  if (noClaude) return { ok: false, stderr: noClaude.error }
   // The Atlas orchestrator (vault:'atlas' chat) must resume WITH its agent-control
   // MCP config or it loses its spawn/prompt/kill steering tools; all else resumes plain.
   const tmpl = s.vault === 'atlas' ? ATLAS_CONTROL_RESUME_CMD : RESUME_CMD
@@ -1965,6 +1975,14 @@ function msgEnv(s) {
   if (!s.msgToken) return ''
   return `ATLAS_AGENT_ID=${shquote(s.id)} ATLAS_AGENT_TOKEN=${shquote(s.msgToken)} ATLAS_API=${shquote(MSG_API)} PATH=${shquote(MSG_BIN_DIR)}:$PATH `
 }
+/* No usable `claude` ⇒ refuse the launch WITH the reason, rather than opening a
+ * tmux session that dies on ENOENT and reads as "the agent just never started".
+ * Cheap (the resolution is memoized) and returns the routes' error shape. */
+function claudeUnavailable() {
+  const info = claudeBinInfo()
+  return info.ok ? null : { status: 503, ok: false, error: `claude CLI unavailable: ${info.error}` }
+}
+
 // Resolve a scoped message token to its session. Linear over the live registry
 // (a handful of sessions) and only ever matches a session that still exists —
 // which IS the revocation mechanism.
@@ -1981,6 +1999,8 @@ export async function spawn({ task, repo, preamble, model, effort, context, imag
   const repos = loadRepos()
   const target = repos[repo]
   if (!target) return { status: 400, ok: false, error: `unknown box repo "${repo}"` }
+  const noClaude = claudeUnavailable()
+  if (noClaude) return noClaude
   const capErr = await atCapacity()
   if (capErr) return capErr
 
@@ -2122,6 +2142,8 @@ export async function spawnKnowledge({ question, preamble, model, effort, vault,
   // chat is unchanged; the Atlas tab passes vault:'atlas' to chat over the Atlas.
   const vlt = resolveVault(vault)
   if (!vlt) return { status: vault ? 404 : 503, ok: false, error: vault ? `unknown vault "${vault}"` : 'no vault configured' }
+  const noClaude = claudeUnavailable()
+  if (noClaude) return noClaude
   const capErr = await atCapacity()
   if (capErr) return capErr
 
@@ -2298,6 +2320,8 @@ export async function spawnAtlasWorker({ task, preamble, firstTurn }) {
   if (!localRepoKeys().length) return { status: 503, ok: false, error: 'box-local executor disabled' }
   const atlas = resolveVault('atlas')
   if (!atlas) return { status: 503, ok: false, error: 'atlas vault not configured' }
+  const noClaude = claudeUnavailable()
+  if (noClaude) return noClaude
 
   const slug = slugify(task)
   if (!slug) return { status: 400, ok: false, error: 'task has no usable slug' }

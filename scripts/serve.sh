@@ -22,6 +22,17 @@ set -uo pipefail
 # github.com" prompt. Default HOME so git auth works in the spawned workers.
 export HOME="${HOME:-/root}"
 
+# …and the same launches inherit cron's/systemd's bare PATH, which omits
+# $HOME/.local/bin — where `npm i -g @anthropic-ai/claude-code` can put `claude`.
+# The tmux SERVER started here hands its env to every pane, so without this an API
+# brought up by the watchdog cron spawns agents that ENOENT while an interactive
+# `serve.sh restart` works. The API also resolves an absolute `claude` itself
+# (api/src/claude-bin.mjs); this is the belt to that pair of braces.
+case ":$PATH:" in
+  *":$HOME/.local/bin:"*) ;;
+  *) export PATH="$HOME/.local/bin:$PATH" ;;
+esac
+
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SESSION=api
 KEEPALIVE=_keepalive          # holder window — keeps the session (and tmux server) alive

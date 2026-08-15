@@ -25,6 +25,7 @@
  * ------------------------------------------------------------------ */
 import { spawn } from 'node:child_process'
 import { model, effort, timeouts } from './config.mjs'
+import { requireClaudeBin } from '../../../api/src/claude-bin.mjs'
 
 const MIN_BODY_CHARS = 40
 
@@ -113,7 +114,7 @@ function runClaude(prompt) {
   return new Promise((resolve, reject) => {
     let child
     try {
-      child = spawn('claude', args, {
+      child = spawn(requireClaudeBin(), args, {
         stdio: ['pipe', 'pipe', 'pipe'],
         env: { ...process.env, ANTHROPIC_API_KEY: '' }, // subscription auth, never API-key billing
       })
