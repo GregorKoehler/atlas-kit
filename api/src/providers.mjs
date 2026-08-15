@@ -21,8 +21,13 @@
  * 🔴 VALUES ARE SECRETS. `listProviders()` — what `GET /api/providers` and the
  * spawn dropdown are built on — returns names and labels ONLY. A profile's `env`
  * leaves this module through `resolveProvider()` alone, and its one consumer
- * puts it in the agent's tmux session environment (`tmux new-session -e`), never
- * on a command line, in a response, in a log or in the audit journal.
+ * (`providerEnvPrefix()` in agent-local.mjs) writes it to a 0600 file the agent's
+ * own shell sources and deletes before `claude` starts — never on a command line,
+ * in a response, in a log or in the audit journal. Passing it as
+ * `tmux new-session -e NAME=value` was the obvious implementation and is
+ * deliberately NOT what happens: that is an argv, `ps` shows an argv to every
+ * user on the box, and the tmux SERVER a first spawn starts keeps that argv for
+ * its whole life.
  *
  * CONFIG, two ways (mirroring vaults.json / bridges.json):
  *   api/src/providers.json          gitignored, operator-local, holds the keys
@@ -42,10 +47,12 @@ const REGISTRY_FILE = process.env.ATLAS_PROVIDERS_FILE || path.join(HERE, 'provi
  * audit log and a session record, so it is validated rather than trusted:
  * lowercase, digits and dashes — the same shape an addon name has. */
 const NAME_RE = /^[a-z0-9][a-z0-9-]*$/
-/* An env NAME the shell and tmux will both accept. A value that is not a string,
- * or that carries a newline or a NUL, is rejected: those cannot survive
- * `tmux new-session -e NAME=value` intact, and silently truncating an API key
- * would fail as a confusing auth error much later. */
+/* An env NAME a shell will accept. A value that is not a string, or that carries
+ * a newline or a NUL, is rejected: a NUL cannot go in an environment variable at
+ * all, and a newline in a credential is a mis-pasted key every time — caught
+ * here, at config time, rather than as a confusing auth error at the agent's
+ * first turn. (The value itself is shell-quoted on the way out, so this is a
+ * sanity check on the operator's file, not an escaping requirement.) */
 const ENV_NAME_RE = /^[A-Za-z_][A-Za-z0-9_]*$/
 
 function readFileJson() {

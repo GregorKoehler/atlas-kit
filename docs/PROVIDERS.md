@@ -61,8 +61,9 @@ variables. That is deliberately the same open-world shape addons have.
 
 A malformed profile is **dropped, not fatal**: a name that is not
 `[a-z0-9][a-z0-9-]*`, an env name that is not a shell identifier, a value that
-is not a string or that contains a newline (it could not survive `tmux -e`
-intact, and a truncated API key fails as a confusing auth error much later).
+is not a string or that contains a newline or a NUL (a newline in a credential is
+a mis-pasted key every time — better caught here than as a confusing auth error
+at the agent's first turn).
 
 ## The two profiles that ship
 

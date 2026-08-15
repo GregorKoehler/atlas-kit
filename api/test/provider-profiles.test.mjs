@@ -66,7 +66,7 @@ fs.writeFileSync(
     'quoting-torture': { label: 'Everything the shell would otherwise eat', env: { WEIRD: 'it\'s $HOME `and` "more"' } },
     'Bad Name': { label: 'invalid name', env: { A: 'b' } },
     'bad-env-name': { label: 'invalid env key', env: { 'not a var': 'b' } },
-    'bad-env-value': { label: 'a value that cannot survive tmux -e', env: { A: 'line\nbreak' } },
+    'bad-env-value': { label: 'a newline in a credential is a mis-paste', env: { A: 'line\nbreak' } },
     'no-env': { label: 'no env block at all' },
   }),
 )
@@ -105,7 +105,7 @@ test('only well-formed profiles load — a malformed one is dropped, never throw
   // Each rejected entry, and why it must be rejected rather than half-applied.
   assert.equal(resolveProvider('Bad Name'), null) // reaches a path/audit line
   assert.equal(resolveProvider('bad-env-name'), null) // not a shell/tmux env name
-  assert.equal(resolveProvider('bad-env-value'), null) // `tmux -e` cannot carry a newline
+  assert.equal(resolveProvider('bad-env-value'), null) // a newline in a credential is a mis-paste
   assert.equal(resolveProvider('no-env'), null) // nothing to inject
   assert.equal(resolveProvider('_comment'), null) // the example files' comment key
   assert.equal(resolveProvider(undefined), null)
