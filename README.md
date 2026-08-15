@@ -70,13 +70,24 @@ commit → push, with lock-race + non-fast-forward retries), so concurrent write
 race the one checkout. A daily cron **archives** completed tasks off the board (kept in
 git history, never deleted).
 
+Agents don't file onto that board directly. Work an agent *notices* while doing something
+else goes to a **Task Prospects** inbox instead — stored outside the vault, so a rejected
+proposal never touches it — and only becomes a real `Tasks/` note when you approve it, over
+that same commit queue. Propose, don't file (`docs/PROTOCOLS.md` §8).
+
 ### 4. Knowledge agents
 Chat-over-the-vault agents that answer grounded in the KB (with citations), can kick
 off research, and — as the **orchestrator** — can spawn and steer the dev agents. This
 is the Atlas-agent pattern, including its **MCP control surface**: `list_agents`,
 `agent_transcript`, `spawn_agent`, `prompt_agent`, `queue_agent`, `interrupt_agent`,
-`kill_agent`, `cleanup_agent`, plus `query_vault` (fuzzy full-text) and `query_atlas`
-(exact relational/temporal queries over the typed layer).
+`kill_agent`, `cleanup_agent`, plus `query_vault` (fuzzy full-text), `query_atlas`
+(exact relational/temporal queries over the typed layer) and `propose_task`.
+
+Agents can also talk to **each other**: `agent-msg <id> "<text>"` is async peer mail,
+bounded by the spawn lineage (parent / child / sibling) and a per-pair send budget, landing
+at the recipient's next tool-call boundary. Agents on a remote bridge get the same command,
+plus `atlas-query` for read-only vault queries relayed over the existing bridge channel —
+no new network exposure (`docs/PROTOCOLS.md` §7).
 
 ### 5. Git workflow
 One **`git worktree` per dev agent**, a **branch per agent**, and a strict
@@ -126,9 +137,14 @@ api/          Express API + the agent runtime + the MCP server
   src/atlas-commit-queue.mjs   the serial vault commit queue (pillar 3 + 5)
   src/atlas-query.mjs     the typed relational/temporal query engine (query_atlas)
   src/read-routes.mjs     open GET reads: notes, wiki, search, tasks, projects
-  src/atlas-routes.mjs    Kanban task writes (bearer-gated, via the commit queue)
+  src/atlas-routes.mjs    Kanban task writes + the Task Prospects inbox (bearer-gated)
+  src/atlas-prospects.mjs agent-PROPOSED tasks awaiting sign-off (server-side, never the vault)
   src/mcp/                the MCP server (query_vault/query_atlas + agent control)
   src/bridges.mjs         repo → remote-bridge routing
+  src/bridge-roster.mjs   each bridge's last-known roster, so "we could not ask" ≠ "there is nothing there"
+  src/agent-capacity.mjs  ONE spawn-admission rule, shared by the box, the API and each bridge
+  src/agent-messages.mjs  the agent↔agent mail bus log (+ its per-pair send budget)
+  src/atlas-query-relay.mjs  read-only Atlas queries for REMOTE agents, over the bridge channel
 agent-bridge/ Host-native bridge to drive agents in remote dev containers (Tailscale)
 scripts/      serve.sh (tmux service manager), refresh-atlas, clear-done, provisioning
 infra/        Caddyfile.example, cloudflared-config.example.yml, atlas-kit.cron

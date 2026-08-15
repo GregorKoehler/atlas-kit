@@ -299,3 +299,149 @@ transient lock collisions (`LOCK_RE`, line 62) and non-fast-forward pushes
 dirty tree — and the live checkout *is* dirty whenever a concurrent capture/research
 ingest is mid-edit. Merging there is what used to strand paired-worker branches "for
 manual resolution" (see the comment at lines 152–159).
+
+---
+
+## 6. Bridge resilience — reachable, stale, and how many slots are left
+
+A **bridge** (`agent-bridge/server.mjs`) is a copy of this repo running host-native on
+another machine; the box drives its dev containers over HTTP. Everything below exists
+because a bridge box is normally *not* a dedicated agent host — it may also be running
+your production stack, a CI runner and per-PR preview containers — so it is exactly the
+machine that gets saturated, and a saturated machine cannot answer.
+
+**Unreachable is NOT empty.** `bridge-roster.mjs` remembers the last roster each bridge
+successfully answered with, and persists it (the API restarts far more often than an
+outage lasts). `GET /api/agents` then carries, per bridge:
+
+| field | meaning |
+| --- | --- |
+| `reachable` | did it answer this poll (after hysteresis)? |
+| `stale` | present only while `reachable` is being held true off a *cached* poll |
+| `lastSeen` | ISO time it last really answered — present only while unreachable |
+| `staleSessions` | the roster it last answered with — present only while unreachable |
+| `capacity` | how much room that box has for another agent (below) |
+
+`staleSessions` is **never merged into `sessions`** and never counted as live. That
+separation is the whole point: a silent bridge's agents are almost always still running,
+and drawing "nothing" for them reads as "my agents were killed". `lastKnownRoster()`
+returns `{at, sessions: []}` for *answered with zero* and `null` for *never heard from* —
+collapsing those two is the bug this module exists to prevent.
+
+**Hysteresis.** `resolveBridgePoll()` (`agent-routes.mjs`) serves the last-known-good
+sessions, marked `stale`, through up to `AGENT_BRIDGE_STALE_FAILURES` consecutive failed
+polls *and* at most `AGENT_BRIDGE_STALE_MAX_MS` since the last success — whichever comes
+first. Past either bound it flips to `reachable:false, sessions:[]`, the old
+unconditional-drop behaviour, just delayed past a single blip. ⚠️ Phase tracking
+(`trackRemotePhases`) is fed the **raw fresh** sessions, never a stale replay: a poll that
+only *looks* reachable via hysteresis must not accrue run time for agents nobody re-observed.
+
+**Reap grace.** A remote shadow that vanishes from one poll is not closed. It must stay
+absent for `AGENT_REMOTE_REAP_GRACE_MS`, and it is then closed **at its last observation**,
+not at `now` — the grace window is the box's uncertainty about the bridge, never the
+agent's working time. Paired with `agent-timings.mjs`'s spawn-anchor window
+(`AGENT_PHASE_ANCHOR_MAX_AGE_MS`) and run clamp (`AGENT_RUN_MAX_MS`), this is what stops a
+recreate/reap cycle re-billing a session from its spawn on every poll.
+
+**Capacity — one rule, three gates.** `agent-capacity.mjs` holds the arithmetic, and all
+three callers import it rather than re-deriving it:
+
+1. `agent-local.mjs` — the box-local spawn/revive paths (unchanged behaviour, no swap charge)
+2. `agent-routes.mjs` — the remote spawn path, on what the bridge reports on `/health`
+3. `agent-bridge/server.mjs` — the bridge refusing on its own box, before it creates anything
+
+It reads `MemAvailable` (never `MemFree`: a busy box is full of reclaimable cache) and, on
+a bridge, **charges swap-in-use against availability** — an idle agent's anonymous pages are
+cold, but the moment it takes a turn they must fault back in. Every refusal carries the
+numbers that produced it. `capacity.slots` is how many more agents that box will admit
+right now, surfaced through `list_agents` so an orchestrator reads the limit *before* it
+hits one. ⚠️ The remote gate **fails open** on a bridge that reports no capacity — bridge
+code only reaches a machine when that machine is redeployed, so failing closed would be a
+fleet-wide spawn outage — but never silently: the console says so and the audit line carries
+`capacity: 'unreported'`.
+
+**Redeploy.** `POST /api/agents/bridge-redeploy {label?}` proxies to that bridge's own
+`POST /redeploy`, which runs `scripts/restart-agent-bridge.sh` — the same script an operator
+runs by hand — inside a transient `systemd-run` unit. That escape is load-bearing: a plain
+detached child stays in the bridge's own cgroup, and the script's `systemctl restart` would
+SIGTERM it mid-flight. An unknown label is a 404 naming the configured labels and **never** a
+silent fall back to the default — redeploying the wrong machine is the one dangerous failure
+this surface has. `GET /api/agents/bridge-status?label=` reports reachability, running SHA,
+commits behind, and the redeploy phase.
+
+**Keep-alive.** The bridge holds an idle socket for `BRIDGE_KEEPALIVE_TIMEOUT_MS` (60 s, vs
+Node's 5 s default), because the box's Atlas retrieval runs in-process for tens of seconds
+*immediately before* it POSTs `/spawn` on a pooled socket. ⚠️ `headersTimeout` must stay
+above `keepAliveTimeout` or the race comes straight back.
+
+---
+
+## 7. The agent↔agent message bus
+
+`agent-msg <agent-id> "<text>"` is on every dev agent's PATH. It is **async mail, not RPC**:
+the message is queued to the recipient and the sender continues; a reply is just another
+message in the other direction.
+
+- **Auth** is a per-session scoped token (`msgToken`), injected into the agent's launch env
+  by its executor. Deliberately *not* `DASHBOARD_BEARER_TOKEN` — an agent holding that could
+  spawn and kill the whole fleet. The token is only valid while the session is in the
+  registry, so killing an agent revokes it.
+- **Lineage** bounds who may write to whom: parent, child, or a sibling under the same
+  parent (`messageAllowed()`, from the persisted `spawnParent` map). `SYSTEM_SENDER`
+  (`system:fleet`) is exempt by identity, and that identity is unforgeable — a session id is
+  a strict `[a-z0-9-]` slug that can never contain the `:`.
+- **Budget**: a rolling per-ordered-pair cap (`AGENT_MESSAGE_PAIR_MAX` per window).
+  Exhaustion is a 429 the *sending agent reads*, never a silent drop.
+- **Delivery** reuses `queuePrompt`, so the message becomes a real user turn, tagged
+  `kind:'agent-msg'` — a boundary kind (see §1a), so it lands at the recipient's next
+  tool-call boundary rather than waiting out a long turn.
+- **The log** (`agent-messages.jsonl`) is the JOIN the transcripts lack: a delivered message
+  is indistinguishable from any other user turn once it is in the recipient's transcript,
+  with no from/to on it. Rejections are logged too, with a reason — a bounced message is
+  exactly the thing that must not vanish. `GET /api/agents/messages` reads it back.
+  ⚠️ `delivered: true` means *handed off*, not *read*.
+
+**The remote half.** The box's API is loopback-bound, so a container agent posts to its own
+bridge instead. The bridge parks the attempt, the box drains `POST /outbox` on the remote
+poll it already runs, decides it with the **same** `deliverAgentMessage()`, and posts the
+verdict back — so the sending agent gets a real 403/429/200. The bridge decides nothing
+except *who sent it*, resolved from the session token; the box independently re-checks that
+the id is a live session **on that bridge**. A bridge with no `/outbox` 404s once and is then
+backed off — its agents were spawned without a token anyway.
+
+**Remote Atlas queries ride the same channel.** A box-local dev agent gets the seven vault
+read tools as MCP tools; a container agent behind a bridge cannot, so it runs `atlas-query
+<tool> '<json>'`, which is parked and drained identically. `atlas-query-relay.mjs` executes
+it in-process through `buildServer({knowledgeOnly:true})` over an in-memory MCP transport —
+so the reachable surface is the knowledge-only profile *by construction*, the zod schemas
+validate the remote agent's arguments at the trust boundary, and no second dispatch table can
+drift. Bounded three ways (tool allowlist, per-session query budget, hard result cap) and
+logged to `atlas-queries.jsonl`: this is the one path by which vault content leaves the box.
+No new listening socket — the box→bridge direction was never blocked.
+
+---
+
+## 8. Task prospects — propose, don't file
+
+Agents notice follow-up work while doing something else. Left to file it themselves they
+inflate the board with work nobody chose, so both the dev preamble and the knowledge
+preamble tell them to **propose** instead: `POST /api/prospects/new` (bearer-gated), or the
+`propose_task` MCP tool.
+
+`atlas-prospects.mjs` stores proposals **outside the vault**, in a server-side `.state` file —
+the same discipline as `atlas-type-flags.mjs`. That is what guarantees a rejected prospect
+never touches the vault, not even transiently.
+
+- `POST /api/prospects/approve {id, edits?}` writes the real task through `createTask()` —
+  the *exact* `/api/tasks/new` path, so an approved prospect gets normal frontmatter, typed
+  edges and `source:` provenance, and there is only ever one task-writing path. It is retired
+  from the queue only after the commit actually lands.
+- `POST /api/prospects/reject {id}` discards it.
+- Both stamp a **sticky decision** keyed on the producer's `sourceKey`, so an agent that
+  re-notices the same thing on a later run cannot re-propose something already dismissed.
+- `GET /api/prospects` is the open read the review card polls.
+
+`propose_task` is registered under its own `ATLAS_MCP_PROPOSE` flag rather than joining
+`KNOWLEDGE_TOOLS`, because `knowledgeOnly` is the same flag the remote HTTP connector runs
+under — and a connector has no business proposing work into the operator's inbox. The dev and
+worker MCP configs set it; `mcp/http.mjs` passes `propose: false` outright.
