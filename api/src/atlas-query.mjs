@@ -18,6 +18,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import yaml from 'js-yaml'
 import { currentVaultPath } from './vaults.mjs'
+import { parseQuery, matchesAll, createScorer, snippet } from './vault-search.mjs'
 
 // Fixed-core typed-edge keys (the Legend's ★ edges) — treated as edges even when
 // the value is an informal bare string (`area: Health`) rather than a [[link]].
@@ -162,7 +163,7 @@ function buildIndex(root) {
       }
       page.props[k] = typeof v === 'object' && v !== null ? JSON.stringify(v) : v
     }
-    page._text = (page.title + ' ' + stripFrontmatter(md)).toLowerCase()
+    page._body = stripFrontmatter(md)
     pages.push(page)
   }
   return pages
@@ -228,12 +229,28 @@ function edgeMatches(page, key, target) {
   const t = lc(target)
   return targets.some((x) => baseOf(x).includes(t) || lc(x).includes(t))
 }
-function snippetFor(text, q) {
-  const i = text.indexOf(q)
-  if (i === -1) return ''
-  const start = Math.max(0, i - 40)
-  const end = Math.min(text.length, i + q.length + 60)
-  return (start > 0 ? '…' : '') + text.slice(start, end).replace(/\s+/g, ' ').trim() + (end < text.length ? '…' : '')
+// What the hybrid `text` leg matches against: the page's own words plus the two
+// fields that are evidence ABOUT it. The same three fields query_vault ranks
+// over, so a term that finds a page there finds it here too — a `for_project`
+// task whose slug carries the project name but whose prose doesn't is the
+// everyday case.
+const textOf = (p) => p.title + '\n' + p.path + '\n' + p._body
+
+/* Ranking belongs in this engine in exactly ONE place. The promise is complete,
+ * exact answers with no ranking (Guide §7) — but when a hybrid `text` query
+ * matches more rows than the window returns, something has to be dropped, and
+ * dropping the least relevant beats dropping whichever page sorted last by date.
+ * Reuses the BM25F scorer rather than a second notion of relevance.
+ *
+ * A page the scorer declines to score still MATCHED the filter, so it keeps its
+ * existing position at the tail — never dropped out of the answer by ranking. */
+function rankByText(pages, text) {
+  const scorer = createScorer(text)
+  for (const p of pages) {
+    scorer.add({ id: p.path, title: p.title, path: p.path, body: p._body, isWiki: p.path.startsWith('Wiki' + path.sep) })
+  }
+  const rank = new Map(scorer.rank().map((d, i) => [d.id, i]))
+  return pages.sort((a, b) => (rank.get(a.path) ?? Infinity) - (rank.get(b.path) ?? Infinity))
 }
 
 function defaultSort(spec) {
@@ -265,7 +282,7 @@ function sortPages(pages, sortSpec) {
   })
 }
 
-function toRow(p, spec) {
+function toRow(p, spec, clauses) {
   const row = { path: p.path, title: p.title, type: p.type }
   if (p.tags.length) row.tags = p.tags
   if (p.props.status != null) row.status = p.props.status
@@ -273,9 +290,27 @@ function toRow(p, spec) {
   if (Object.keys(p.dates).length) row.dates = p.dates
   if (Object.keys(p.edges).length) row.edges = p.edges
   if (p._daysOverdue != null) row.daysOverdue = p._daysOverdue
-  if (spec.text) row.snippet = snippetFor(p._text, lc(spec.text))
+  if (clauses.length) row.snippet = snippet(p._body, clauses)
   return row
 }
+
+/* Completeness. A row is ~440 B of purely structured typed data (path, title,
+ * type, status, priority, dates, edges) with NO prose excerpt beyond the
+ * snippet, so there is nothing in it to trim. Measured on a live ~1450-page
+ * vault: `type=task status=next` matches 54 pages and is 24.0 KB complete, so
+ * the old default of 50 dropped 4 rows to save 5% of the payload — while any
+ * caller that passed a SMALL limit lost 90% of its answer to the same
+ * mechanism. An engine sold as "complete and exact" must therefore return
+ * complete by default and keep truncation as the LOUD exception: `count` is
+ * always the full match count and `truncated` says the window bit.
+ *
+ * 500 covers every realistic typed query; 1000 is the ceiling — where a
+ * response stops being an answer and becomes a dump. Agent-facing callers are
+ * bounded again downstream and much tighter (the MCP tool caps the ANSWER at
+ * 20,000 chars and says what it dropped), which is the right place for a
+ * context budget — it is a property of that transport, not of the query. */
+const DEFAULT_LIMIT = 500
+const MAX_LIMIT = 1000
 
 /**
  * Run a typed query against a vault. Spec (all optional, AND-combined):
@@ -286,9 +321,10 @@ function toRow(p, spec) {
  *   due|created|updated|done|started|last_contact: { before?, after?, on?, window? }
  *                                   window ∈ overdue|today|next_7d|this_week|this_month|past_7d
  *   past_cadence: true            — person/contacts where last_contact+cadence_days < today
- *   text: string                  — full-text filter within the typed-filtered set (hybrid)
+ *   text: string                  — full-text filter within the typed-filtered set (hybrid).
+ *                                   ALL terms must be present, in any order; "…" = exact phrase
  *   sort: 'due'|'last_contact'|'updated'|'title'|… ('-' prefix = desc)
- *   limit: number (default 50, max 200)
+ *   limit: number (default 500, max 1000)
  * Returns { generated, count, truncated, pages: [row…] } with the matched fields surfaced.
  */
 export function queryAtlas(spec = {}, root = currentVaultPath()) {
@@ -300,6 +336,16 @@ export function queryAtlas(spec = {}, root = currentVaultPath()) {
   const priorities = toArr(spec.priority).map(lc)
   const sources = toArr(spec.source).map(lc)
   const edges = toArr(spec.edges)
+  // The hybrid `text` leg. It used to be `p._text.includes(lc(spec.text))` — a
+  // raw contiguous substring, so `3d scene` and `scene 3d` answered the same
+  // question differently and every compound-language query missed. It is now the
+  // SAME clause model as query_vault (vault-search.mjs), combined with AND:
+  // `text` here is a filter INSIDE a filter, and an engine whose promise is a
+  // complete, exact set may not quietly return pages that carry only some of the
+  // words. Order-free AND strictly WIDENS the old behaviour (contiguous ⇒
+  // all-present), so no caller loses a row it used to get; quoted "…" still
+  // means the exact contiguous phrase, spelled the same way as in query_vault.
+  const clauses = spec.text ? parseQuery(spec.text) : []
 
   let result = pages.filter((p) => {
     if (types.length && !types.includes(lc(p.type))) return false
@@ -327,17 +373,20 @@ export function queryAtlas(spec = {}, root = currentVaultPath()) {
       if (dueBy >= today) return false // not yet due
       p._daysOverdue = Math.round((Date.parse(today) - Date.parse(dueBy)) / 86400000)
     }
-    if (spec.text && !p._text.includes(lc(spec.text))) return false
+    // Last, so the tokenising half only ever runs on rows the typed filters kept.
+    if (!matchesAll(clauses, textOf(p))) return false
     return true
   })
 
+  const limit = Math.min(Math.max(1, Number(spec.limit) || DEFAULT_LIMIT), MAX_LIMIT)
   result = sortPages(result, spec.sort || defaultSort(spec))
-  const limit = Math.min(Math.max(1, Number(spec.limit) || 50), 200)
-  const truncated = result.length > limit
+  // Relevance ordering ONLY where the window forces a choice — and never over an
+  // explicit `sort`, which is the caller saying what the order means to them.
+  if (clauses.length && !spec.sort && result.length > limit) result = rankByText(result, spec.text)
   return {
     generated: new Date().toISOString(),
     count: result.length,
-    truncated,
-    pages: result.slice(0, limit).map((p) => toRow(p, spec)),
+    truncated: result.length > limit,
+    pages: result.slice(0, limit).map((p) => toRow(p, spec, clauses)),
   }
 }

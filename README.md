@@ -49,11 +49,18 @@ Extracted from the Gravis agent runtime — simplified but functional. See
 [docs/PROTOCOLS.md](docs/PROTOCOLS.md) for exactly what each of these does and where.
 
 ### 2. Knowledge-base coupling
-The workflow where dev agents (a) **search the vault first** before starting work,
+The workflow where dev agents (a) **start with what the vault already knows**,
 (b) work, and (c) on close **commit their insights back** into the Atlas — a project
-page update, a `Wiki/log.md` entry, a filed `Tasks/` item. A paired knowledge worker
-briefs the dev agent from the vault at spawn and ingests its recap the typed way at
-cleanup. All the prompt scaffolding for this ships here, generalized to *your* vault.
+page update, a `Wiki/log.md` entry, a filed `Tasks/` item.
+
+The first half is **retrieval, not a briefing turn**: the server searches the Atlas
+itself at spawn — full-text (BM25-ranked, excerpted) plus the typed layer (the repo's
+project page, its open `Tasks/`, its recent hazards) — and folds the result straight
+into the agent's opening prompt, framed as a candidate set rather than as orders. Atlas
+chats open with the same block. Box-local dev agents also hold the seven **read-only**
+vault tools (`query_atlas`, `query_vault`, `get_note`, …) to go deeper; writing back is
+the paired knowledge worker's job at cleanup. All the prompt scaffolding for this ships
+here, generalized to *your* vault — see [docs/PROTOCOLS.md](docs/PROTOCOLS.md) §4.
 
 ### 3. Kanban coupled to the KB
 A drag-and-drop **Kanban** over the vault's `Tasks/` (`type: task`, status
