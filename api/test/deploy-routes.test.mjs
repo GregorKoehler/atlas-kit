@@ -30,6 +30,8 @@ const {
   repoPathProblem,
   isInFlight,
   readDeployState,
+  claimDeploying,
+  recordLaunchFailure,
   deploySlug,
   buildDeploySystemdRunArgs,
   isUnitCollisionError,
@@ -98,6 +100,18 @@ test('single-flight: a fresh `deploying` blocks, a stale one does not', () => {
   // No/garbage timestamp: assume it IS live and refuse — starting a second
   // build+restart on top of a running one is the worse failure.
   assert.equal(isInFlight({ phase: 'deploying', step: 'build' }, now), true)
+})
+
+test('the slot is claimed BEFORE launching, and released when the launch fails', () => {
+  // Without the pre-claim, two POSTs a moment apart both read "not running"
+  // (the script writes its own state only once it is up) and both launch.
+  claimDeploying('Claimed')
+  assert.equal(isInFlight(readDeployState('Claimed')), true, 'the next POST refuses')
+  recordLaunchFailure('Claimed', 'systemd-run exploded')
+  const after = readDeployState('Claimed')
+  assert.equal(isInFlight(after), false, 'a failed launch must not hold the slot')
+  assert.equal(after.phase, 'error')
+  assert.equal(after.reason, 'systemd-run exploded', 'and the card says why')
 })
 
 test('state file: missing or garbage reads as null, valid JSON round-trips', () => {

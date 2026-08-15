@@ -117,6 +117,29 @@ export function readDeployState(name) {
   }
 }
 
+function writeDeployState(name, state) {
+  try {
+    fs.mkdirSync(STATE_DIR, { recursive: true })
+    fs.writeFileSync(stateFile(name), JSON.stringify(state) + '\n')
+  } catch (e) {
+    console.error(`deploy: could not write the state file for ${name}: ${e?.message || e}`)
+  }
+}
+
+/** Claim the single-flight slot BEFORE launching. The script writes its own
+ *  `deploying` line too, but only once it is actually running — without this
+ *  claim two POSTs a moment apart both read "not running" and both launch (the
+ *  systemd unit-name collision catches that; the detached fallback would not). */
+export function claimDeploying(name, now = new Date()) {
+  writeDeployState(name, { phase: 'deploying', step: 'start', reason: 'starting', targetSha: '', at: now.toISOString() })
+}
+
+/** Release it again when the launch itself failed — otherwise the claim above
+ *  would read as a live deploy until it goes stale, blocking every retry. */
+export function recordLaunchFailure(name, reason, now = new Date()) {
+  writeDeployState(name, { phase: 'error', step: 'launch', reason, targetSha: '', at: now.toISOString() })
+}
+
 /** Is a deploy still running? `deploying` newer than STALE_MS. Pure (takes
  *  `now`) so the staleness window is testable without waiting for it. */
 export function isInFlight(state, now = Date.now()) {
@@ -334,8 +357,14 @@ export function deployRouter(bearerAuth) {
       deployLog: logFile(name),
       state: stateFile(name),
     })
+    claimDeploying(name)
     const launched = launchDeploy({ name, script, repoPath })
-    if (launched.error) return res.status(launched.status).json({ ok: false, error: launched.error })
+    if (launched.error) {
+      // A collision means a run IS live, so the claim above stays true; anything
+      // else never started, and must not leave the slot held.
+      if (launched.status !== 409) recordLaunchFailure(name, launched.error)
+      return res.status(launched.status).json({ ok: false, error: launched.error })
+    }
     res.json({ ok: true, started: true, project: name, launcher: launched.launcher })
   })
 
