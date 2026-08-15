@@ -78,11 +78,18 @@ process.env.WORKSPACE_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'atlas-kit-pro
 // A stub `claude` that records exactly what it was handed. Written (and pinned
 // via CLAUDE_BIN) BEFORE agent-local.mjs is imported, because the launch
 // templates bake in the resolved binary at module load.
+//
+// It writes to a scratch path and RENAMES it into place, so the reader below
+// cannot observe a half-written file: a `> file` redirect creates the file
+// before a single byte of content lands, and polling for existence caught it
+// mid-write on a slow runner (green locally, red on CI — this comment is the
+// scar). rename(2) within one directory is atomic, so existence now implies
+// completeness.
 const STUB_OUT = path.join(TMP, 'stub-claude.out')
 const STUB = path.join(TMP, 'claude')
 fs.writeFileSync(
   STUB,
-  `#!/bin/sh\n{ printf 'argv:%s\\n' "$*"; env | grep '^ANTHROPIC' | sort; printf 'KEY=%s\\n' "\${ANTHROPIC_API_KEY-UNSET}"; } > ${STUB_OUT}\nsleep 5\n`,
+  `#!/bin/sh\n{ printf 'argv:%s\\n' "$*"; env | grep '^ANTHROPIC' | sort; printf 'KEY=%s\\n' "\${ANTHROPIC_API_KEY-UNSET}"; } > ${STUB_OUT}.part\nmv ${STUB_OUT}.part ${STUB_OUT}\nsleep 5\n`,
   { mode: 0o755 },
 )
 process.env.CLAUDE_BIN = STUB
@@ -212,7 +219,10 @@ test('END TO END, through a real tmux: the backend env arrives, and appears in n
     .replace('{task}', "'hello'")
   try {
     await tmux('new-session', '-d', '-s', 'e2e', '-c', TMP, 'sh', '-lc', launch)
-    for (let i = 0; i < 60 && !fs.existsSync(STUB_OUT); i++) await new Promise((r) => setTimeout(r, 50))
+    // Generous: a cold CI runner pays for tmux plus a login shell before the
+    // stub runs at all. A timeout fails with WHY, not with an ENOENT from read.
+    for (let i = 0; i < 100 && !fs.existsSync(STUB_OUT); i++) await new Promise((r) => setTimeout(r, 100))
+    assert.ok(fs.existsSync(STUB_OUT), 'the stub `claude` never ran — the launch chain broke before it')
     const saw = fs.readFileSync(STUB_OUT, 'utf-8')
     // The profile's env reached `claude` intact, through the `sh -lc` LOGIN
     // shell (which rebuilds the environment — this is what proves it survives).
