@@ -3,6 +3,8 @@ import { createPortal, memo } from 'preact/compat'
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'preact/hooks'
 import { EmptyState } from '../Card'
 import { useAgentFocus, agentFocusConsumed, consumeAgentFocus } from '../../lib/agentFocus'
+import { collapseText, outboundHeader, outboundNote } from '../../lib/outbound'
+import { msgOrigin, parseLocalCommand, type LocalCommand } from '../../lib/msgProvenance'
 import {
   spawnAgent,
   promptAgent,
@@ -13,6 +15,7 @@ import {
   unshipAgent,
   sendQueuedNowAgent,
   sendAgentKeys,
+  selectAgentOption,
   killAgent,
   cleanupAgent,
   abortAgentClose,
@@ -26,6 +29,7 @@ import {
   type AgentAttachment,
   type AgentHistory,
   type AgentHistoryMessage,
+  type AgentHistoryTool,
   type AgentSession,
   type AgentStatus,
   type ScheduledAction,
@@ -97,17 +101,166 @@ function fmtMsgTime(ts: string | null | undefined): string {
   return isNaN(d.getTime()) ? '' : d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
 }
 
+/* An AskUserQuestion tool_use, rendered as an actual question block — header,
+ * question text, each option's label AND description, a multiSelect note —
+ * instead of a bare "🔧 AskUserQuestion" chip that hides what was even asked.
+ * Read-only: this is the PAST record, straight from the transcript. */
+function AskQuestionBlock({ q }: { q: NonNullable<AgentHistoryTool['askUserQuestion']> }) {
+  return (
+    <div className="agent__msg-ask">
+      {q.questions.map((qq, i) => (
+        <div key={i} className="agent__ask-q">
+          <div className="agent__ask-q-title hud-label">
+            ❓ {qq.header ? `${qq.header} — ` : ''}
+            {qq.question}
+            {qq.multiSelect ? ' (multi-select)' : ''}
+          </div>
+          {qq.options.map((o, oi) => (
+            <div key={oi} className="agent__ask-opt">
+              <span className="agent__ask-opt-label">{o.label}</span>
+              {o.description ? <span className="agent__ask-opt-desc"> — {o.description}</span> : null}
+            </div>
+          ))}
+        </div>
+      ))}
+    </div>
+  )
+}
+
+/* An outbound agent-control call — an Atlas orchestrator instructing a dev
+ * agent — rendered as the instruction it actually is, instead of a 🔧 chip
+ * showing only the RECIPIENT's session id. Read-only: the PAST record,
+ * straight from the transcript.
+ *
+ * Collapsed to its opening lines with an expander — never truncated away: the
+ * decision lives in collapseText (lib/outbound.ts, unit-tested) precisely so
+ * "the full text stays reachable" is a property something asserts. */
+function OutboundBlock({ o }: { o: NonNullable<AgentHistoryTool['outbound']> }) {
+  const [open, setOpen] = useState(false)
+  const note = outboundNote(o)
+  const body = o.text ? collapseText(o.text) : null
+  return (
+    <div className={`agent__msg-outbound agent__msg-outbound--${o.kind}`}>
+      <div className="agent__outbound-head hud-label">{outboundHeader(o)}</div>
+      {note ? <div className="agent__outbound-note">{note}</div> : null}
+      {body ? (
+        <>
+          <div className="agent__outbound-text">{open || !body.hasMore ? body.full : body.preview}</div>
+          {body.hasMore ? (
+            <button type="button" className="briefs__toggle agent__outbound-toggle" onClick={() => setOpen(!open)}>
+              <span className="briefs__caret">{open ? '▾' : '▸'}</span>
+              {open ? 'show less' : `show all ${body.totalLines} lines`}
+            </button>
+          ) : null}
+          {o.truncated ? <div className="agent__outbound-note">… text was cut at the history size cap</div> : null}
+        </>
+      ) : null}
+    </div>
+  )
+}
+
+/* The AUTHORITATIVE resolution of an AskUserQuestion, read straight from the
+ * transcript's tool_result (never a client-side guess). 'answered' shows each
+ * question's real chosen label; 'declined' covers Escape and the TUI's "Type
+ * something."/"Chat about this" escape rows (no option picked). */
+function AskAnswerMsg({ a, ts }: { a: NonNullable<AgentHistoryMessage['askUserQuestionAnswer']>; ts: string | null }) {
+  return (
+    <div className="agent__msg agent__msg--answered">
+      <div className="agent__msg-from">{a.outcome === 'answered' ? '✓ answered' : '↪ switched to free text'}</div>
+      {a.outcome === 'answered' && a.answers
+        ? Object.entries(a.answers).map(([q, label]) => (
+            <div key={q} className="agent__answered-pick">
+              {q ? <div className="agent__answered-q">{q}</div> : null}
+              {label}
+            </div>
+          ))
+        : null}
+      {fmtMsgTime(ts) ? (
+        <time className="agent__msg-time tnum" dateTime={ts ?? undefined}>
+          {fmtMsgTime(ts)}
+        </time>
+      ) : null}
+    </div>
+  )
+}
+
+/* A slash command the operator ran in the TUI (`/compact`, `/goal …`), which the
+ * harness records as raw markup in a user turn — `<command-name>` and friends,
+ * and its `<local-command-stdout>` as a second turn. Both used to render
+ * verbatim, tags and ANSI codes included, in the operator's own bubble colour.
+ *
+ * Drawn here as the command it is: the invocation on one line, its output as a
+ * muted block collapsed to its opening lines. Nothing is summarized — the
+ * wrapper is what's removed. */
+function LocalCommandMsg({ c, ts }: { c: LocalCommand; ts: string | null }) {
+  const [open, setOpen] = useState(false)
+  const out = c.stdout ? collapseText(c.stdout, 4, 400) : null
+  return (
+    <div className="agent__msg agent__msg--user agent__msg--system">
+      <div className="agent__msg-from agent__msg-from--system">⌘ command</div>
+      {c.name ? (
+        <div className="agent__cmd-name">
+          {c.name}
+          {c.args ? <span className="agent__cmd-args"> {c.args}</span> : null}
+        </div>
+      ) : null}
+      {out ? (
+        <div className="agent__cmd-out">
+          {open || !out.hasMore ? out.full : out.preview}
+          {out.hasMore ? (
+            <button type="button" className="briefs__toggle agent__outbound-toggle" onClick={() => setOpen(!open)}>
+              <span className="briefs__caret">{open ? '▾' : '▸'}</span>
+              {open ? 'show less' : `show all ${out.totalLines} lines`}
+            </button>
+          ) : null}
+        </div>
+      ) : null}
+      {fmtMsgTime(ts) ? (
+        <time className="agent__msg-time tnum" dateTime={ts ?? undefined}>
+          {fmtMsgTime(ts)}
+        </time>
+      ) : null}
+    </div>
+  )
+}
+
+/* HistMsg's comparator below is length-only on `tools`, so a change to a tool's
+ * CONTENT does not re-render a mounted bubble. An outbound brief IS content, so
+ * fold a cheap signature of it in — a bubble must never keep showing a stale
+ * instruction while the transcript has moved on. */
+const outboundSig = (m: AgentHistoryMessage) =>
+  m.tools.map((t) => (t.outbound ? `${t.outbound.kind}:${t.outbound.target || t.outbound.repo || ''}:${t.outbound.text?.length ?? 0}` : '')).join('|')
+
 /* One chat bubble of the history view. Memoized on the message's identity —
  * messages are append-only on disk, so during the live poll only NEW bubbles
  * mount; existing ones skip their markdown re-render entirely. */
 const HistMsg = memo(
-  function HistMsg({ m }: { m: AgentHistoryMessage }) {
-    // An Atlas orchestrator steered this agent — the injected prompt lands as a
-    // user turn but isn't the operator's, so mark it apart (see agent-history.mjs).
-    const steered = m.source === 'atlas'
+  function HistMsg({ m, launch }: { m: AgentHistoryMessage; launch?: boolean }) {
+    // The authoritative resolution of a pending AskUserQuestion — its own
+    // distinct bubble shape, not the normal role/text/tools rendering below
+    // (this message carries neither: agent-history.mjs keeps it purely for
+    // this field).
+    if (m.askUserQuestionAnswer) return <AskAnswerMsg a={m.askUserQuestionAnswer} ts={m.ts} />
+    // WHO put this user turn here — an Atlas steer (gold), peer mail (teal), a
+    // machine observation or harness envelope (muted), the launch brief, or the
+    // operator themselves. Every injected message lands as an ordinary user
+    // turn, so the decision reads the recorded `source` AND the attribution
+    // header the message carries, and defaults AWAY from the operator's style
+    // (lib/msgProvenance.ts — unit-tested, and the ONLY place this is decided,
+    // so a live-polled bubble and one re-read from disk classify identically).
+    const origin = m.role === 'user' ? msgOrigin(m, launch) : null
+    // A slash command the operator ran: drawn as the command instead of its raw
+    // `<command-name>`/`<local-command-stdout>` markup.
+    const cmd = origin?.provenance === 'system' ? parseLocalCommand(m.text) : null
+    if (cmd) return <LocalCommandMsg c={cmd} ts={m.ts} />
+    const injectedAs = origin && origin.provenance !== 'operator' ? origin.provenance : null
     return (
-      <div className={`agent__msg agent__msg--${m.role}${steered ? ' agent__msg--steered' : ''}`}>
-        {steered ? <div className="agent__msg-from">↪ steered by Atlas</div> : null}
+      <div className={`agent__msg agent__msg--${m.role}${injectedAs ? ` agent__msg--${injectedAs}` : ''}`}>
+        {injectedAs ? (
+          <div className={`agent__msg-from${injectedAs === 'steered' ? '' : ` agent__msg-from--${injectedAs}`}`}>
+            {origin?.label}
+          </div>
+        ) : null}
         {/* Assistant replies are markdown — render them (headings, code blocks,
             lists…) via the shared wiki renderer. Operator prompts stay literal
             pre-wrap text: they're not authored as markdown, and a stray #/* in
@@ -123,12 +276,18 @@ const HistMsg = memo(
         ) : null}
         {m.tools.length ? (
           <div className="agent__msg-tools">
-            {m.tools.map((t, j) => (
-              <span key={j} className="agent__msg-tool" title={t.summary}>
-                🔧 {t.name}
-                {t.summary ? <span className="agent__msg-tool-arg"> {t.summary}</span> : null}
-              </span>
-            ))}
+            {m.tools.map((t, j) =>
+              t.askUserQuestion ? (
+                <AskQuestionBlock key={j} q={t.askUserQuestion} />
+              ) : t.outbound ? (
+                <OutboundBlock key={j} o={t.outbound} />
+              ) : (
+                <span key={j} className="agent__msg-tool" title={t.summary}>
+                  🔧 {t.name}
+                  {t.summary ? <span className="agent__msg-tool-arg"> {t.summary}</span> : null}
+                </span>
+              ),
+            )}
           </div>
         ) : null}
         {fmtMsgTime(m.ts) ? (
@@ -142,33 +301,28 @@ const HistMsg = memo(
   (prev, next) =>
     prev.m.role === next.m.role &&
     prev.m.source === next.m.source &&
+    prev.launch === next.launch &&
     prev.m.ts === next.m.ts &&
     prev.m.text === next.m.text &&
-    prev.m.tools.length === next.m.tools.length,
+    prev.m.tools.length === next.m.tools.length &&
+    outboundSig(prev.m) === outboundSig(next.m) &&
+    prev.m.askUserQuestionAnswer?.toolUseId === next.m.askUserQuestionAnswer?.toolUseId &&
+    prev.m.askUserQuestionAnswer?.outcome === next.m.askUserQuestionAnswer?.outcome,
 )
 
-/* A choice menu the operator just resolved. The TUI menu (and the answer) never
- * land in the on-disk transcript, so once answered it would silently vanish —
- * we record the resolved pick client-side and echo it into the chat as its own
- * bubble, so there's a visible record of what was asked and what was chosen. */
-type AnsweredMenu = { ts: string; question: string; n: number; text: string }
+/* A choice-menu pick just sent, awaiting the transcript's authoritative
+ * confirmation — an INSTANT "selecting…" bubble, not a checkmark: it only
+ * bridges the gap until the real bubble (AskAnswerMsg above) renders from
+ * history, then times out. The old client-side "✓ you answered" echo is gone:
+ * it asserted an answer nothing had confirmed, so a mis-landed Enter still
+ * showed a green tick against the option the operator meant to pick. */
+type PendingAsk = { text: string; at: number }
 
-/* The "you answered ⟨n. text⟩" bubble echoed into the chat after a menu is
- * resolved (Defect: a picked option used to leave no trace). Matches HistMsg's
- * bubble shape; amber like the other menu affordances. */
-function AnsweredMsg({ a }: { a: AnsweredMenu }) {
+function PendingAskMsg({ p }: { p: PendingAsk }) {
   return (
-    <div className="agent__msg agent__msg--answered">
-      <div className="agent__msg-from">✓ you answered</div>
-      {a.question ? <div className="agent__answered-q">{a.question}</div> : null}
-      <div className="agent__answered-pick">
-        <span className="agent__history-opt-n tnum">{a.n}.</span> {a.text}
-      </div>
-      {fmtMsgTime(a.ts) ? (
-        <time className="agent__msg-time tnum" dateTime={a.ts}>
-          {fmtMsgTime(a.ts)}
-        </time>
-      ) : null}
+    <div className="agent__msg agent__msg--answered agent__msg--pending-ask">
+      <div className="agent__msg-from">selecting…</div>
+      <div className="agent__answered-pick">{p.text}</div>
     </div>
   )
 }
@@ -252,7 +406,7 @@ export function useNow(active: boolean): number {
   return now
 }
 
-// The session carries the resolved model ID (`claude-opus-4-8[1m]`); show just
+// The session carries the resolved model ID (`claude-opus-5[1m]`); show just
 // the family name the spawn picker used. Unknown IDs fall back to the raw value.
 export function modelLabel(model: string): string {
   const m = model.toLowerCase()
@@ -391,21 +545,11 @@ export function AgentStat({ stat, gid }: { stat: { label: string; value: number;
   )
 }
 
-// The ship prompt delivered (verbatim) into the serial ship train — restated
-// here so both the per-row Ship button and the card's "Ship N ready" enqueue the
-// same wording. The re-sync is restated even though the agent synced before:
-// with parallel agents, master moves between an agent's last rebase and its
-// merge. selfDeploy projects (only the dashboard) deploy via the Deploy-master
-// button after the merge; everywhere else the merge IS the delivery.
-export function buildShipPrompt(selfDeploy: boolean): string {
-  const tail = selfDeploy
-    ? 'Do not build or restart anything — I deploy from the dashboard.'
-    : "Merging the PR is the delivery — there's no separate deploy run, so don't build, deploy, or restart anything."
-  return (
-    'Ship now: 1) re-run your sync protocol against a fresh git fetch origin — rebase onto origin/master and push --force-with-lease — even if you synced earlier (master may have moved); 2) open or update your PR; 3) if the rebase was clean and the PR is mergeable, merge it with gh pr merge --merge, report the PR number + merged SHA, and end that reply with a line that is exactly "ATLAS:SHIPPED PR #<number> <merged SHA>" (alone on its own line — the dashboard watches for it). If anything is risky, conflicted, or checks fail: STOP, do not merge, and summarize it for me. ' +
-    tail
-  )
-}
+// The ship prompt itself is NOT built here any more — the server owns it
+// (api/src/ship-prompt.mjs), so a Ship button, the `ship_agent` MCP tool and an
+// agent merely told to ship all deliver the same instruction, on the repo's real
+// default branch, with the right per-project delivery tail. The cards keep only
+// the `selfDeploy` flag, for the post-merge deploy kick and the tooltips.
 
 /**
  * Sessions + spawn form, shared by the global Dev Agents card and the
@@ -475,7 +619,7 @@ export function AgentList({
   const shipAllReady = async () => {
     if (shipAllBusy || !readyToShip.length) return
     setShipAllBusy(true)
-    for (const s of readyToShip) await shipAgent({ id: s.id, text: buildShipPrompt(selfDeploy) })
+    for (const s of readyToShip) await shipAgent({ id: s.id })
     setShipAllBusy(false)
     onChanged()
     if (selfDeploy) kickDeploy()
@@ -869,12 +1013,20 @@ export function AgentRow({
   const [history, setHistory] = useState<AgentHistory | null>(null)
   const [histBusy, setHistBusy] = useState(false)
   const [histErr, setHistErr] = useState('')
-  // Choice menus this operator resolved on this card (in this browser session).
-  // The TUI menu never reaches the transcript, so we keep the picks here and
-  // stitch them into the chat by timestamp — see AnsweredMenu / the timeline.
-  const [answered, setAnswered] = useState<AnsweredMenu[]>([])
-  const recordAnswer = (opt: { n: number; text: string }) =>
-    setAnswered((prev) => [...prev, { ts: new Date().toISOString(), question: s.menuQuestion ?? '', n: opt.n, text: opt.text }])
+  // A choice-menu pick just sent, showing as an instant "selecting…" bubble
+  // until the transcript's authoritative askUserQuestionAnswer bubble renders
+  // from history — never a permanent client-side echo (the old false
+  // confirmation).
+  const [pendingAsk, setPendingAsk] = useState<PendingAsk | null>(null)
+  // A pending menu carries no tool_use id (it has no transcript record to read
+  // one from at all — see menuOptions in api.ts), so there's nothing to
+  // correlate the resolved answer back to this pick: the bubble always clears
+  // on this timeout.
+  useEffect(() => {
+    if (!pendingAsk) return
+    const t = window.setTimeout(() => setPendingAsk(null), 20000)
+    return () => window.clearTimeout(t)
+  }, [pendingAsk])
   // Poll bookkeeping as refs so the poll closure never acts on stale state: the
   // last-seen disk fingerprint (echoed so unchanged polls skip the payload) and
   // whether anything is on screen yet (gates the loading/error notes).
@@ -904,6 +1056,18 @@ export function AgentRow({
   useEffect(() => {
     scrollFieldToEnd(promptRef.current, false)
   }, [text])
+  // iOS/Android can fail to auto-scroll a focused prompt field above the on-
+  // screen keyboard (a first tap leaves it hidden until a re-focus forces a
+  // relayout) — the card's entrance animation leaves a live `transform` on an
+  // ancestor, which is known to break WebKit's native scroll-into-view
+  // heuristic. Bypass it by scrolling explicitly once the keyboard has
+  // finished animating in.
+  const onPromptFocus = () => {
+    window.setTimeout(() => {
+      promptRef.current?.scrollIntoView({ block: 'nearest', behavior: 'smooth' })
+    }, 300)
+  }
+  const fullscreenRef = useRef<HTMLDivElement>(null)
 
   // When this agent's ship actually LANDS — its shipState flips to 'shipped' as
   // the poll picks up ATLAS:SHIPPED — the merge has just bumped master's ahead-
@@ -1080,9 +1244,32 @@ export function AgentRow({
     }
     document.addEventListener('keydown', onKey)
     const unlock = lockBodyScroll()
+    // The full-screen dialog is `position:fixed; inset:0`, sized against the
+    // layout viewport — mobile browsers don't shrink that when the on-screen
+    // keyboard opens, so the prompt bar pinned to its bottom silently ends up
+    // hidden behind the keyboard (no scrollable ancestor exists to bring it
+    // back into view). Track window.visualViewport and match the dialog's box
+    // to it so the flex column reflows the prompt bar back above the keyboard.
+    const vv = window.visualViewport
+    const syncViewport = () => {
+      const el = fullscreenRef.current
+      if (!vv || !el) return
+      el.style.top = `${vv.offsetTop}px`
+      el.style.height = `${vv.height}px`
+    }
+    vv?.addEventListener('resize', syncViewport)
+    vv?.addEventListener('scroll', syncViewport)
+    syncViewport()
     return () => {
       document.removeEventListener('keydown', onKey)
       unlock()
+      vv?.removeEventListener('resize', syncViewport)
+      vv?.removeEventListener('scroll', syncViewport)
+      const el = fullscreenRef.current
+      if (el) {
+        el.style.top = ''
+        el.style.height = ''
+      }
     }
   }, [fullscreen])
   // Open the app-only full-screen — swap out of the transcript full-screen so the
@@ -1235,37 +1422,61 @@ export function AgentRow({
   // sends a raw key into the TUI, then refreshes so the result shows promptly.
   const sendKey = async (key: string) => {
     if (busy) return
-    // Enter on an open choice menu accepts the highlighted option — a resolved
-    // choice, so echo it into the chat the same as the option buttons do.
+    // Enter on an open choice menu accepts whatever is CURRENTLY highlighted —
+    // only show the optimistic "selecting…" bubble when that's a real, known,
+    // non-escape option; if it's null (a menu this flow can't map to options at
+    // all) or the TUI is on one of its own escape rows (`o.escape` — Enter there
+    // opens free-text entry, it doesn't answer anything), show nothing rather
+    // than echo a guess. The old `?? menuOptions[0].n` fallback ASSUMED the
+    // first row was highlighted, which is exactly how a confident tick ended up
+    // against an option that was never picked.
     const accepting = key === 'Enter' && s.menuKind === 'choice'
-    const opt = accepting ? s.menuOptions?.find((o) => o.n === (s.menuHighlighted ?? s.menuOptions?.[0]?.n)) : null
+    const opt = accepting && s.menuHighlighted != null ? s.menuOptions?.find((o) => o.n === s.menuHighlighted && !o.escape) : null
     setBusy(true)
     setMenuWarn(false) // answering via the toolbar clears any "menu open" warning
     const r = await sendAgentKeys({ id: s.id, keys: [key] })
     setBusy(false)
-    if (r.ok && opt) recordAnswer(opt)
+    if (r.ok && opt) setPendingAsk({ text: `${opt.n}. ${opt.text}`, at: Date.now() })
     if (!expanded) setExpanded(true)
     setReloadNonce((n) => n + 1)
     onChanged()
   }
 
   // Select option `n` in the TUI's numbered choice menu (the chat view's menu
-  // buttons): move the ❯ highlight from where it sits and confirm — the same
-  // arrow+Enter the respond toolbar and the Telegram bare-number reply send
-  // (digits don't select in every menu; moving the highlight always does).
+  // buttons): the SERVER navigates + confirms the ❯ highlight lands on the
+  // option's TEXT before pressing Enter (never a blind arrow+Enter replay
+  // computed here — a garbled highlight meant Enter landed on the wrong row).
+  // `hintN` only gives the server a starting direction; the confirmation is by
+  // content, server-side.
   const pickOption = async (n: number) => {
     if (busy) return
     const opt = s.menuOptions?.find((o) => o.n === n)
-    const from = s.menuHighlighted ?? s.menuOptions?.[0]?.n ?? 1
-    const delta = n - from
-    const keys = [...Array<string>(Math.abs(delta)).fill(delta > 0 ? 'Down' : 'Up'), 'Enter']
+    if (!opt) return
     setBusy(true)
     setMenuWarn(false)
-    const r = await sendAgentKeys({ id: s.id, keys })
+    const r = await selectAgentOption({ id: s.id, optionText: opt.text, hintN: n })
     setBusy(false)
-    if (r.ok && opt) recordAnswer(opt) // echo the resolved choice into the chat
+    if (r.ok) {
+      // The authoritative answer shows up as its own bubble on the next
+      // history poll — the optimistic bubble just bridges the gap until then.
+      setPendingAsk({ text: `${opt.n}. ${opt.text}`, at: Date.now() })
+    } else {
+      setSendErr(r.error || 'could not confirm that selection')
+    }
     setReloadNonce((x) => x + 1)
     onChanged()
+  }
+
+  // The TUI's own escape row ("✏️ type your own answer" — "Type something."/
+  // "Chat about this"), rendered distinctly from the real numbered options: it
+  // isn't a real answer choice (selecting it via the verified-select flow would
+  // just land the TUI's OWN highlight there, not answer anything), so clicking
+  // it reuses the existing menu-warn escape hatch instead — surface the "a menu
+  // is open, dismiss & send" banner and focus the prompt input so the operator
+  // can type straight away.
+  const focusFreeTextEscape = () => {
+    setMenuWarn(true)
+    promptRef.current?.focus()
   }
 
   // Autocomplete confirm: Tab inserts the highlighted item, then Enter submits.
@@ -1337,7 +1548,7 @@ export function AgentRow({
     // longer kicks you out of full screen.)
     setBusy(true)
     setSendErr('')
-    const r = await shipAgent({ id: s.id, text: buildShipPrompt(selfDeploy) })
+    const r = await shipAgent({ id: s.id })
     setBusy(false)
     if (r.ok) {
       onChanged()
@@ -1437,12 +1648,10 @@ export function AgentRow({
   // The chat is the on-disk messages plus any menus this operator resolved here
   // (which never reach the transcript), stitched together by timestamp so a
   // "you answered" bubble sits where its menu was, before the agent's next turn.
-  const timeline = useMemo(() => {
-    const items: Array<{ key: string; ts: string; msg?: AgentHistoryMessage; ans?: AnsweredMenu }> = []
-    history?.messages.forEach((m, i) => items.push({ key: `m${i}`, ts: m.ts ?? '', msg: m }))
-    answered.forEach((a, i) => items.push({ key: `a${i}-${a.ts}`, ts: a.ts, ans: a }))
-    return items.sort((x, y) => (x.ts < y.ts ? -1 : x.ts > y.ts ? 1 : 0))
-  }, [history, answered])
+  const timeline = useMemo(
+    () => (history?.messages ?? []).map((m, i) => ({ key: `m${i}`, msg: m })),
+    [history],
+  )
   // The transcript pane is either the chat view (default: the full on-disk
   // conversation as live-polled markdown bubbles) or the raw tmux terminal (the
   // sticky >_/📜 toggle). Same element in the plain and split-with-app layouts,
@@ -1462,9 +1671,16 @@ export function AgentRow({
           history truncated — showing the most recent {history.messages.length} messages
         </div>
       ) : null}
-      {timeline.map((t) =>
-        t.msg ? <HistMsg key={t.key} m={t.msg} /> : <AnsweredMsg key={t.key} a={t.ans!} />,
-      )}
+      {/* `launch` marks the opening prompt — the agent's whole brief (standing
+          preamble + retrieved Atlas evidence + the task), which nobody typed as
+          a message. Only when the history is COMPLETE: on a truncated one the
+          first bubble is just the oldest turn that survived the cap. */}
+      {timeline.map((t, i) => (
+        <HistMsg key={t.key} m={t.msg} launch={i === 0 && !history?.truncated} />
+      ))}
+      {/* The instant "selecting…" bubble — cleared the moment the authoritative
+          askUserQuestionAnswer above takes its place. */}
+      {pendingAsk ? <PendingAskMsg p={pendingAsk} /> : null}
       {s.status === 'running' ? (
         <div className="agent__history-note agent__history-live">working…</div>
       ) : null}
@@ -1474,22 +1690,51 @@ export function AgentRow({
           arrow+Enter the respond toolbar sends. */}
       {s.status === 'idle' && s.menuKind === 'choice' ? (
         <div className="agent__history-menu">
-          <div className="agent__history-menu-title hud-label">⚡ waiting on your choice</div>
+          <div className="agent__history-menu-title hud-label">
+            ⚡ waiting on your choice{s.menuHeader ? ` — ${s.menuHeader}` : ''}
+          </div>
           {/* The prompt above the options, so it's clear WHAT is being asked —
               not just bare Yes/No buttons (parsed from the pane, menu.mjs). */}
           {s.menuQuestion ? <div className="agent__history-menu-q">{s.menuQuestion}</div> : null}
-          {s.menuOptions?.length ? (
-            s.menuOptions.map((o) => (
-              <button
-                key={o.n}
-                type="button"
-                className={`agent__history-opt${o.n === s.menuHighlighted ? ' agent__history-opt--hl' : ''}`}
-                disabled={busy}
-                onClick={() => pickOption(o.n)}
-              >
-                <span className="agent__history-opt-n tnum">{o.n}.</span> {o.text}
-              </button>
-            ))
+          {s.menuUnsupported ? (
+            <div className="agent__history-note">
+              {s.menuUnsupportedReason === 'multi-select'
+                ? 'a multi-select question is open — it needs its own Submit step this view cannot drive; use the terminal view (>_ above)'
+                : 'a multi-question menu is open — its tabs are not drivable here; use the terminal view (>_ above)'}
+            </div>
+          ) : s.menuOptions?.length ? (
+            <>
+              {s.menuOptions
+                .filter((o) => !o.escape)
+                .map((o) => (
+                  <button
+                    key={o.n}
+                    type="button"
+                    className={`agent__history-opt${o.n === s.menuHighlighted ? ' agent__history-opt--hl' : ''}`}
+                    disabled={busy}
+                    onClick={() => pickOption(o.n)}
+                  >
+                    <span className="agent__history-opt-n tnum">{o.n}.</span> {o.text}
+                    {o.description ? <div className="agent__history-opt-desc">{o.description}</div> : null}
+                  </button>
+                ))}
+              {/* One combined affordance for whichever escape row(s) the TUI
+                  offers — they all mean the same thing to the operator, so a
+                  single button avoids showing near-duplicates. */}
+              {s.menuOptions.some((o) => o.escape) ? (
+                <button
+                  type="button"
+                  className={`agent__history-opt agent__history-opt--escape${
+                    s.menuOptions.some((o) => o.escape && o.n === s.menuHighlighted) ? ' agent__history-opt--hl' : ''
+                  }`}
+                  disabled={busy}
+                  onClick={focusFreeTextEscape}
+                  title="type your own answer instead of picking an option"
+                >
+                  ✏️ type your own answer
+                </button>
+              ) : null}
+            </>
           ) : (
             <div className="agent__history-note">
               a menu is open — its options aren't available here; use the terminal view (&gt;_ above)
@@ -2041,6 +2286,7 @@ export function AgentRow({
           placeholder={images.length ? 'add a message (optional)…' : 'send a prompt…'}
           value={text}
           onInput={(e) => setText(e.currentTarget.value)}
+          onFocus={onPromptFocus}
         />
         {s.status === 'running' ? (
           // While the agent is generating, typed text can either cut in now or
@@ -2123,7 +2369,7 @@ export function AgentRow({
     <>
       {fullscreen ? (
         createPortal(
-          <div className={cls} role="dialog" aria-modal="true">
+          <div className={cls} role="dialog" aria-modal="true" ref={fullscreenRef}>
             {/* The same clickable agents overview as the hero, agents only —
                 clicking another node swaps straight to THAT agent's full screen
                 (this row yields via the focus signal above). */}

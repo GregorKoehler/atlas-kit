@@ -8,6 +8,9 @@
  * ------------------------------------------------------------------ */
 export const API_BASE = '/api'
 
+import type { OutboundCall } from './outbound'
+export type { OutboundCall }
+
 /* --- Data shapes (the API response shapes) -------------------- */
 export type Trend = 'up' | 'down' | 'neutral'
 export interface Stat {
@@ -786,12 +789,23 @@ export interface AgentSession {
    * side (menu.mjs), and which option the `❯` highlight currently sits on. The
    * chat view renders these as clickable buttons. Absent on a bridge that
    * predates the field (the chat view then points at the terminal view). */
-  menuOptions?: { n: number; text: string }[]
-  menuHighlighted?: number
+  menuOptions?: { n: number; text: string; description?: string; escape?: boolean }[]
+  menuHighlighted?: number | null
   /** The prompt/question text the choice menu shows above its options (parsed
    * from the TUI pane, menu.mjs), so the chat view can display WHAT is being
    * asked — not just bare answer buttons. Absent when no prompt was captured. */
   menuQuestion?: string
+  /** AskUserQuestion's optional short header (e.g. "Capture card"), shown
+   * alongside the question — read from the box's header chip/tab row. */
+  menuHeader?: string
+  /** A pending choice menu this flow can't drive reliably — a multi-question
+   * (tabbed) or multiSelect AskUserQuestion call, detected from the pane's own
+   * tab/header row (Enter toggles a checkbox instead of submitting, and there's
+   * a separate "Submit" tab). No `menuOptions` accompanies this — the card tells
+   * the operator to use the terminal view instead of misdriving it;
+   * `menuQuestion`/`menuHeader` still come through when the pane had them. */
+  menuUnsupported?: boolean
+  menuUnsupportedReason?: 'multi-question' | 'multi-select'
   startedAt: string
   /** Knowledge chat closing gracefully (✕ pressed): it's running a final
    * wrap-up turn that works unsaved insights into the vault, and disappears
@@ -818,14 +832,21 @@ export interface AgentSession {
    * gist of an Atlas briefing (debug aid — lets the operator see what the brief
    * surfaced). Absent when nothing is queued. (A bridge predating the multi-queue
    * upgrade may still send a single object — the card's `queuedList` tolerates both.) */
-  queued?: Array<{ text: string; images: number; kind?: 'atlas-brief'; summary?: string }>
+  queued?: Array<{
+    text: string
+    images: number
+    /** When it was ENQUEUED, so the chip can show how long it has been waiting. */
+    at?: string
+    kind?: 'atlas-brief' | 'agent-msg' | 'fleet-note' | 'reply-receipt' | 'turn-end' | 'steer' | 'operator'
+    summary?: string
+  }>
   /** Approx context-window fill from the agent's latest turn — `contextTokens`
    * of `contextWindow` tokens. Box-local agents only (the box can read their
    * transcripts); omitted when no transcript is readable, so the bar is optional. */
   contextTokens?: number
   contextWindow?: number
   /** Spawn-time picks: the resolved Claude Code model ID (e.g.
-   * `claude-opus-4-8[1m]`) and effort level (`high`/`xhigh`/`max`). Shown as a
+   * `claude-opus-5[1m]`) and effort level (`high`/`xhigh`/`max`). Shown as a
    * small label by the context meter. Absent on sessions spawned before the
    * field landed. */
   model?: string
@@ -879,8 +900,13 @@ export interface AgentSession {
    * carries the SHIPPED detail (PR number + SHA). Scanned off the transcript by
    * both executors — box-local agents AND workstation agents (the bridge scans
    * the container transcript the same way). */
-  shipState?: 'ready' | 'shipped'
+  shipState?: 'ready' | 'shipped' | 'merged'
   shipInfo?: string
+  /** Ship-time shared-checkout guard: set alongside 'ready' when the repo's
+   * SHARED checkout (the one the live services run from) isn't clean at its
+   * upstream — the tell for an agent that worked there instead of in its
+   * worktree. WARN ONLY; it never blocks a ship. */
+  shipWarning?: string
   /** Place in the serial ship train, if the operator queued this agent to ship.
    * `pos` is 1-based; `active` is true while it's the one currently merging (the
    * train advances to the next when it prints ATLAS:SHIPPED). Box-local dev
@@ -1024,18 +1050,48 @@ export async function fetchAgentOutput(id: string, lines = 2000): Promise<string
 }
 
 /** One reconstructed chat message from an agent's on-disk `.jsonl` history. */
+/** One AskUserQuestion question, as the tool actually asked it (agent-history.mjs). */
+export interface AgentHistoryAskQuestion {
+  question: string
+  header?: string
+  multiSelect?: boolean
+  options: Array<{ label: string; description?: string }>
+}
 export interface AgentHistoryTool {
   name: string
   summary: string
+  /** Only on an AskUserQuestion tool_use: its real question(s)/options, straight
+   * from the tool's input — the chat view renders an actual question block
+   * instead of the generic 🔧 chip (a bare summary can't represent this;
+   * AskUserQuestion's input is an array, not a string). */
+  askUserQuestion?: { questions: AgentHistoryAskQuestion[] }
+  /** Only on an agent-control tool_use (an Atlas orchestrator instructing a dev
+   * agent): the byte-exact instruction it sent, plus who received it. Same
+   * reason as askUserQuestion above — a 140-char summary picked the recipient's
+   * session id and dropped the multi-KB brief entirely (agent-history.mjs). */
+  outbound?: OutboundCall
 }
 export interface AgentHistoryMessage {
   role: 'user' | 'assistant'
   ts: string | null
   text: string
   tools: AgentHistoryTool[]
-  /** Set when this user turn was injected by an Atlas orchestrator steering this
-   * agent (not the operator) — the chat view colors it apart. Absent otherwise. */
-  source?: 'atlas'
+  /** Set when this user turn was INJECTED rather than typed by the operator —
+   * 'atlas' for an Atlas orchestrator's steer (gold), 'agent' for mail from a
+   * peer agent (teal), 'system' for an automatic fleet note the dashboard
+   * generated (grey). Absent otherwise. */
+  source?: 'atlas' | 'agent' | 'system'
+  /** The AUTHORITATIVE resolution of a pending AskUserQuestion from earlier in
+   * this message list, read straight from the transcript's tool_result — never
+   * a client-side guess. `answers` (only on 'answered') is
+   * `{questionText: chosenLabel}`, matching the TUI's own wording; 'declined'
+   * covers Escape and the TUI's "Type something."/"Chat about this" escape
+   * rows (no option was actually picked). */
+  askUserQuestionAnswer?: {
+    toolUseId: string
+    outcome: 'answered' | 'declined'
+    answers?: Record<string, string>
+  }
 }
 export interface AgentHistory {
   messages: AgentHistoryMessage[]
@@ -1139,10 +1195,16 @@ export function unqueueAgent(id: string, index?: number): Promise<AgentActionRes
 }
 /** Enqueue a ship into the SERIAL ship train — box-local agents merge one at a
  * time (each re-syncs onto the previous merge), so several "ready" agents can be
- * shipped at once without racing. `text` is the ship prompt the card built;
- * `position` (1-based) comes back so the card can show the queue place. */
+ * shipped at once without racing. `position` (1-based) comes back so the card can
+ * show the queue place.
+ *
+ * NO `text`: the SERVER builds the ship prompt (api/src/ship-prompt.mjs), so the
+ * buttons here, the `ship_agent` MCP tool and an agent merely TOLD to ship all
+ * get the SAME instruction — including the right per-project delivery tail and
+ * the repo's real default branch, neither of which the client knows. The optional
+ * `text` escape hatch stays only so an older cached client keeps working. */
 export function shipAgent(
-  body: { id: string; text: string },
+  body: { id: string; text?: string },
 ): Promise<AgentActionResult & { position?: number }> {
   return agentPost('ship', body) as Promise<AgentActionResult & { position?: number }>
 }
@@ -1158,6 +1220,19 @@ export function sendQueuedNowAgent(id: string): Promise<AgentActionResult> {
 /** Send navigation/confirm keys to a session's TUI (select a menu option or accept). */
 export function sendAgentKeys(body: { id: string; keys: string[] }): Promise<AgentActionResult> {
   return agentPost('keys', body)
+}
+/** Verified selection of a pending choice-menu option: the server navigates and
+ * confirms the ❯ highlight lands on `optionText` BY CONTENT before pressing
+ * Enter — never a blind arrow+Enter replay, which lands on the wrong row the
+ * moment the parsed option list and the pane's real highlight disagree.
+ * `hintN` (the option's row from the /api/agents snapshot) only picks an
+ * initial direction. */
+export function selectAgentOption(body: {
+  id: string
+  optionText: string
+  hintN?: number
+}): Promise<AgentActionResult> {
+  return agentPost('select', body)
 }
 /** Kill a session (its worktree/branch persist for review). */
 export function killAgent(id: string): Promise<AgentActionResult> {

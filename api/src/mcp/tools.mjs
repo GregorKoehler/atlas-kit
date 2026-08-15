@@ -284,7 +284,11 @@ function registerAgentControl(server) {
     subAgents: Array.isArray(s.subAgents) && s.subAgents.length ? s.subAgents.length : undefined,
     bgJobs: Array.isArray(s.bgJobs) ? s.bgJobs.filter((j) => j && j.status === 'running').length || undefined : undefined,
     queued: Array.isArray(s.queued) && s.queued.length ? s.queued.length : undefined,
-    ship: s.shipState ? { state: s.shipState, info: s.shipInfo } : undefined,
+    // `state` is 'ready' | 'shipped' | 'merged' — 'merged' is the REPO's own
+    // verdict (a merge commit landing this branch), so it covers a PR the
+    // orchestrator or the operator merged, not just the agent's own claim.
+    ship: s.shipState ? { state: s.shipState, info: s.shipInfo, ...(s.shipWarning ? { warning: s.shipWarning } : {}) } : undefined,
+    shipQueue: s.shipQueue,
     closing: s.closing || undefined,
     atlasWorker: s.atlasWorker,
     pairedDev: s.pairedDev,
@@ -375,6 +379,36 @@ function registerAgentControl(server) {
       inputSchema: { id: z.string(), text: z.string() },
     },
     tool(({ id, text }) => apiPost('/api/agents/interrupt', steerBody(id, text))),
+  )
+
+  server.registerTool(
+    'ship_agent',
+    {
+      description:
+        "Tell a DEV agent to ship its finished work — the dashboard's Ship button, as a tool, and the way to ship: prefer it over hand-writing a ship instruction with queue_agent/prompt_agent. The dashboard delivers the canonical ship prompt (re-sync onto a fresh fetch of the repo's default branch → open/update the PR → follow THAT repo's own ship/CI rules and wait for its required checks to go green → merge → report PR + SHA), including the right delivery tail for how that project actually goes live, so nothing is left to improvisation. For a BOX-LOCAL agent it also joins the SERIAL ship train — several ready agents merge one at a time, each re-syncing onto the previous merge, instead of racing; the reply's `position` is its place in that queue (a bridge agent is simply queued the same prompt). The agent ships on its own turn — watch it with list_agents/agent_transcript rather than expecting the merge in this reply.",
+      inputSchema: { id: z.string().describe('the dev agent session id to ship (from list_agents)') },
+    },
+    tool(({ id }) => apiPost('/api/agents/ship', { id })),
+  )
+
+  server.registerTool(
+    'merge_pr',
+    {
+      description:
+        "Merge a dev agent's PR (`gh pr merge --merge` on its branch) — use this INSTEAD of running `gh pr merge` yourself in Bash. It merges AND records that YOU merged it in the one call, so the dashboard stops reporting the merge back to you minutes later as a fleet update about your own action; merging by hand still works, it just costs you that redundant note. It also PRE-FLIGHTS the PR server-side and REFUSES to merge one that is stale (branch behind its base), conflicted, blocked, red, or still waiting on checks — the error names the actual state. It does not rebase or fix anything: the answer to a refusal is to ship the agent (its ship protocol re-fetches and rebases), not to retry. Only for a BOX-LOCAL dev agent (a `localRepos` repo); for a bridge repo, merge with `gh pr merge` as before. Returns gh's output; a refused or failed merge comes back as an error and nothing is claimed.",
+      inputSchema: {
+        id: z.string().describe('the dev agent session id whose PR to merge (from list_agents)'),
+        force: z
+          .boolean()
+          .optional()
+          .describe(
+            'Skip the pre-flight and merge even if the PR is stale, conflicted, blocked, red or still running checks. Only when the operator has told you that specific PR is fine to land as-is — otherwise ship the agent so it rebases. Audited as a forced merge.',
+          ),
+      },
+    },
+    // The same ATLAS_SESSION stamp the spawn lineage and steers use — the agent
+    // never supplies it, so a chat can only ever claim its OWN merges.
+    tool(({ id, force }) => apiPost('/api/agents/merge', { id, force, mergedBy: process.env.ATLAS_SESSION })),
   )
 
   server.registerTool(

@@ -39,6 +39,12 @@
   --status-amber: #d2a64f;
   --status-red: #d56b60;
 
+  /* Agent↔agent messages: the hue for mail from a PEER agent, a third voice next
+     to operator blue and Atlas gold (--status-amber). Its own token, not
+     --accent-teal, because that one is a warm coral on the Claude theme and
+     would collide with the gold it has to be told apart from. */
+  --agent-peer: #2dd4bf; /* teal */
+
   /* --- Glow: soft cyan, LOW opacity ------------------------------ */
   --glow-cyan: rgba(34, 211, 238, 0.16);
   --glow-cyan-strong: rgba(34, 211, 238, 0.28);
@@ -92,6 +98,10 @@
   --status-amber: #bf8c34;
   --status-red: #c5544a;
 
+  /* Deeper teal so the caption + bubble tint read on the paper themes (the dark
+     theme's #2dd4bf washes out there). */
+  --agent-peer: #0b5d54;
+
   --glow-cyan: rgba(217, 119, 87, 0.1);
   --glow-cyan-strong: rgba(217, 119, 87, 0.2);
 
@@ -137,6 +147,9 @@
   --status-green: #2f8f5e;
   --status-amber: #b07d2a;
   --status-red: #b8402f;
+
+  /* Pushed darker still for the high-contrast paper. */
+  --agent-peer: #094f47;
 
   --glow-cyan: rgba(184, 70, 31, 0.12);
   --glow-cyan-strong: rgba(184, 70, 31, 0.22);

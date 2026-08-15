@@ -4949,6 +4949,10 @@ button.capture-job__title--link {
   padding: calc(0.8rem + env(safe-area-inset-top)) calc(0.9rem + env(safe-area-inset-right))
     calc(0.8rem + env(safe-area-inset-bottom)) calc(0.9rem + env(safe-area-inset-left));
   overflow: hidden;
+  /* JS (AgentList.tsx) pins top/height to window.visualViewport while open, so
+     the box must include padding in that height or it overflows the visible
+     area by the padding amount. */
+  box-sizing: border-box;
 }
 .agent--fullscreen .agent__transcript {
   flex: 1 1 auto;
@@ -5168,6 +5172,225 @@ button.capture-job__title--link {
    never land on disk, so after a pick we record it here (see AnsweredMenu) so
    there's a visible trace of what was asked and what was chosen. Amber, left-
    aligned like an assistant turn — reads as the resolution of the question. */
+/* --- chat provenance, AskUserQuestion + outbound blocks (bundle A) ------ */
+
+/* Mail from a PEER agent on the agent↔agent bus (source:'agent'): also a user
+   turn, also not the operator's — but a different voice from an Atlas steer, so
+   it gets its own hue. Gold stays "from Atlas" (the established language) and
+   blue stays the operator; peer mail is teal/green. Theme-aware via
+   --agent-peer (tokens.css) rather than a hardcoded hex: a literal hex washed
+   out on the light paper themes. */
+.agent__msg--peer {
+  background: color-mix(in srgb, var(--agent-peer) 15%, transparent);
+  border-color: color-mix(in srgb, var(--agent-peer) 45%, transparent);
+}
+
+/* Any MACHINE observation in a user turn: a fleet note, a reply receipt, a
+   turn-end line, a harness notification — and anything injected whose source
+   this build doesn't recognize (msgProvenance.ts fails away from the operator's
+   style). Gold = Atlas, teal = a peer, blue = the operator — so a machine
+   observation stays deliberately colourless (the neutral surface tint), which is
+   also its trust class: weakest voice in the room. Both tints are mixed off
+   --text-dim, which every theme defines, so this holds on the paper themes too. */
+.agent__msg--system {
+  background: color-mix(in srgb, var(--text-dim) 12%, transparent);
+  border-color: color-mix(in srgb, var(--text-dim) 38%, transparent);
+}
+
+/* The LAUNCH BRIEF — the opening prompt: standing preamble + retrieved Atlas
+   evidence + the task. The operator's words are inside it, but nobody typed it
+   as a message, so it must not wear the operator's blue either. No new hue: a dashed
+   hairline and no fill read as "a document, not a turn", which is what it is —
+   and being purely structural it survives every theme unchanged. */
+.agent__msg--brief {
+  background: transparent;
+  border-style: dashed;
+  border-color: color-mix(in srgb, var(--text-dim) 45%, transparent);
+}
+
+.agent__msg-from--brief {
+  color: var(--text-dim);
+}
+
+/* A local slash command (LocalCommandMsg) — the muted machine bubble above, with
+   the invocation in mono and its output as a quiet block. Only the WRAPPER is
+   dropped; args and stdout are the recorded text, verbatim. */
+.agent__cmd-name {
+  font-family: var(--font-mono);
+  color: var(--text-bright);
+  word-break: break-word;
+}
+
+.agent__cmd-args {
+  color: var(--text);
+  font-family: var(--font-body);
+}
+
+.agent__cmd-out {
+  font-family: var(--font-mono);
+  font-size: 0.68rem;
+  color: var(--text-dim);
+  white-space: pre-wrap;
+  word-break: break-word;
+  border-left: 2px solid color-mix(in srgb, var(--text-dim) 35%, transparent);
+  padding-left: 0.45rem;
+}
+
+/* …and the peer-mail caption in the peer hue (after --from so it wins the tie). */
+.agent__msg-from--peer {
+  color: var(--agent-peer);
+}
+
+/* …and the fleet-note caption stays neutral, like its bubble. */
+.agent__msg-from--system {
+  color: var(--text-dim);
+}
+
+/* The transient "selecting…" bubble (PendingAskMsg) shown between sending a
+   pick and the transcript's authoritative confirmation replacing it — a
+   pulse instead of solid amber marks it as not-yet-confirmed. */
+.agent__msg--pending-ask {
+  opacity: 0.75;
+  animation: agent-hist-pulse 1.6s ease-in-out infinite;
+}
+
+/* AskUserQuestion rendered as an actual question block (AskQuestionBlock) —
+   the past record of what a tool call asked, INSIDE the tool-chip row so it
+   sits with the rest of that turn's tool calls. */
+.agent__msg-ask {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  width: 100%;
+}
+
+.agent__ask-q {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  padding: 0.4rem 0.55rem;
+  border: 1px solid var(--hairline);
+  border-radius: 5px;
+  background: rgba(0, 0, 0, 0.2);
+}
+
+.agent__ask-q-title {
+  color: var(--status-amber);
+  margin-bottom: 0.1rem;
+}
+
+.agent__ask-opt-label {
+  color: var(--text-bright);
+  font-weight: 600;
+}
+
+.agent__ask-opt-desc {
+  color: var(--text-dim);
+}
+
+/* --- outbound agent-control call (OutboundBlock) ------------------- *
+   An orchestrator's instruction to another agent, shown as the text it is
+   rather than a 🔧 chip naming only the recipient. Full-width escape from the
+   chip row, exactly like .agent__msg-ask above; pre-wrap because a brief is
+   headings and bullets and collapsing its whitespace destroys it. Gold, the
+   established "Atlas" voice (--status-amber, theme-aware) — this is the SENDING
+   side of the same instruction that lands gold in the recipient's own chat as
+   .agent__msg--steered.
+
+   The SURFACE is a lift, not a wash: this block sits on .agent__history's
+   rgba(0,0,0,0.25) over an already-opaque .agent {background: var(--bg-800)},
+   so the old rgba(0,0,0,0.2) darkened a twice-darkened ground and took the gold
+   header to 1.2:1 on contrast-claude / 1.1:1 on claude — the operator's "hard to
+   read". --surface-2 is the theme's own raised-surface token (paper on the light
+   themes, a faint cyan lift on the HUD) and lands the header at 3.9/3.9/8.3 once
+   mixed toward --text-bright below. Every neighbouring bubble rule is already
+   theme-aware; this one was the exception. */
+.agent__msg-outbound {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  width: 100%;
+  padding: 0.4rem 0.55rem;
+  border: 1px solid var(--hairline);
+  border-left: 2px solid var(--status-amber);
+  border-radius: 5px;
+  background: var(--surface-2);
+}
+
+/* Gold alone is the Atlas hue but not a readable one on paper (2.9:1 on the
+   surface above). Mixing it toward --text-bright keeps the hue and moves each
+   theme in its own direction — darker on the paper themes, brighter on the HUD —
+   without a per-theme override or a new hex literal. */
+.agent__outbound-head {
+  color: color-mix(in srgb, var(--status-amber) 80%, var(--text-bright));
+}
+
+/* --text-dim IS the theme's dim token; the extra 0.85 only bought 1.8:1 on
+   paper. Dropped — the token alone reads at 4.1-6.0 across the themes. */
+.agent__outbound-note {
+  font-size: 0.6rem;
+  color: var(--text-dim);
+}
+
+/* A SPAWN is the one outbound kind that CREATES its recipient instead of
+   addressing an existing one, and the operator wants that visible at a glance
+   ("it's spawning agents which is a distinct action"). It is also the one kind
+   whose gold has no partner: a steer/queue/ship lands in the recipient's chat as
+   a gold .agent__msg--steered bubble, and gold on both ends is what pairs them —
+   but a spawn's task text becomes the new session's OPENING prompt, which is not
+   a recorded steer (agent-history.mjs stamps `source` off the steer fingerprint
+   set) and so never renders gold anywhere. Nothing is un-paired by giving it
+   green, and green already means "a live agent" on the fleet surfaces
+   (.agents-ov__snode) — the thing a spawn brings into existence. It measures
+   better too: --status-green clears 3:1 on both paper themes where gold does
+   not. The thicker left rule keeps the distinction non-colour as well. */
+.agent__msg-outbound--spawn {
+  border-left-width: 3px;
+  border-left-color: var(--status-green);
+  background: color-mix(in srgb, var(--status-green) 12%, var(--surface-2));
+}
+
+.agent__msg-outbound--spawn .agent__outbound-head {
+  color: color-mix(in srgb, var(--status-green) 80%, var(--text-bright));
+}
+
+.agent__outbound-text {
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: var(--font-mono);
+  font-size: 0.68rem;
+  line-height: 1.45;
+  color: var(--text);
+}
+
+.agent__outbound-toggle {
+  align-self: flex-start;
+  font-size: 0.64rem;
+}
+
+/* The TUI's own escape row ("Type something."/"Chat about this") — a distinct
+   affordance, not a numbered answer choice: dashed border + no option number,
+   so it never reads as one of the real picks. */
+.agent__history-opt--escape {
+  border-style: dashed;
+  color: var(--text-dim);
+  font-style: italic;
+}
+
+/* An AskUserQuestion option's real description, under its label in the live
+   pending-menu buttons (not just the terse history rendering). */
+.agent__history-opt-desc {
+  color: var(--text-dim);
+  font-weight: 400;
+  margin-top: 0.1rem;
+  white-space: normal;
+}
+
+[data-theme="claude"] .agent__ask-q,
+[data-theme="contrast-claude"] .agent__ask-q {
+  background: rgba(60, 50, 40, 0.05);
+}
+
 .agent__msg--answered {
   align-self: flex-start;
   background: rgba(210, 166, 79, 0.1);
