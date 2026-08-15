@@ -48,7 +48,7 @@ import {
 export { monthRunMsByRepo } from './agent-timings.mjs'
 // The queued-prompt delivery gate, shared with the bridge executor so the two
 // cannot drift: one per-kind classification, one menu/pacing rule, one test.
-import { decideDelivery, deliveryBackoffMs } from './queue-delivery.mjs'
+import { deliveryBackoffMs, selectDelivery, deliveryText, isObservational } from './queue-delivery.mjs'
 import { capacityVerdict, readMemStatus } from './agent-capacity.mjs'
 // Is a turn running? Two witnesses — the footer's `esc to interrupt` marker and
 // the spinner line above the input box — because the footer is rendered to the
@@ -60,6 +60,8 @@ import { sanitizeForTyping, deliveryLanded, clearInputBox, TUI_CLEAR_KEY, TUI_VE
 import { promptFileBody, promptFileCommand } from './prompt-file-launch.mjs'
 // Server-side Atlas retrieval: what a dev agent (and an Atlas chat) opens with.
 import { buildCandidates, evidencePrompt } from './atlas-candidates.mjs'
+// The bus log — where a note dropped as stale stays visible (delivered: false).
+import { appendMessage } from './agent-messages.mjs'
 
 const HERE = path.dirname(new URL(import.meta.url).pathname)
 const REPOS_FILE = process.env.AGENT_LOCAL_REPOS || path.join(HERE, 'agent-local-repos.json')
@@ -2439,10 +2441,26 @@ export async function interrupt({ id, text, images, steeredBy }) {
   return { status: 200, ok: true }
 }
 
+/* How flushQueued re-checks an OBSERVATIONAL note against the world just before
+ * typing it. The rule needs the spawn lineage, the merge claims and the merged
+ * remote roster — all of which live in agent-routes.mjs, which imports THIS
+ * module — so it is registered rather than imported. Unregistered (a test, a
+ * bare import) means "nothing is known", i.e. deliver exactly as before. */
+let noteRevalidator = () => null
+export function setNoteRevalidator(fn) {
+  noteRevalidator = typeof fn === 'function' ? fn : () => null
+}
+
 // Park a prompt to be delivered when the session next goes idle (the flush loop
 // below does the sending). Appends to the session's FIFO queue, so queueing again
 // while one is already parked keeps both (delivered in order). Images are saved now.
-export async function queuePrompt({ id, text, images, kind, summary, steeredBy, source }) {
+//
+// `observedAt`/`about`/`header`/`note` are what an OBSERVATIONAL note (a fleet
+// note, a turn-end line) adds: WHEN the dashboard saw the thing, WHICH child it
+// is about, and the two pieces of `text` — because a note that has aged, or one
+// batched into a digest, is re-assembled at delivery time and the attribution
+// header has to stay first (queue-delivery.mjs `deliveryText`).
+export async function queuePrompt({ id, text, images, kind, summary, steeredBy, source, observedAt, about, header, note }) {
   const p = await prepare(id, text, images)
   if (p.err) return p.err
   if (!Array.isArray(p.s.queued)) p.s.queued = []
@@ -2451,7 +2469,15 @@ export async function queuePrompt({ id, text, images, kind, summary, steeredBy, 
   // session may not reach for a while — so how long it waited is the one number
   // that turns "the fleet updates feel laggy" into something measurable (the card
   // shows it per chip; flushQueued audits it on delivery, with `via`).
-  p.s.queued.push({ text: p.text, paths: p.paths, at: nowIso(), ...(kind ? { kind } : {}), ...(summary ? { summary } : {}) })
+  p.s.queued.push({
+    text: p.text, paths: p.paths, at: nowIso(),
+    ...(kind ? { kind } : {}), ...(summary ? { summary } : {}),
+    ...(observedAt ? { observedAt } : {}), ...(about ? { about } : {}),
+    ...(header ? { header } : {}), ...(note ? { note } : {}),
+    // Kept so a delivery that had to REBUILD the text (an age line, a digest)
+    // can re-take the steer fingerprint over what was actually typed.
+    ...(steeredBy ? { steeredBy } : {}), ...(source ? { source } : {}),
+  })
   // Record now (by text); the parked prompt is delivered later and the
   // fingerprint matches whenever that turn lands in the transcript.
   recordSteer(p.s, p.text, steeredBy, source)
@@ -2588,6 +2614,49 @@ export async function sendNow({ id }) {
   return { status: 200, ok: true }
 }
 
+/* Drop observations that stopped being true while they waited, LOUDLY — the
+ * same principle as the ship notifier's giving-up path: a note that
+ * deliberately never fires must still be visible somewhere. Console + the bus
+ * log (`delivered: false`, with the reason), so `agent-messages.jsonl` remains
+ * the one place a note's whole life is readable. */
+function dropStaleNotes(s, drops) {
+  for (const { entry, reason } of drops) {
+    console.log(`[agent-local] stale ${entry.kind} for ${s.id} dropped — ${reason}`)
+    appendMessage({ from: entry.steeredBy || 'system:fleet', to: s.id, kind: entry.kind, text: entry.note || entry.text, delivered: false, reason: `stale: ${reason}` })
+  }
+  s.queued = s.queued.filter((e) => !drops.some((d) => d.entry === e))
+  if (!s.queued.length) delete s.queued
+  persist()
+  audit({ action: 'queue-stale', id: s.id, repo: s.repo, dropped: drops.length, reasons: drops.map((d) => d.reason), ok: true })
+}
+
+/* Teardown purge: a child that is gone can have nothing more said about it, and
+ * the parent chat either asked for the teardown or was told about it. Only
+ * OBSERVATIONAL notes go — a `reply-receipt` answers a message the parent
+ * actually sent and is still worth having, however late.
+ *
+ * flushQueued's revalidation would drop these anyway (`child` absent), a tick
+ * later and one at a time; doing it at the teardown makes the count one log
+ * line instead of N, and takes them out of the digest they'd otherwise pad. */
+export function purgeNotesAbout(childId) {
+  let purged = 0
+  for (const s of Object.values(registry.sessions)) {
+    if (!Array.isArray(s.queued) || !s.queued.length) continue
+    const keep = s.queued.filter((q) => !(isObservational(q.kind) && q.about && q.about.childId === childId))
+    if (keep.length === s.queued.length) continue
+    const n = s.queued.length - keep.length
+    purged += n
+    s.queued = keep
+    if (!s.queued.length) delete s.queued
+    console.log(`[agent-local] purged ${n} stale note(s) about ${childId} from ${s.id} on teardown`)
+  }
+  if (purged) {
+    persist()
+    audit({ action: 'queue-purge', id: childId, notes: purged, ok: true })
+  }
+  return purged
+}
+
 // Deliver any queued prompts whose session has gone idle. Runs on a timer (not
 // just on the GET poll) so a queued prompt fires even with the dashboard closed.
 // Skips sessions still working (busy marker) or parked on a menu (text would land
@@ -2605,20 +2674,27 @@ async function flushQueued() {
       if (s.deliverRetryAt && Date.now() < s.deliverRetryAt) continue
       if (!(await sessionAlive(s))) continue
       const pane = await captureTail(s, TAIL_LINES)
-      // The FIFO head only: one delivery per session per tick, in order — never a
-      // burst (mid-turn delivery changes WHEN the head goes out, not how many).
+      // ONE delivery per session per tick, and the queue's own order decides
+      // which — except that an idle-only entry no longer BLOCKS the
+      // boundary-eligible ones behind it, and that stale observations are
+      // dropped before anything is typed (queue-delivery.mjs `selectDelivery`).
       // The ship-train and menu guards live inside the same decision.
-      const q = s.queued[0]
-      const dec = decideDelivery({
-        kind: q.kind,
+      const sel = selectDelivery({
+        queue: s.queued,
+        revalidate: (e) => noteRevalidator(s.id, e),
         busy: isBusy(pane),
         menu: !!menuKindOf(pane),
         shipHead: s.id === shipHead,
         boundaryEnabled: BOUNDARY_DELIVERY,
         sinceBoundaryMs: s.boundaryAt ? Date.now() - s.boundaryAt : null,
       })
-      if (!dec.deliver) continue
-      const payload = withImages(q.text || '', q.paths || [])
+      if (sel.drops.length) dropStaleNotes(s, sel.drops)
+      if (!sel.pick) continue
+      const picked = new Set(sel.pick.entries)
+      const q = sel.pick.entries[0]
+      const dec = { via: sel.pick.via }
+      const text = deliveryText(sel.pick.entries, Date.now())
+      const payload = withImages(text, sel.pick.entries.flatMap((e) => e.paths || []))
       const d = await deliver(s, payload)
       if (!d.ok) {
         s.deliverFailures = (s.deliverFailures || 0) + 1
@@ -2633,18 +2709,25 @@ async function flushQueued() {
       }
       delete s.deliverFailures
       delete s.deliverRetryAt
-      s.lastPrompt = { text: q.text || '', at: nowIso() }
+      s.lastPrompt = { text, at: nowIso() }
+      // The steer fingerprint is taken over the DELIVERED string, so a text this
+      // path had to rebuild (an age line, a digest, image paths) must be
+      // re-recorded or the chat view loses the bubble's colour for it.
+      if (text !== (q.text || '') || payload !== text) recordSteer(s, payload, q.steeredBy, q.source)
       // Stamp the mid-turn delivery so the next one is paced (BOUNDARY_MIN_GAP_MS)
       // rather than following on the next 3 s tick.
       if (dec.via === 'boundary') s.boundaryAt = Date.now()
-      s.queued.shift()
+      // By identity, never by index: the stale drop above already re-shaped the
+      // queue, and a digest takes several entries that need not be adjacent.
+      s.queued = s.queued.filter((e) => !picked.has(e))
       if (!s.queued.length) delete s.queued
       persist()
       // waitMs: enqueue → actual delivery. This is the real lag of a parked
       // prompt, and the only place it is recorded. `via` splits the two
-      // populations (boundary vs idle); `kind` says which class jumped the queue.
+      // populations (boundary vs idle); `kind` says which class jumped the
+      // queue, and `notes` how many observations one digest collapsed.
       const waitMs = q.at ? Date.now() - Date.parse(q.at) : null
-      audit({ action: 'queue-flush', id: s.id, repo: s.repo, len: payload.length, images: (q.paths || []).length, ...(d.stripped ? { stripped: d.stripped } : {}), ...(d.cleared ? { cleared: d.cleared } : {}), ...(waitMs != null && waitMs >= 0 ? { waitMs } : {}), via: dec.via, ...(q.kind ? { kind: q.kind } : {}), ok: true })
+      audit({ action: 'queue-flush', id: s.id, repo: s.repo, len: payload.length, images: (q.paths || []).length, ...(d.stripped ? { stripped: d.stripped } : {}), ...(d.cleared ? { cleared: d.cleared } : {}), ...(waitMs != null && waitMs >= 0 ? { waitMs } : {}), via: dec.via, ...(q.kind ? { kind: q.kind } : {}), ...(sel.pick.digest ? { notes: sel.pick.entries.length } : {}), ok: true })
     }
   } finally {
     flushing = false
@@ -2835,6 +2918,7 @@ const ACTS = {
     if (s.lc.cleanupOnClose) await removeAgentArtifacts(s)
     recordLifetime(s, Date.now())
     removeFromShipTrain(s.id)
+    purgeNotesAbout(s.id)
     const wrapUpMs = s.lc.closingAt ? Date.now() - Date.parse(s.lc.closingAt) : undefined
     audit({
       action: 'close-reap', id: s.id, repo: s.repo, kind: s.kind || 'dev',
@@ -3180,6 +3264,7 @@ export async function kill({ id }) {
   if (s.atlasWorker && registry.sessions[s.atlasWorker]) await cleanup({ id: s.atlasWorker }).catch(() => {})
   recordLifetime(s, Date.now())
   removeFromShipTrain(id)
+  purgeNotesAbout(id)
   delete registry.sessions[id]
   persist()
   audit({ action: 'kill', id, repo: s.repo, branch: s.branch, worktree: s.worktree, ok: true })
@@ -3239,6 +3324,7 @@ export async function cleanup({ id }) {
   await removeAgentArtifacts(s)
   recordLifetime(s, Date.now())
   removeFromShipTrain(id)
+  purgeNotesAbout(id)
   delete registry.sessions[id]
   persist()
   audit({ action: 'cleanup', id, repo: s.repo, branch: s.branch, worktree: s.worktree, ok: true })

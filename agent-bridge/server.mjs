@@ -72,7 +72,7 @@ import { parseTranscript, stitchParsed, steerKey, steerEntry, tagSteered } from 
 import { parseChoiceMenu, currentHighlight, driveSelect } from '../api/src/menu.mjs'
 // The queued-prompt delivery gate, shared with the box-local executor so the two
 // cannot drift: one per-kind classification, one menu/pacing rule, one test.
-import { decideDelivery, deliveryBackoffMs } from '../api/src/queue-delivery.mjs'
+import { selectDelivery, deliveryBackoffMs, deliveryText } from '../api/src/queue-delivery.mjs'
 // A launch prompt travels by FILE, never inside the tmux command — the same
 // shell shape the box-local executor builds, so the two cannot drift.
 import { promptFileBody, promptFileCommand } from '../api/src/prompt-file-launch.mjs'
@@ -1608,11 +1608,14 @@ async function flushQueued() {
       if (s.deliverRetryAt && Date.now() < s.deliverRetryAt) continue
       if (!(await sessionAlive(s))) continue
       const pane = await captureTail(s, TAIL_LINES)
-      // The FIFO head only: one delivery per session per tick, in order — never a
-      // burst (boundary delivery changes WHEN the head goes out, not how many).
-      const q = s.queued[0]
-      const dec = decideDelivery({
-        kind: q.kind,
+      // ONE delivery per session per tick, in queue order — except that an
+      // idle-only entry no longer BLOCKS the boundary-eligible ones behind it
+      // (queue-delivery.mjs `selectDelivery`, the shared scan). No `revalidate`
+      // here: the observational notes it drops are only ever addressed to a
+      // box-local Atlas chat, so on a bridge that pass has nothing to look at
+      // and the selection reduces to the scan.
+      const sel = selectDelivery({
+        queue: s.queued,
         busy: isBusy(pane),
         menu: !!menuKindOf(pane),
         // No ship train here: the serial merge queue is box-local (a remote agent
@@ -1621,8 +1624,11 @@ async function flushQueued() {
         boundaryEnabled: BOUNDARY_DELIVERY,
         sinceBoundaryMs: s.boundaryAt ? Date.now() - s.boundaryAt : null,
       })
-      if (!dec.deliver) continue
-      const payload = withImages(q.text || '', q.paths || [])
+      if (!sel.pick) continue
+      const picked = new Set(sel.pick.entries)
+      const q = sel.pick.entries[0]
+      const dec = { via: sel.pick.via }
+      const payload = withImages(deliveryText(sel.pick.entries, Date.now()), sel.pick.entries.flatMap((e) => e.paths || []))
       const d = await deliver(s, payload)
       if (!d.ok) {
         s.deliverFailures = (s.deliverFailures || 0) + 1
@@ -1641,7 +1647,9 @@ async function flushQueued() {
       // rather than following on the next 3 s tick — at idle the pacing came free
       // (delivery made the agent busy), mid-turn nothing paces it.
       if (dec.via === 'boundary') s.boundaryAt = Date.now()
-      s.queued.shift()
+      // By identity, never by index — `selectDelivery` may hand back an entry
+      // that was not the head (a boundary message overtaking an idle-only one).
+      s.queued = s.queued.filter((e) => !picked.has(e))
       if (!s.queued.length) delete s.queued
       persist()
       // waitMs: enqueue → actual delivery. Same field names as the box's

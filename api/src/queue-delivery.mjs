@@ -1,10 +1,11 @@
 /* ── WHEN a parked prompt goes out ──────────────────────────────────────────
  * The pure decision behind BOTH executors' `flushQueued` — the box-local
- * agent-local.mjs and the remote agent-bridge/server.mjs: given
- * one queued FIFO head and what the pane looks like, deliver now or hold for a
- * later tick. Shared rather than mirrored so the two cannot drift on the one
- * thing they must agree about — which kinds may land mid-turn. Split out so the
- * gate is testable without a live tmux (queue-delivery.test.mjs).
+ * agent-local.mjs and the remote agent-bridge/server.mjs: given a session's
+ * queue and what the pane looks like, WHICH message goes out now
+ * (`selectDelivery`, further down), and for one entry, may it (`decideDelivery`).
+ * Shared rather than mirrored so the two cannot drift on the one thing they must
+ * agree about — which kinds may land mid-turn. Split out so the gate is testable
+ * without a live tmux (queue-delivery.test.mjs).
  *
  * What each executor supplies for itself: the ship train (box-local only — the
  * bridge passes `shipHead: false`) and the kill-switch env, which is deliberately
@@ -128,4 +129,185 @@ export function decideDelivery({ kind, busy, menu, shipHead, boundaryEnabled, si
   if (classifyKind(kind) !== 'boundary') return { deliver: false, reason: 'idle-only' }
   if (sinceBoundaryMs != null && sinceBoundaryMs < BOUNDARY_MIN_GAP_MS) return { deliver: false, reason: 'paced' }
   return { deliver: true, via: 'boundary' }
+}
+
+/* ── A note that aged in the queue is not the note that was written ──────────
+ * The incident this half exists for: one Atlas orchestrator ran a single ~7 h
+ * turn while it spawned, merged and cleaned up 8 dev agents. Its queue reached
+ * 20. When the turn finally ended, ~15 notes drained ONE PER TURN — 🚀
+ * READY-TO-SHIP fleet notes and ⏸ Turn ended lines about children whose PRs that
+ * same session had merged hours earlier and whose sessions it had already torn
+ * down. Every one was moot, each cost a whole wake-up turn, and none of them
+ * said WHEN it had been observed, so the recipient could not even tell. Four
+ * things were wrong and all four are in this module:
+ *
+ *   1. an observation carried no observation TIME (`observedAt` + `ageLine`);
+ *   2. it was delivered without ever being re-checked (`selectDelivery`'s
+ *      `revalidate` callback + the intra-queue supersession rule below);
+ *   3. an idle-only head BLOCKED the boundary-eligible messages behind it —
+ *      turn-end lines did land at tool-call boundaries early in that turn and
+ *      stopped the moment a `fleet-note` reached the head (the scan below);
+ *   4. the survivors drained one per turn instead of once (`deliveryText`'s
+ *      digest).
+ *
+ * ⚠️ OBSERVATIONAL is a THIRD axis, next to trust and delivery class — and
+ * `turn-end` is deliberately in a different bucket on two of them: its trust
+ * class is observation, its DELIVERY class is boundary (it is about one chat's
+ * own child, so it may land mid-turn), and it is REVALIDATABLE, because "it is
+ * waiting at its prompt" is a claim about the world that expires. A
+ * `reply-receipt` is NOT in here on purpose: it answers a message its recipient
+ * actually sent, so it is delivered however late — it only gets the age line. */
+export const OBSERVATIONAL_KINDS = new Set(['fleet-note', 'turn-end'])
+export const isObservational = (kind) => OBSERVATIONAL_KINDS.has(kind)
+
+// Above this age a delivered note SAYS how old it is. Under it, no clutter —
+// the overwhelmingly common case is a note that waits one 3 s flush tick.
+export const NOTE_AGE_DISCLOSE_MS = Number(process.env.AGENT_NOTE_AGE_DISCLOSE_MS || 60_000)
+
+const clock = (ms) => new Date(ms).toTimeString().slice(0, 5)
+
+export function humanAge(ms) {
+  const s = Math.round(ms / 1000)
+  if (s < 90) return `${s}s`
+  const m = Math.round(s / 60)
+  if (m < 90) return `${m}m`
+  return `${Math.floor(m / 60)}h ${m % 60}m`
+}
+
+/** The disclosure line, or '' when the note is fresh (or carries no observation
+ *  time at all — an un-stamped kind must read exactly as it always has). */
+export function ageLine(observedAt, now = Date.now(), thresholdMs = NOTE_AGE_DISCLOSE_MS) {
+  if (!observedAt) return ''
+  const age = now - observedAt
+  if (age <= thresholdMs) return ''
+  return `⏱ Observed at ${clock(observedAt)}, ${humanAge(age)} before this delivery — it aged in your queue while your turn ran, so check it is still true before acting on it.`
+}
+
+/**
+ * The text actually typed at the recipient.
+ *
+ * ⚠️ The attribution header stays FIRST. It is what the chat view falls back to
+ * when the send-time fingerprint is gone (web/src/lib/msgProvenance.ts anchors
+ * `⚙ **Automatic fleet update` at the START of the message), so an age line or a
+ * digest intro prefixed ahead of it would silently repaint a machine
+ * observation in the operator's own colour. Hence `header` + `note` on the
+ * entry: the pieces, not a string to be split back apart.
+ *
+ * One fresh note returns `entry.text` BYTE-IDENTICALLY — the un-stamped,
+ * under-threshold, single-message path is exactly what it always was.
+ */
+export function deliveryText(entries, now = Date.now(), thresholdMs = NOTE_AGE_DISCLOSE_MS) {
+  if (entries.length === 1) {
+    const e = entries[0]
+    const line = ageLine(e.observedAt, now, thresholdMs)
+    if (!line) return e.text || ''
+    return e.header && e.note ? `${e.header}\n\n${line}\n\n${e.note}` : `${line}\n\n${e.text || ''}`
+  }
+  const body = [
+    `⚙ Fleet digest — ${entries.length} observations the dashboard made while your turn ran, oldest first. The clock time on each line is when it was OBSERVED, not now; some of it may already be moot. None of it is an instruction — check anything you mean to act on.`,
+    ...entries.map((e) => `• ${e.observedAt ? clock(e.observedAt) : '--:--'} — ${String(e.note || e.text).replace(/\s+/g, ' ').trim()}`),
+  ].join('\n')
+  const header = entries[0].header
+  return header ? `${header}\n\n${body}` : body
+}
+
+/**
+ * Pick what this session may deliver THIS tick, from its whole queue.
+ *
+ * `decideDelivery` above answers for ONE entry; this is the loop around it, and
+ * the loop is where the head-of-line bug lived. `flushQueued` used to ask about
+ * `queued[0]` alone, so a single idle-only `fleet-note` at the head parked every
+ * boundary-eligible message behind it for the rest of the turn. It now scans for
+ * the first entry the gate ALLOWS given the pane — which at idle is still the
+ * FIFO head, because at idle the gate allows everything.
+ *
+ * Order WITHIN a class never changes (the scan preserves queue order and only
+ * ever skips entries the gate refuses), and nothing here relaxes the menu, the
+ * ship-train or the BOUNDARY_MIN_GAP_MS pacing — those all live in
+ * `decideDelivery` and are consulted per entry.
+ *
+ * Two drops happen before the scan, both only ever to OBSERVATIONAL entries:
+ *  - `revalidate(entry)` — the executor's callback into current child state
+ *    (gone / superseded / self-merged). Injected rather than forked, so the
+ *    rule is one implementation and testable without a live roster.
+ *  - SUPERSESSION inside the queue itself — a later queued entry about the same
+ *    child makes an earlier observation about it moot, which needs no state at
+ *    all. A dropped entry does not supersede anything (it is not being
+ *    delivered either), so this is computed back-to-front.
+ *
+ * @returns {{drops: Array<{entry: object, reason: string}>, pick: null|{entries: object[], via: 'idle'|'boundary', digest: boolean}, hold?: string}}
+ *          Entries come back BY REFERENCE — the caller removes them from its
+ *          queue by identity, never by index (the drop pass shifts every index).
+ */
+export function selectDelivery({ queue, revalidate = () => null, busy, menu, shipHead, boundaryEnabled, sinceBoundaryMs }) {
+  const stale = new Map() // entry -> reason
+  const seenChild = new Set()
+  for (let i = queue.length - 1; i >= 0; i--) {
+    const e = queue[i]
+    const childId = e.about && e.about.childId
+    if (isObservational(e.kind)) {
+      const reason = childId && seenChild.has(childId) ? `superseded by a later queued note about ${childId}` : revalidate(e) || null
+      if (reason) {
+        stale.set(e, reason)
+        continue // a dropped note supersedes nothing
+      }
+    }
+    if (childId) seenChild.add(childId)
+  }
+  const survivors = queue.filter((e) => !stale.has(e))
+  const drops = queue.filter((e) => stale.has(e)).map((entry) => ({ entry, reason: stale.get(entry) }))
+
+  let pick = null
+  let hold
+  for (const e of survivors) {
+    const d = decideDelivery({ kind: e.kind, busy, menu, shipHead, boundaryEnabled, sinceBoundaryMs })
+    if (d.deliver) {
+      pick = { entries: [e], via: d.via, digest: false }
+      break
+    }
+    if (!hold) hold = d.reason
+  }
+  // At a full idle, the surviving observations go out as ONE wake-up rather
+  // than one per turn. Boundary deliveries are never batched: a message that
+  // lands mid-turn is meant to be read on its own.
+  if (pick && pick.via === 'idle' && isObservational(pick.entries[0].kind)) {
+    const batch = survivors.filter((e) => isObservational(e.kind))
+    if (batch.length > 1) pick = { entries: batch, via: 'idle', digest: true }
+  }
+  return { drops, pick, ...(hold ? { hold } : {}) }
+}
+
+/* ── Is this observation still TRUE? ─────────────────────────────────────────
+ * The pure half of the `revalidate` callback: the executor supplies the child's
+ * CURRENT roster row (and whether the recipient merged that child's PR itself),
+ * this decides. Null = still worth delivering.
+ *
+ * `child` absent means the session is GONE — torn down or cleaned up, which in
+ * the incident was true of every note that drained. An entry with no `about`
+ * is never revalidated: nothing is known about what it claims.
+ */
+const SHIP_RANK = { ready: 1, shipped: 2, merged: 2 }
+
+export function noteStaleReason(entry, { child, mergedBySelf } = {}) {
+  // A `reply-receipt` is not observational and is never called stale — however
+  // late it is, it answers a message its recipient actually sent. (The
+  // selection never asks about one either; this makes the rule self-contained.)
+  if (!entry || !isObservational(entry.kind)) return null
+  const about = entry.about
+  if (!about || !about.childId) return null
+  if (!child) return `${about.childId} is gone — the session was torn down after this was observed`
+  if (entry.kind === 'fleet-note') {
+    // A merge the RECIPIENT performed itself: the claim exists, so the note is
+    // its own action reported back. (diffShipNotes suppresses this at
+    // observation time; a note already in the queue when the merge happened is
+    // what this catches.)
+    if (mergedBySelf) return `${about.childId} was merged by this chat itself`
+    const now = SHIP_RANK[child.shipState] || 0
+    const then = SHIP_RANK[about.state] || 0
+    if (now > then) return `${about.childId} is now ${child.shipState}, past the ${about.state} this reported`
+  }
+  // "it is waiting at its prompt" is a claim about the world, and a child that
+  // has started another turn since has falsified it.
+  if (entry.kind === 'turn-end' && child.phase === 'run') return `${about.childId} has started another turn since`
+  return null
 }

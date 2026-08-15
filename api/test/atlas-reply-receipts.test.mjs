@@ -85,6 +85,19 @@ test('one message + ten idle observations = exactly one receipt', () => {
   for (let i = 0; i < 10; i++) assert.deepEqual(tick(s, [child('wait')]), [])
 })
 
+test('both lines are stamped with the OBSERVATION time, from the injected clock', () => {
+  // A line can sit in a busy chat's queue for hours (measured: ~7 h), so the
+  // delivery has to be able to say how old it is — which needs the moment the
+  // edge was seen, taken here rather than estimated at the far end.
+  const s = createReceiptState()
+  arm(s)
+  tick(s, [child('run')])
+  assert.equal(tick(s, [child('wait')], T0 + 90_000)[0].observedAt, T0 + 90_000)
+  const t = createReceiptState()
+  tick(t, [child('run')], T0, parentOf)
+  assert.equal(tick(t, [child('wait')], T0 + 5000, parentOf)[0].observedAt, T0 + 5000)
+})
+
 test('three messages before one idle collapse into one receipt, timed from the first', () => {
   const s = createReceiptState()
   arm(s, 'c1', 'orch', T0)

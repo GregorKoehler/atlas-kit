@@ -26,6 +26,7 @@ import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 import express from 'express'
 import * as local from './agent-local.mjs'
+import { noteStaleReason } from './queue-delivery.mjs'
 import { bridges, bridgeForRepo, defaultBridge, defaultLabel, bridgeByLabel, advertisedRepos } from './bridges.mjs'
 import { rememberRoster, lastKnownRoster } from './bridge-roster.mjs'
 import { capacityVerdict, capacityMessage } from './agent-capacity.mjs'
@@ -953,6 +954,7 @@ async function runRemoteAtlasClose(id, bridge, cleanup) {
     // unless a second press already forced it (the kill route cleared the marker).
     if (remoteClosing.has(id)) {
       await callBridge('POST', cleanup ? '/cleanup' : '/kill', { id }, BRIDGE_EXEC_TIMEOUT_MS, bridge)
+      local.purgeNotesAbout(id)
       remoteClosing.delete(id)
     }
   }
@@ -1616,8 +1618,58 @@ function deliverShipNote(n) {
     source: 'system', // → its own bubble in the chat view, not an operator turn
     kind: 'fleet-note',
     summary: `${n.childId} — ${n.state}`,
+    // WHEN this was observed, WHAT it is about, and the two pieces of `text` —
+    // so the delivery can disclose the note's age, re-check it is still true,
+    // and batch it, without ever putting anything ahead of the attribution
+    // header (queue-delivery.mjs).
+    observedAt: n.observedAt,
+    about: { childId: n.childId, state: n.state },
+    header: messageHeader(SYSTEM_SENDER),
+    note: n.text,
   })
 }
+
+/* --- revalidation at DELIVERY time --------------------------------- *
+ * A note is written when the dashboard observes something and read whenever the
+ * recipient next stops. Measured, those were ~7 h apart, and ~15 notes drained
+ * into an Atlas chat about children it had merged and torn down hours earlier —
+ * every one of them true when written and moot when read.
+ *
+ * So the executor re-checks each observational note against the CURRENT roster
+ * just before typing it, and drops the ones that have expired (loudly — see
+ * agent-local's dropStaleNotes). The rule itself is pure (queue-delivery.mjs
+ * `noteStaleReason`); what lives here is the state it needs, which is exactly
+ * the roster the notes were derived from plus the merge claims beside it. Both
+ * note producers feed it — the ship-note pass and the receipt pass each run
+ * their own listSessions() here — so a note is never judged against a different
+ * view of the fleet than the one that produced it.
+ *
+ * ⚠️ ABSENT IS NOT GONE, and this is the same hazard as the unreachable-bridge
+ * roster: a saturated bridge that cannot answer `/sessions` inside the timeout
+ * drops its children out of `all` while every one of them is alive. So "gone" is
+ * decided on how long a child has been UNSEEN (`lastSeenAt` + NOTE_GONE_GRACE_MS
+ * ≈ 10 polls), and a child this process has never seen at all — an empty roster
+ * before the first pass, a queue restored from disk on a fresh boot — is never
+ * called gone. Knowing nothing means deliver, exactly as before; the deliberate
+ * teardown case is handled up front by `purgeNotesAbout`. */
+const NOTE_GONE_GRACE_MS = Number(process.env.AGENT_NOTE_GONE_GRACE_MS || 60_000)
+let lastNoteRoster = new Map()
+const lastSeenAt = new Map() // sessionId -> ms it was last in a roster
+function rememberNoteRoster(all) {
+  lastNoteRoster = new Map(all.map((s) => [s.id, s]))
+  const seenNow = Date.now()
+  for (const s of all) lastSeenAt.set(s.id, seenNow)
+  // Bounded: an id nobody has seen for an hour is long past the grace above.
+  for (const [id, at] of lastSeenAt) if (seenNow - at > 60 * 60_000) lastSeenAt.delete(id)
+}
+local.setNoteRevalidator((parentId, entry) => {
+  const childId = entry.about && entry.about.childId
+  if (!childId) return null
+  const child = lastNoteRoster.get(childId)
+  const seen = lastSeenAt.get(childId)
+  if (!child && !(seen && Date.now() - seen > NOTE_GONE_GRACE_MS)) return null
+  return noteStaleReason(entry, { child, mergedBySelf: mergeClaims.get(childId) === parentId })
+})
 
 async function pollAtlasShipNotes() {
   // listSessions() reads every session's transcript — a pass can outlast the
@@ -1631,6 +1683,11 @@ async function pollAtlasShipNotes() {
     await pollRemoteMerged(lastRemoteSessions)
     applyRemoteMerged(lastRemoteSessions)
     const all = [...sessions, ...lastRemoteSessions]
+    // The same roster the notes below are derived from, kept for the
+    // delivery-time revalidation above — no second listSessions(), and no risk
+    // of judging a note stale against a different view of the fleet than
+    // produced it.
+    rememberNoteRoster(all)
     // Never baseline off a half-derived ship state (see remoteMergedReady).
     if (!remoteMergedReady()) return
     const { notes, next, capped, suppressed } = diffShipNotes(
@@ -1734,6 +1791,10 @@ async function deliverReplyReceipt(n) {
     source: 'system', // → its own bubble in the chat view, not an operator turn
     kind: n.kind,
     summary: `${n.childId} — ${what}`,
+    observedAt: n.observedAt,
+    about: { childId: n.childId },
+    header: messageHeader(SYSTEM_SENDER),
+    note: n.text,
   })
   if (r.ok) {
     noteSend(SYSTEM_SENDER.id, n.parentId)
@@ -1767,7 +1828,11 @@ async function pollReplyReceipts() {
   if (receiptPollRunning) return
   receiptPollRunning = true
   try {
-    await applyReplyReceipts([...(await local.listSessions()), ...lastRemoteSessions])
+    // The receipt pass produces turn-end lines off its OWN roster snapshot, so
+    // that snapshot is the one their revalidation has to be judged against.
+    const all = [...(await local.listSessions()), ...lastRemoteSessions]
+    rememberNoteRoster(all)
+    await applyReplyReceipts(all)
   } finally {
     receiptPollRunning = false
   }
@@ -2250,6 +2315,9 @@ export function agentRouter(bearerAuth) {
     const closing = await startRemoteAtlasClose(id, false)
     if (closing) return res.json(closing)
     const r = await callBridgeForId('POST', '/kill', { id }, id, BRIDGE_EXEC_TIMEOUT_MS)
+    // The notes are queued in a BOX-LOCAL Atlas chat even when the child is
+    // remote, so the purge is the box's either way (see local.purgeNotesAbout).
+    if (r.body && r.body.ok) local.purgeNotesAbout(id)
     res.status(r.status).json(r.body)
   })
 
@@ -2263,6 +2331,7 @@ export function agentRouter(bearerAuth) {
     const closing = await startRemoteAtlasClose(id, true)
     if (closing) return res.json(closing)
     const r = await callBridgeForId('POST', '/cleanup', { id }, id, BRIDGE_EXEC_TIMEOUT_MS)
+    if (r.body && r.body.ok) local.purgeNotesAbout(id)
     res.status(r.status).json(r.body)
   })
 

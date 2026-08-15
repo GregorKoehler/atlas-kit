@@ -209,7 +209,9 @@ const queueDepth = (s) => (Array.isArray(s.queued) ? s.queued.length : 0)
  * @param sessions  box-local + remote sessions (publicView shape: id, kind, repo,
  *                  task, phase, lastRunMs, queued, menuKind)
  * @param parentOf  (childId) => parentId | undefined — the spawn lineage
- * @param now       ms, injected so the elapsed time is testable
+ * @param now       ms, injected so the elapsed time is testable — and stamped on
+ *                  every line as `observedAt`, since one of these can sit in a
+ *                  busy chat's queue for hours before it is read.
  * @returns { due, pending, seen, turns, capped }
  */
 export function diffReceipts({ pending, seen, turns }, sessions, parentOf = () => undefined, now = Date.now()) {
@@ -238,7 +240,7 @@ export function diffReceipts({ pending, seen, turns }, sessions, parentOf = () =
     if (armed && armed.delivered) {
       nextPending.delete(s.id) // SPEND — before the note is even handed off
       const waitedMs = Math.max(0, now - armed.at)
-      due.push({ kind: 'reply-receipt', parentId, childId: s.id, waitedMs, by: armed.by, text: receiptText(s, waitedMs, armed.by) })
+      due.push({ kind: 'reply-receipt', parentId, childId: s.id, waitedMs, by: armed.by, observedAt: now, text: receiptText(s, waitedMs, armed.by) })
       continue
     }
     const n = (turns.get(s.id) || 0) + 1
@@ -248,7 +250,7 @@ export function diffReceipts({ pending, seen, turns }, sessions, parentOf = () =
       continue
     }
     const runMs = typeof s.lastRunMs === 'number' ? s.lastRunMs : null
-    due.push({ kind: 'turn-end', parentId, childId: s.id, runMs, text: turnEndText(s, runMs) })
+    due.push({ kind: 'turn-end', parentId, childId: s.id, runMs, observedAt: now, text: turnEndText(s, runMs) })
   }
   return { due, pending: nextPending, seen: nextSeen, turns: nextTurns, capped }
 }

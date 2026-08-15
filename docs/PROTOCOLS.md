@@ -27,7 +27,7 @@ Five operations act on a live session, each with a different disruption profile:
 
 | Action | Implementation | Behavior | Use when |
 |---|---|---|---|
-| **queue** | `queuePrompt()` — `agent-local.mjs` | Appends to `s.queued` (a FIFO). `flushQueued()`, on a 3s timer (`QUEUE_FLUSH_MS`), delivers the FIFO head when **`queue-delivery.mjs` says it may** — see [§1a](#1a-when-a-queued-message-is-delivered). A menu, or being the active ship-train head, still holds everything. | The agent is mid-turn; you want to add context without breaking its flow. The gentle default. |
+| **queue** | `queuePrompt()` — `agent-local.mjs` | Appends to `s.queued` (a FIFO). `flushQueued()`, on a 3s timer (`QUEUE_FLUSH_MS`), delivers the first entry **`queue-delivery.mjs` says it may** — the head at idle — see [§1a](#1a-when-a-queued-message-is-delivered). A menu, or being the active ship-train head, still holds everything. | The agent is mid-turn; you want to add context without breaking its flow. The gentle default. |
 | **prompt** | `prompt()` — `agent-local.mjs` | Delivers immediately. Refuses with `409` if a choice menu (plan/permission) is pending, unless `force` is set — typing into a live menu would silently confirm the highlighted option. Delivery itself **sanitises terminal escapes and reads the input box back before pressing Enter** (`tui-input.mjs`): `send-keys -l` is a keyboard, so an escape sequence in pasted text is parsed as keys and swallows the words around it. A buffer that can't be read back is cleared and the call fails rather than submitting something mangled. | The agent is already idle, waiting on you. |
 | **interrupt** | `interrupt()` — `agent-local.mjs:2101` | Sends `Escape` (stops the in-flight turn, **keeps** the transcript), waits `INTERRUPT_SETTLE_MS` (400ms) for the TUI to settle, then delivers. Disruptive. | The agent is going wrong and must change course *now*. |
 | **kill** | `kill()` — `agent-local.mjs:2856` | For a dev agent **without** a live paired Atlas worker (or on a second press), an immediate `tmux kill-session` — the worktree + `agent/<id>` branch are **kept** for review. For a dev agent **with** a paired worker (first press), closes gracefully: delivers `DEV_RECAP_PROMPT` (line 2671), moves the session to `ingesting/recap`, and lets the driver run recap → worker ingest → Atlas merge → reap. Never touches the git remote beyond killing tmux. | The agent's work is done or it was started in error, but you're not ready to delete its branch. |
@@ -45,7 +45,9 @@ merge is running, or tmux is already dead) there's nothing left to call back.
 
 A parked prompt no longer waits for a full idle. **`queue-delivery.mjs`** is the single
 decision, shared by the box executor and the bridge (imported, not copied, so the two
-cannot drift), and it reads the message's `kind`:
+cannot drift). `decideDelivery` answers for ONE entry, off the message's `kind`;
+`selectDelivery` is the scan around it — which entry of the whole queue goes out this
+tick ([§1b](#1b-an-observation-is-only-true-when-it-was-made)):
 
 - **Course-changing kinds** — `operator`, `steer`, `reply-receipt`, `turn-end` (and
   `agent-msg`, reserved for peer mail) — are delivered at the running turn's next
@@ -63,6 +65,52 @@ being the active ship-train head. A delivery the executor refuses (a box it can'
 buffer that won't read back) backs the session off with `deliveryBackoffMs` instead of
 retrying every 3 s; the message stays queued. `AGENT_BOUNDARY_DELIVERY=0` /
 `BRIDGE_BOUNDARY_DELIVERY=0` restore idle-only delivery, independently per executor.
+
+---
+
+## 1b. An observation is only true when it was made
+
+An orchestrator can run one turn for hours while the dashboard keeps observing its
+children, so a note written at 09:00 may not be *read* until 16:00 — by which time the
+child it is about may be merged, torn down, or off on another turn. Four rules make the
+queue account for that, all in the same shared `queue-delivery.mjs`:
+
+- **It says when it was observed.** The producers stamp `observedAt` from their own
+  injected clock (`diffShipNotes` / `diffReceipts` — never estimated later at delivery).
+  Past `AGENT_NOTE_AGE_DISCLOSE_MS` (60 s) the delivery opens with `⏱ Observed at HH:MM, …`
+  (`ageLine`); under it nothing changes, and a fresh single note is delivered
+  **byte-identically** to before.
+- **It is re-checked before it is typed.** `noteStaleReason` (pure) plus a `revalidate`
+  callback `agent-routes.mjs` registers (`local.setNoteRevalidator`, fed the *same* roster
+  snapshot that produced the notes) drops an observation whose child is gone, whose ship
+  state has been overtaken, that the recipient merged itself, or whose `turn-end` child has
+  started another turn. A later queued note about the same child supersedes an earlier one
+  with no state at all. Every drop is **loud**: console + `agent-messages.jsonl`
+  (`delivered: false`, `reason: "stale: …"`) + a `queue-stale` audit line.
+  ⚠️ *Absent is not gone* — a child is only called gone once **unseen** for
+  `AGENT_NOTE_GONE_GRACE_MS` (60 s ≈ 10 polls), so an unreachable bridge cannot silently
+  drop notes about its live children; a child this process has never seen is never gone.
+- **An idle-only entry no longer blocks the queue.** `selectDelivery` scans for the first
+  entry the gate *allows*, so one parked `fleet-note` no longer holds every boundary-eligible
+  message behind it. Order within a class never changes, at idle it is FIFO again, and menu /
+  ship-train / `BOUNDARY_MIN_GAP_MS` are untouched (still `decideDelivery`, per entry). Both
+  executors remove the delivered entry **by identity, never `shift()`**.
+- **The idle drain is one wake-up.** Several surviving observations go out as ONE
+  `⚙ Fleet digest` with a clock time per line, audited as `notes: N` on `queue-flush`.
+  Boundary deliveries are never batched.
+
+⚠️ The **attribution header stays first** in any rebuilt text (`msgProvenance.ts` anchors
+`⚙ **Automatic fleet update` at the start), which is why a note is queued as `header` +
+`note` pieces rather than one string; the steer fingerprint is re-taken whenever the
+delivered string was rebuilt. ⚠️ A **`reply-receipt` is exempt** from revalidation and
+batching — it answers a message its recipient actually sent, so it is delivered however
+late and only gets the age line. `fleet-note` stays **idle-only**, and the latches,
+`MAX_NOTES_PER_CHILD` and merge-claim suppression are unchanged — this sits on top of them.
+
+On teardown (`kill` / `cleanup` / the lifecycle reap, and after a successful remote one)
+`purgeNotesAbout(childId)` takes that child's undelivered observations out of every parent's
+queue at once — one `queue-purge` audit line instead of N drops a tick later. Receipts
+survive it.
 
 ---
 
@@ -153,7 +201,9 @@ notes fire **once per (child, state), ever** — the latch is persisted, a child
 sighting is a silent baseline so a restart can never announce retroactively, and the latch
 advances only *after* a note is actually handed off, so a failed delivery is retried rather
 than lost. A `merged` the recipient caused itself, via its own `merge_pr` call, is
-suppressed for that chat only.
+suppressed for that chat only. Both carry the time they were **observed**, and both are
+re-checked, aged and (for the observational ones) batched at delivery —
+[§1b](#1b-an-observation-is-only-true-when-it-was-made).
 
 ---
 
