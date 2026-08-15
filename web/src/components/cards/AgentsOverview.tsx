@@ -273,9 +273,10 @@ export function AgentsOverview({ switcher = false, currentId }: { switcher?: boo
           ⚠ {silencedCount} agent{silencedCount === 1 ? '' : 's'} unreachable — {silencedNote}
         </span>
       ) : null}
-      {!anything && !silenced.length ? (
-        <span className="agents-ov__idle">none active</span>
-      ) : !anything ? null : (
+      {/* "none active" only when there is genuinely nothing — a silenced bridge
+          has already said its piece above, and must not also read as idle. */}
+      {!anything && !silenced.length ? <span className="agents-ov__idle">none active</span> : null}
+      {anything ? (
         <div className="agents-ov__tree">
           {atlasLanes.length > 0 ? <AtlasGroup lanes={atlasLanes} currentId={currentId} /> : null}
           {indepLanes.length > 0 || errors ? (
@@ -294,7 +295,7 @@ export function AgentsOverview({ switcher = false, currentId }: { switcher?: boo
             </div>
           ) : null}
         </div>
-      )}
+      ) : null}
     </div>
   )
 }
