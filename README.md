@@ -219,11 +219,18 @@ enable it with `ATLAS_ADDONS` or `addons.json`. With none enabled the kit behave
 exactly as if the framework were not there — and `GET /api/addons` is what lets the
 dashboard gate addon surfaces at runtime, so one build of `web/dist` serves every box.
 
-Shipped today: **[`semantic-search`](addons/semantic-search/README.md)** — a resident
-EmbeddingGemma-300M ONNX encoder and a section-chunk vector index, added as a **second
-retrieval leg** beside the built-in BM25F pass. The two legs are returned separately and
-never fused; its README states the measured RAM/disk/latency costs and what each leg
-structurally cannot find.
+Shipped today:
+
+- **[`semantic-search`](addons/semantic-search/README.md)** — a resident
+  EmbeddingGemma-300M ONNX encoder and a section-chunk vector index, added as a **second
+  retrieval leg** beside the built-in BM25F pass. The two legs are returned separately and
+  never fused; its README states the measured RAM/disk/latency costs and what each leg
+  structurally cannot find.
+- **[`instagram-ingest`](addons/instagram-ingest/README.md)** — file **one** Instagram post
+  or reel into the vault as a `Wiki/Sources/` page: caption verbatim, stills, and a short
+  `claude -p` read of both, committed through the vault's commit queue. It drives `yt-dlp`
+  with **your own** cookies, one URL at a time — its README is also the guide to exporting
+  a browser session safely, and to why you should treat that file like a password.
 
 See **[docs/ADDONS.md](docs/ADDONS.md)** for the model, the hook API and how to write one.
 
