@@ -252,6 +252,26 @@ For each addon they say yes to, five moves in this order:
   **Verify:** `GET /api/addons` reports which speech/dictation path is live and whether
   the bearer is configured, and the dashboard grows a **Voice** card.
 
+## Phase 1c — Mention model-provider profiles (one line, only if it fits)
+
+Separately optional, and **not** an addon: a dev agent can spawn against an
+Anthropic-compatible backend — DeepSeek via OpenRouter, DeepSeek direct — running the
+**unchanged** harness ([docs/PROVIDERS.md](PROVIDERS.md)). With no profiles configured
+nothing changes anywhere, so this is a mention, not an offer: name it once, in a line,
+and only if they asked about model cost or a non-Anthropic backend. Read PROVIDERS.md
+before saying anything about it — the caveats (no prompt caching or extended thinking on
+DeepSeek; OpenRouter's Anthropic skin is officially guaranteed only for Anthropic's own
+models) are the part that decides whether it is worth it, and rounding them down is how
+they end up surprised by a bill.
+
+⚠️ **You never handle their API key.** Your part is naming the file it goes in —
+`cp api/src/providers.example.json api/src/providers.json` (gitignored) — and pointing at
+the two placeholder profiles inside it. Do not ask them to paste a key into the chat, do
+not read one back, do not put one in `.env`, a prompt, or any file you write. Same rule as
+the `instagram-ingest` cookie jar, for the same reason. **Verify** without touching a
+secret: `curl -s http://127.0.0.1:8080/api/providers` lists the profile names and labels —
+by design that route serves nothing else — and a picker appears on the spawn form.
+
 ## Phase 2 — Safety rules (apply throughout)
 
 1. **Idempotent.** Assume this may be a re-run after a partial install. Detect what's

@@ -11,6 +11,8 @@ api/src/agent-local-repos.json
 api/src/bridges.json
 #   multi-vault registry (a single VAULT_PATH works without this file)
 api/src/vaults.json
+#   model-provider profiles — HOLDS YOUR API KEYS (docs/PROVIDERS.md)
+api/src/providers.json
 #   the instagram-ingest skill link, created by that addon's install.sh
 .claude/skills/instagram-ingest
 #   YOUR feed list for the news-ingest addon (feeds.example.json is what ships)

@@ -40,6 +40,9 @@ import { readHistory, steerKey, steerEntry } from './agent-history.mjs'
 import { MSG_WRAPPER_SRC } from './agent-msg-wrapper.mjs'
 import { parseChoiceMenu, currentHighlight, driveSelect } from './menu.mjs'
 import { resolveVault, defaultVaultKey, isTypedVault } from './vaults.mjs'
+// Optional model-BACKEND profiles: same harness, different Anthropic-compatible
+// endpoint. Absent file / absent `provider` ⇒ every launch is unchanged.
+import { resolveProvider } from './providers.mjs'
 import { enqueueAtlasMerge } from './atlas-commit-queue.mjs'
 import { updateProjectNow } from './project-card.mjs'
 import { trackPhase, recordLifetime, revivePhase, aggregate, PHASE_HOLD_MS } from './agent-timings.mjs'
@@ -84,6 +87,8 @@ const WORKSPACE = process.env.WORKSPACE_DIR || '/workspace'
 // one claude launch that goes through tmux: a new pane can inherit the tmux
 // SERVER's global env (see serve.sh), so a stray key could slip in even though
 // Express was launched with the key stripped. Belt-and-suspenders against that.
+// It sits in the `{claudeEnv}` slot because a PROVIDER PROFILE (providers.mjs)
+// owns the Anthropic env outright — see providerLaunch() below.
 // Box-local DEV agents load dev.mcp.json: the knowledge-only MCP profile, i.e.
 // the seven READ tools over the vault (query_atlas/query_vault/get_note/…) and
 // nothing that writes. They are told they have them in their preamble
@@ -99,7 +104,7 @@ const DEV_MCP_CONFIG = `${WORKSPACE}/api/src/mcp/dev.mcp.json`
 const CLAUDE = claudeShellWord()
 export const LAUNCH_CMD =
   process.env.AGENT_LOCAL_LAUNCH_CMD ||
-  `IS_SANDBOX=1 env -u ANTHROPIC_API_KEY ${CLAUDE} --model {model} --effort {effort} --mcp-config ${DEV_MCP_CONFIG} --strict-mcp-config --dangerously-skip-permissions {task}`
+  `IS_SANDBOX=1 env {claudeEnv}${CLAUDE} --model {model} --effort {effort} --mcp-config ${DEV_MCP_CONFIG} --strict-mcp-config --dangerously-skip-permissions {task}`
 // Knowledge agents (vault chats) additionally pin `--session-id {sid}`: they all
 // share the vault as cwd, so without a pinned id the transcript reader's
 // newest-file heuristic would cross-read between concurrent chats.
@@ -250,7 +255,7 @@ const REVIVE_STAGGER_MS = Number(process.env.AGENT_LOCAL_REVIVE_STAGGER_MS || RE
 // (the task/preamble is already in the transcript), so none is re-supplied.
 export const RESUME_CMD =
   process.env.AGENT_LOCAL_RESUME_CMD ||
-  `IS_SANDBOX=1 env -u ANTHROPIC_API_KEY ${CLAUDE} --model {model} --effort {effort} --mcp-config ${DEV_MCP_CONFIG} --strict-mcp-config --dangerously-skip-permissions --resume {sid}`
+  `IS_SANDBOX=1 env {claudeEnv}${CLAUDE} --model {model} --effort {effort} --mcp-config ${DEV_MCP_CONFIG} --strict-mcp-config --dangerously-skip-permissions --resume {sid}`
 // Resume launch for the Atlas ORCHESTRATOR (the vault:'atlas' chat): like RESUME_CMD
 // but re-attaches the agent-control MCP config + ATLAS_SESSION, so a revived
 // orchestrator gets its spawn/prompt/kill tools back — a plain resume would bring the
@@ -282,6 +287,95 @@ const ATLAS_TURN_GRACE_MS = Number(process.env.ATLAS_TURN_GRACE_MS || 12000)
 // POSIX single-quote escaping — safe to embed in an `sh -lc` string.
 function shquote(s) {
   return "'" + String(s).replace(/'/g, "'\\''") + "'"
+}
+
+/* --- provider profiles: how a backend swap reaches the agent -------------- *
+ * A profile (providers.mjs) changes only the ENVIRONMENT `claude` starts in, so
+ * it lands in the two places a launch is assembled from — and nowhere else.
+ *
+ * 🔴 THE VALUES ARE SECRETS AND NEVER TOUCH A COMMAND LINE. A profile's env
+ * travels BY FILE, exactly like a launch prompt (promptFileLaunch) and for a
+ * sharper version of the same reason: the launch line is an argv, and an argv is
+ * world-readable in `ps`. So is `tmux new-session -e NAME=value`, which was the
+ * obvious implementation and is why it is not this one — the tmux SERVER a first
+ * spawn starts keeps that argv for its whole life. Instead the API writes a
+ * 0600 file the session's own shell SOURCES and deletes before `claude` starts.
+ *
+ * `&&` not `;`, matching promptFileLaunch: an unreadable env file STOPS the
+ * launch instead of starting the agent on the default backend — the one failure
+ * that would be invisible, because the agent works perfectly, just not where the
+ * operator asked (and billed there).
+ *
+ * `claudeEnv` is the other half. Normally that slot holds
+ * `-u ANTHROPIC_API_KEY ` — the subscription-auth guarantee documented above.
+ * A profile OWNS the Anthropic env instead, so the slot empties and the profile's
+ * own values stand: `-u` would strip exactly the `ANTHROPIC_API_KEY=` the
+ * gateways need EXPLICITLY EMPTY (unset, Claude Code can fall back to
+ * first-party auth). The empty default is prepended rather than required, so the
+ * original guarantee — a stray key inherited from the tmux server's global env
+ * can never reach an agent — survives a profile that does not mention the key.
+ *
+ * With no profile: `exports` is empty (no file is written at all) and
+ * `claudeEnv` is the exact literal the templates used to hardcode, so the launch
+ * line is byte-identical to a kit without profiles. The zero-profile invariant. */
+export function providerLaunch(name) {
+  const p = name ? resolveProvider(name) : null
+  if (!p) return { exports: '', claudeEnv: '-u ANTHROPIC_API_KEY ' }
+  const env = { ANTHROPIC_API_KEY: '', ...p.env }
+  return {
+    exports: Object.entries(env).map(([k, v]) => `export ${k}=${shquote(v)}\n`).join(''),
+    claudeEnv: '',
+  }
+}
+
+// Where a session's provider env is materialized — same shape as promptFile(),
+// its own directory, and never inside a repo/worktree.
+function providerEnvFile(id) {
+  return path.join(STATE_DIR, 'env', `${String(id).replace(/[^A-Za-z0-9._-]/g, '_')}.env`)
+}
+/** Write this launch's env file and return the shell prefix that sources and
+ *  removes it — `''` when there is no profile, so nothing is written and the
+ *  launch line is untouched. Exported for the same reason knowledgeLaunch is:
+ *  so the contract (0600, sourced, deleted, secrets nowhere in the argv) is
+ *  driven end to end without going through git and a real `claude`. */
+export function providerEnvPrefix(id, name) {
+  const { exports } = providerLaunch(name)
+  if (!exports) return ''
+  const f = providerEnvFile(id)
+  fs.mkdirSync(path.dirname(f), { recursive: true })
+  fs.writeFileSync(f, exports, { mode: 0o600 }) // operator-only, like an ssh key
+  const q = shquote(f)
+  return `. ${q} && rm -f ${q} && `
+}
+/* Drop an env file whose session never started (a failed `tmux new-session`) —
+ * the shell that would have removed it never ran. Mirrors dropPromptFile. */
+function dropProviderEnv(id) {
+  try {
+    fs.unlinkSync(providerEnvFile(id))
+  } catch {
+    /* never written (no profile), or already consumed */
+  }
+}
+
+/**
+ * Fill a launch template's placeholders — the ONE place any of them is
+ * substituted, so a slot can never be left unfilled in one launch path and
+ * filled in another (`{claudeEnv}` surviving into a real command line would make
+ * `env` try to run a file called `{claudeEnv}`). Replacing a token a given
+ * template does not carry is a no-op, which is why all four templates share this.
+ * `{task}` is deliberately NOT here — it is filled by promptFileCommand, from a
+ * file, and must never be inlined.
+ *
+ * Pure + exported so the composition is asserted without driving tmux
+ * (api/test/provider-profiles.test.mjs).
+ */
+export function launchCommand(tmpl, { model, effort, sid, atlasSession, provider } = {}) {
+  return tmpl
+    .replace('{atlasSession}', shquote(atlasSession ?? ''))
+    .replace('{claudeEnv}', providerLaunch(provider).claudeEnv)
+    .replace('{model}', shquote(model || DEFAULT_MODEL))
+    .replace('{effort}', shquote(effort || DEFAULT_EFFORT))
+    .replace('{sid}', shquote(sid ?? ''))
 }
 
 // tmux's OWN limit on the command it is handed (`tmux new-session … sh -lc <cmd>`),
@@ -1188,6 +1282,10 @@ function publicView(s, status, lastOutput, menuKind, transcript, appUp, menuChoi
     // the field landed → the label just doesn't render.
     ...(s.model ? { model: s.model } : {}),
     ...(s.effort ? { effort: s.effort } : {}),
+    // Which model-BACKEND this agent runs against — the profile NAME only, never
+    // its env (see providers.mjs). Absent = the default Anthropic subscription,
+    // which is every agent on a box with no profiles configured.
+    ...(s.provider ? { provider: s.provider } : {}),
     // Spawn-time task work-size (S/M/L) from the title agent — feeds the estimator
     // and shows as a small tag. Absent until classified / on older sessions.
     ...(s.size ? { size: s.size } : {}),
@@ -1847,17 +1945,25 @@ async function launchResume(s) {
   // The Atlas orchestrator (vault:'atlas' chat) must resume WITH its agent-control
   // MCP config or it loses its spawn/prompt/kill steering tools; all else resumes plain.
   const tmpl = s.vault === 'atlas' ? ATLAS_CONTROL_RESUME_CMD : RESUME_CMD
+  // A session pinned to a PROVIDER profile must come back on the SAME backend —
+  // resuming a DeepSeek session onto Anthropic (or onto a profile the operator has
+  // since edited away) would switch model mid-conversation, silently. Refuse with
+  // the reason instead; the profile is one JSON entry away from existing again.
+  if (s.provider && !resolveProvider(s.provider))
+    return { ok: false, stderr: `provider profile "${s.provider}" is no longer configured` }
   // Without this a revived agent silently loses `agent-msg` — the wrapper lives
   // on PATH, and PATH is set by the launch line, so both paths must set it.
   ensureMsgWrapper()
-  const launch = msgEnv(s) + tmpl
-    .replace('{atlasSession}', shquote(s.id)) // no-op token on the plain template
-    .replace('{model}', shquote(s.model || DEFAULT_MODEL))
-    .replace('{effort}', shquote(s.effort || DEFAULT_EFFORT))
-    .replace('{sid}', shquote(sid))
+  const launch = providerEnvPrefix(s.id, s.provider) + msgEnv(s) + launchCommand(tmpl, {
+    atlasSession: s.id, // no-op token on the plain template
+    model: s.model, effort: s.effort, sid, provider: s.provider,
+  })
   ensureRepoTrusted(s.worktree)
   const ns = await run(['tmux', 'new-session', '-d', '-s', s.tmux, '-c', s.worktree, 'sh', '-lc', launch])
-  if (!ns.ok) return ns
+  if (!ns.ok) {
+    dropProviderEnv(s.id) // the session's shell never ran, so it never removed it
+    return ns
+  }
   s.status = 'running'
   delete s.interrupted
   delete s.lifetimeLogged
@@ -1994,11 +2100,16 @@ export function agentByToken(token) {
   return null
 }
 
-export async function spawn({ task, repo, preamble, model, effort, context, images }) {
+export async function spawn({ task, repo, preamble, model, effort, context, images, provider }) {
   if (!task || typeof task !== 'string') return { status: 400, ok: false, error: 'task required' }
   const repos = loadRepos()
   const target = repos[repo]
   if (!target) return { status: 400, ok: false, error: `unknown box repo "${repo}"` }
+  // The route validates this too; re-checked here because spawn() is also called
+  // directly (the scheduler replaying a job), and launching against a profile that
+  // no longer resolves would quietly run the agent on the default backend.
+  if (provider && !resolveProvider(provider))
+    return { status: 400, ok: false, error: `unknown provider profile "${provider}"` }
   const noClaude = claudeUnavailable()
   if (noClaude) return noClaude
   const capErr = await atCapacity()
@@ -2031,6 +2142,9 @@ export async function spawn({ task, repo, preamble, model, effort, context, imag
   const session = {
     id, task, repo, branch, path: repoPath, worktree, tmux,
     model: model || DEFAULT_MODEL, effort: effort || DEFAULT_EFFORT,
+    // The profile NAME only — its env is resolved per launch and never persisted
+    // (state.json is a plain file; an API key does not belong in it).
+    ...(provider ? { provider } : {}),
     // Scoped agent↔agent message token (see the message-channel block above).
     // Dev agents only — they're the ones that need to talk to a parent/sibling.
     msgToken: randomBytes(24).toString('hex'),
@@ -2062,10 +2176,7 @@ export async function spawn({ task, repo, preamble, model, effort, context, imag
   // ceiling — and that failure is silent-by-shape.
   ensureMsgWrapper() // `agent-msg` on the agent's PATH (message channel above)
   const launch = promptFileLaunch(
-    msgEnv(session) +
-      LAUNCH_CMD
-        .replace('{model}', shquote(model || DEFAULT_MODEL))
-        .replace('{effort}', shquote(effort || DEFAULT_EFFORT)),
+    providerEnvPrefix(id, provider) + msgEnv(session) + launchCommand(LAUNCH_CMD, { model, effort, provider }),
     id,
     prompt,
   )
@@ -2075,6 +2186,7 @@ export async function spawn({ task, repo, preamble, model, effort, context, imag
   ])
   if (!ns.ok) {
     dropPromptFile(id) // the session's shell never ran, so it never removed it
+    dropProviderEnv(id) // …nor the env file beside it
     session.status = 'error'
     session.error = (ns.stderr || 'tmux new-session failed').slice(0, 500)
     registry.sessions[id] = session
@@ -2085,7 +2197,7 @@ export async function spawn({ task, repo, preamble, model, effort, context, imag
 
   registry.sessions[id] = session
   persist()
-  audit({ action: 'spawn', id, repo, branch, model: model || DEFAULT_MODEL, effort: effort || DEFAULT_EFFORT, images: imagePaths.length, ok: true })
+  audit({ action: 'spawn', id, repo, branch, model: model || DEFAULT_MODEL, effort: effort || DEFAULT_EFFORT, ...(provider ? { provider } : {}), images: imagePaths.length, ok: true })
   return { status: 200, ok: true, id }
 }
 
@@ -2118,11 +2230,14 @@ export function knowledgePrompt({ id, question, preamble, context, imagePaths = 
  * file. */
 export function knowledgeLaunch({ id, sid, vaultKey, model, effort, prompt }) {
   return promptFileLaunch(
-    (vaultKey === 'atlas' ? ATLAS_CONTROL_LAUNCH_CMD : KNOWLEDGE_LAUNCH_CMD)
-      .replace('{atlasSession}', shquote(id)) // no-op for the non-atlas template
-      .replace('{model}', shquote(model))
-      .replace('{effort}', shquote(effort))
-      .replace('{sid}', shquote(sid)),
+    // No `provider` here: profiles are a DEV-agent feature. A knowledge chat —
+    // the Atlas orchestrator especially — stays on the subscription backend.
+    launchCommand(vaultKey === 'atlas' ? ATLAS_CONTROL_LAUNCH_CMD : KNOWLEDGE_LAUNCH_CMD, {
+      atlasSession: id, // no-op token for the non-atlas template
+      model,
+      effort,
+      sid,
+    }),
     id,
     prompt,
   )
@@ -2292,10 +2407,9 @@ export const ATLAS_WORKER_STANDBY =
 // only side effect is writing this session's prompt file (under STATE_DIR).
 export function atlasWorkerLaunch({ id, sid, head }) {
   return promptFileLaunch(
-    ATLAS_WORKER_LAUNCH_CMD
-      .replace('{model}', shquote(DEFAULT_MODEL))
-      .replace('{effort}', shquote(DEFAULT_EFFORT))
-      .replace('{sid}', shquote(sid)),
+    // The worker writes the ATLAS, so it stays on the subscription backend
+    // whatever backend the dev agent it is paired to runs on — no `provider`.
+    launchCommand(ATLAS_WORKER_LAUNCH_CMD, { model: DEFAULT_MODEL, effort: DEFAULT_EFFORT, sid }),
     id,
     head,
   )

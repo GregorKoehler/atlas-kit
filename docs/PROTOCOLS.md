@@ -323,6 +323,25 @@ installed-but-unannounced tools go unused. The paired worker gets the same profi
 `worker.mcp.json`; only the Atlas orchestrator chat gets `control.mcp.json`. Remote
 (bridge) agents have neither the config nor a vault checkout, so they get neither.
 
+**Model backend** — a dev spawn may carry an optional `provider`, naming a profile in
+`providers.json` (`providers.mjs`) that points this agent's `claude` at an
+Anthropic-compatible endpoint. It reaches exactly two places, both in `launchCommand()` /
+`providerLaunch()` (`agent-local.mjs`): the profile's env is written to a `0600` file the
+session's shell SOURCES and deletes before `claude` starts — **by file, like the launch
+prompt**, because an argv is world-readable in `ps` (`tmux new-session -e` was the
+obvious implementation and is not this one for exactly that reason) — and the launch
+template's `{claudeEnv}` slot empties, because the profile owns `ANTHROPIC_API_KEY`
+(explicitly empty, not `-u`-unset, or Claude Code can fall back to first-party auth).
+`&&` not `;`, again like the prompt file: an unreadable env file stops the launch instead
+of starting the agent on the backend the operator was moving off. With no profile the slot is the literal
+`-u ANTHROPIC_API_KEY ` the templates used to hardcode and the line is byte-identical to
+one from a kit without the feature. With a profile the model picker passes the TIER ALIAS
+(`opus`/`sonnet`) rather than the resolved Anthropic ID, so the profile's
+`ANTHROPIC_DEFAULT_<TIER>_MODEL` is what maps it — passing `claude-sonnet-5[1m]` would ask
+the gateway for Anthropic's Sonnet. Knowledge chats, the Atlas orchestrator and the paired
+worker never take one; a revive refuses rather than resume onto a different backend. See
+[PROVIDERS.md](PROVIDERS.md).
+
 **work** — the dev agent works normally; see [§1](#1-dev-agent-steering-semantics) for
 how it's steered mid-flight. The paired worker is spawned right **after** the dev
 session exists (never before: a request killed mid-spawn would otherwise leave a worker

@@ -41,6 +41,7 @@ import { defaultSwitcherOpen, persistSwitcherOpen } from '../../lib/switcherPref
 import { useUsage, fmtReset } from '../../lib/useUsage'
 import { useHost, gb } from '../../lib/useHost'
 import { useDraft } from '../../lib/useDraft'
+import { useProviders } from '../../lib/providers'
 import { lockBodyScroll } from '../../lib/scrollLock'
 import { MicField } from '../MicField'
 import { ScheduleButton } from '../ScheduleButton'
@@ -666,6 +667,19 @@ export function AgentList({
   // Model/effort survive across spawns (a per-card preference, unlike the task).
   const [model, setModel] = useState('sonnet')
   const [effort, setEffort] = useState('xhigh')
+  // Optional model-BACKEND profiles this box offers (docs/PROVIDERS.md). Empty on
+  // a box with none configured — which is the default — and then no picker
+  // renders and no spawn carries a `provider`, i.e. nothing here changes.
+  const providers = useProviders()
+  const [provider, setProvider] = useState('')
+  // A profile maps the opus/sonnet TIERS only (Claude Code has no `fable` tier to
+  // point at ANTHROPIC_DEFAULT_*_MODEL), so Fable and a profile are mutually
+  // exclusive — the server refuses the pair. Picking a profile moves a Fable
+  // selection to Opus rather than leaving the form on a combination that 400s.
+  const pickProvider = (name: string) => {
+    setProvider(name)
+    if (name && model === 'fable') setModel('opus')
+  }
   // Files attached to the spawn prompt (mirrors a running agent's prompt box) —
   // folded into the agent's opening task so it can Read them on the first turn.
   const [images, setImages] = useState<AgentAttachment[]>([])
@@ -726,7 +740,7 @@ export function AgentList({
     if (!t || !r || busy) return
     setBusy(true)
     setErr('')
-    const res = await spawnAgent({ task: t, repo: r, model, effort, images: images.length ? images : undefined })
+    const res = await spawnAgent({ task: t, repo: r, model, effort, provider: provider || undefined, images: images.length ? images : undefined })
     setBusy(false)
     if (res.ok) {
       setTask('')
@@ -744,7 +758,7 @@ export function AgentList({
     const t = task.trim()
     const r = scoped ? repo! : repoInput.trim()
     if (!t || !r) return { ok: false, error: 'enter a task (and repo)' }
-    const res = await scheduleAgent({ action: 'spawn', at, payload: { task: t, repo: r, model, effort } })
+    const res = await scheduleAgent({ action: 'spawn', at, payload: { task: t, repo: r, model, effort, ...(provider ? { provider } : {}) } })
     if (res.ok) {
       setTask('')
       setRepoInput('')
@@ -787,10 +801,31 @@ export function AgentList({
           onChange={(e) => setModel(e.currentTarget.value)}
           title="Model for this agent (always the 1M-context variant)"
         >
-          <option value="fable">Fable</option>
+          {/* Hidden under a provider profile: the tier has to be one the profile
+              maps (opus/sonnet), and offering an option the spawn would refuse
+              is worse than not offering it. */}
+          {provider ? null : <option value="fable">Fable</option>}
           <option value="opus">Opus</option>
           <option value="sonnet">Sonnet</option>
         </select>
+        {/* Runtime-gated: renders only on a box that configured profiles
+            (docs/PROVIDERS.md). "Anthropic" is the empty value — the default
+            subscription backend, and the only choice on every other box. */}
+        {providers.length ? (
+          <select
+            className="capture__input capture__input--sm agents__select"
+            value={provider}
+            onChange={(e) => pickProvider(e.currentTarget.value)}
+            title="Model backend for this agent — the same harness against an Anthropic-compatible endpoint"
+          >
+            <option value="">Anthropic</option>
+            {providers.map((p) => (
+              <option value={p.name} key={p.name}>
+                {p.label}
+              </option>
+            ))}
+          </select>
+        ) : null}
         <select
           className="capture__input capture__input--sm agents__select"
           value={effort}
@@ -1884,10 +1919,13 @@ export function AgentRow({
             {s.model ? (
               <span
                 className="agent__meta"
-                title={`model ${s.model} · effort ${s.effort ?? '—'}`}
+                title={`model ${s.model} · effort ${s.effort ?? '—'}${s.provider ? ` · backend ${s.provider}` : ''}`}
               >
                 {modelLabel(s.model)}
                 {s.effort ? ` · ${EFFORT_LABEL[s.effort] ?? s.effort}` : ''}
+                {/* Which BACKEND — otherwise two agents on different providers
+                    are indistinguishable, since both show the same tier. */}
+                {s.provider ? ` · ${s.provider}` : ''}
               </span>
             ) : null}
             {s.contextTokens != null && s.contextWindow ? (

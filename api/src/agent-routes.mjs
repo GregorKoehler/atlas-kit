@@ -40,6 +40,7 @@ import { createReceiptState, armReceipt, diffReceipts, receiptParent } from './a
 import { appendMessage, readMessages, checkBudget, noteSend } from './agent-messages.mjs'
 import { runAtlasQuery, appendQueryLog } from './atlas-query-relay.mjs'
 import { resolveVault, isTypedVault } from './vaults.mjs'
+import { listProviders, resolveProvider } from './providers.mjs'
 import { EVIDENCE_FRAMING_BYTES } from './atlas-candidates.mjs'
 
 // Remote bridges (workstation + any in bridges.json) are resolved per-repo /
@@ -395,12 +396,25 @@ const AGENT_EFFORTS = new Set(['high', 'xhigh', 'max'])
 // the MCP spawn_agent tool (spawnBody in mcp/tools.mjs), which passes model/effort
 // explicitly, because the route can't tell its two dev callers apart. Pure +
 // exported so the defaults are testable (api/test/agent-model-default.test.mjs).
-export function spawnPicks({ model, effort, kind } = {}) {
+export function spawnPicks({ model, effort, kind, provider } = {}) {
+  const tier = model || (kind === 'knowledge' ? 'opus' : 'sonnet')
   return {
-    modelId: AGENT_MODELS[model || (kind === 'knowledge' ? 'opus' : 'sonnet')],
+    // With a PROVIDER PROFILE the TIER ALIAS is what `--model` gets, not the
+    // resolved Anthropic ID. The profile's `ANTHROPIC_DEFAULT_<TIER>_MODEL` is
+    // what maps the tier to the backend's own model, and Claude Code consults it
+    // only for an alias — hand it `claude-sonnet-5[1m]` and it sends THAT model
+    // name to the gateway, i.e. asks a DeepSeek profile for Anthropic's Sonnet
+    // (which OpenRouter would happily serve, and bill). The picker is unchanged
+    // either way: it still chooses the TIER, which is all it ever meant.
+    modelId: provider ? tier : AGENT_MODELS[tier],
     effortLevel: effort || 'xhigh',
   }
 }
+/* Which tiers a provider profile can map. Claude Code resolves an alias through
+ * ANTHROPIC_DEFAULT_{OPUS,SONNET,HAIKU}_MODEL — there is no `fable` tier, so a
+ * `fable` pick would reach the gateway as the literal model name `fable`. The
+ * dropdown hides the combination; this is the server-side half. */
+const PROVIDER_TIERS = new Set(['opus', 'sonnet'])
 
 // Call a bridge; returns { ok, status, body } and never throws — a down bridge /
 // timeout comes back as ok:false so callers can degrade. `bridge` is a resolved
@@ -1007,7 +1021,7 @@ async function startRemoteAtlasClose(id, cleanup) {
  * wrapper; the scheduler calls it directly.
  * ------------------------------------------------------------------ */
 async function performSpawn(raw) {
-  const { task, repo, model, effort, kind, vault, images, parent } = raw || {}
+  const { task, repo, model, effort, kind, vault, images, parent, provider } = raw || {}
   if (!task || typeof task !== 'string') return { status: 400, body: { ok: false, error: 'missing "task"' } }
   // `parent` (optional): the spawning agent's session id — set by the Atlas
   // orchestrator's spawn_agent tool so GET /api/agents can draw the lineage.
@@ -1031,7 +1045,22 @@ async function performSpawn(raw) {
     return { status: 400, body: { ok: false, error: `too many files (max ${MAX_IMAGES})` } }
   if (imgs.some((im) => !im || typeof im.dataUrl !== 'string'))
     return { status: 400, body: { ok: false, error: 'each attachment needs a "dataUrl"' } }
-  const { modelId, effortLevel } = spawnPicks({ model, effort, kind })
+  // `provider` (optional): a model-BACKEND profile from providers.json — the same
+  // Claude-Code harness, pointed at an Anthropic-compatible endpoint. Every way it
+  // cannot work is refused HERE rather than silently ignored, because the failure
+  // mode of ignoring it is an agent quietly running (and billing) on exactly the
+  // default backend the operator was trying to move off.
+  if (provider !== undefined) {
+    if (typeof provider !== 'string' || !resolveProvider(provider))
+      return { status: 400, body: { ok: false, error: `unknown "provider" profile (configured: ${listProviders().map((p) => p.name).join(', ') || 'none'})` } }
+    if (kind === 'knowledge')
+      return { status: 400, body: { ok: false, error: 'provider profiles are for DEV agents — a knowledge chat runs on the default backend' } }
+    if (model !== undefined && !PROVIDER_TIERS.has(model))
+      return { status: 400, body: { ok: false, error: `"model" with a provider profile must be a mappable tier (${[...PROVIDER_TIERS].join('/')}) — see docs/PROVIDERS.md` } }
+    if (!local.isLocalRepo(repo))
+      return { status: 400, body: { ok: false, error: 'provider profiles are box-local — the remote agent bridge does not carry them yet (docs/PROVIDERS.md)' } }
+  }
+  const { modelId, effortLevel } = spawnPicks({ model, effort, kind, provider })
   // Knowledge agents are always box-local (the box owns the vault); `task` is
   // the operator's opening question. An optional `vault` key points the chat at
   // a non-default vault. Any TYPED vault (one carrying a Wiki/Legend.md — atlas,
@@ -1077,7 +1106,7 @@ async function performSpawn(raw) {
     // '' on any failure (no atlas / no project / retrieval throw) — then the prompt
     // is byte-identical to an unbriefed spawn. The spawn NEVER waits on the Atlas.
     const context = await local.atlasEvidence({ task, repo })
-    const r = await local.spawn({ task, repo, preamble, context, model: modelId, effort: effortLevel, images: imgs })
+    const r = await local.spawn({ task, repo, preamble, context, model: modelId, effort: effortLevel, images: imgs, provider })
     if (r.ok && r.id) {
       if (parent) setSpawnParent(r.id, parent)
       // The paired worker (close-time recap ingest) is started ONLY once the dev
@@ -2035,6 +2064,16 @@ export function agentRouter(bearerAuth) {
     })
   })
 
+  /* The model-BACKEND profiles configured on this box — the spawn dropdown's
+   * source, and the RUNTIME gate for it (one build of web/dist serves every
+   * install, so the picker appears because this box has profiles, never because
+   * someone compiled a different bundle — the same shape GET /api/addons has).
+   *
+   * 🔴 NAMES AND LABELS ONLY. listProviders() cannot return an `env` block; this
+   * route must never grow one. Unauthed like GET /api/agents, which is exactly
+   * why the shape matters. */
+  router.get('/api/providers', (_req, res) => res.json({ providers: listProviders() }))
+
   // Aggregate dev/knowledge-agent time-tracking history. Read-only, like GET
   // /api/agents. Box-local agents plus workstation agents (tracked via the remote
   // phase shadows) share the one on-box timings log.
@@ -2117,13 +2156,18 @@ export function agentRouter(bearerAuth) {
 
     const job = { id: `sch-${when.toString(36)}-${Math.random().toString(36).slice(2, 8)}`, action, at: new Date(when).toISOString(), createdAt: new Date().toISOString() }
     if (action === 'spawn') {
-      const { task, repo, model, effort, kind, vault, parent } = payload
+      const { task, repo, model, effort, kind, vault, parent, provider } = payload
       if (!task || typeof task !== 'string') return res.status(400).json({ ok: false, error: 'spawn payload needs "task"' })
       if (kind !== undefined && kind !== 'knowledge') return res.status(400).json({ ok: false, error: 'unknown "kind" (expected knowledge)' })
       if (kind !== 'knowledge' && (!repo || typeof repo !== 'string')) return res.status(400).json({ ok: false, error: 'spawn payload needs "repo"' })
       if (model !== undefined && !AGENT_MODELS[model]) return res.status(400).json({ ok: false, error: 'unknown "model"' })
       if (effort !== undefined && !AGENT_EFFORTS.has(effort)) return res.status(400).json({ ok: false, error: 'unknown "effort"' })
-      job.payload = { task, ...(repo ? { repo } : {}), ...(model ? { model } : {}), ...(effort ? { effort } : {}), ...(kind ? { kind } : {}), ...(vault ? { vault } : {}), ...(parent ? { parent } : {}) }
+      // Checked at schedule time so the operator hears about a bad profile NOW,
+      // not silently at the due time — and carried into the payload, or the job
+      // would fire onto the default backend without ever saying so. performSpawn
+      // re-validates when it fires: the file may have changed in between.
+      if (provider !== undefined && (typeof provider !== 'string' || !resolveProvider(provider))) return res.status(400).json({ ok: false, error: 'unknown "provider" profile' })
+      job.payload = { task, ...(repo ? { repo } : {}), ...(model ? { model } : {}), ...(effort ? { effort } : {}), ...(kind ? { kind } : {}), ...(vault ? { vault } : {}), ...(parent ? { parent } : {}), ...(provider ? { provider } : {}) }
       job.label = task.slice(0, 200)
       if (repo) job.repo = repo
       if (vault) job.vault = vault

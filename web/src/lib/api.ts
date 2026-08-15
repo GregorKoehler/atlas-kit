@@ -178,6 +178,18 @@ export interface AddonsView {
   errors: { name: string; error: string }[]
 }
 
+/** What `GET /api/providers` serves — the model-BACKEND profiles configured on
+ *  this box (docs/PROVIDERS.md), so the spawn picker offers them at runtime.
+ *  ⚠️ NAME AND LABEL ONLY, by design: a profile's env holds the operator's API
+ *  key and never leaves the server. Empty on a box with no profiles. */
+export interface ProviderProfile {
+  name: string
+  label: string
+}
+export interface ProvidersView {
+  providers: ProviderProfile[]
+}
+
 export interface NoteRef {
   name: string
   path: string
@@ -904,6 +916,11 @@ export function fetchAddons(): Promise<AddonsView | null> {
   return getJson<AddonsView>(`${API_BASE}/addons`)
 }
 
+/** Which model-backend profiles this box offers. Null when the API predates them. */
+export function fetchProviders(): Promise<ProvidersView | null> {
+  return getJson<ProvidersView>(`${API_BASE}/providers`)
+}
+
 /* --- news-ingest (optional addon) ----------------------------------------- *
  * Served by `addons/news-ingest` only when that addon is enabled on this box —
  * the News card gates itself on GET /api/addons, so a kit without the addon
@@ -1065,6 +1082,11 @@ export interface AgentSession {
    * field landed. */
   model?: string
   effort?: string
+  /** The model-BACKEND profile this agent runs against (docs/PROVIDERS.md) — the
+   * profile NAME, never its env. Absent = the default Anthropic subscription,
+   * which is every agent on a box with no profiles configured. With a profile,
+   * `model` carries the TIER alias (`opus`/`sonnet`) the profile maps. */
+  provider?: string
   /** Spawn-time t-shirt size of the task (S/M/L), estimated by the title agent —
    * a coarse "how much work" tag that also sharpens the run-time estimate
    * (durations bucket on it). Absent until classified / on older sessions. */
@@ -1425,6 +1447,10 @@ export function spawnAgent(body: {
   vault?: string
   model?: string
   effort?: string
+  /** Dev agents only: a model-BACKEND profile name from GET /api/providers —
+   * the same harness against an Anthropic-compatible endpoint. Omit for the
+   * default subscription backend. */
+  provider?: string
   /** File attachments folded into the spawn prompt (dev agents only) — the same
    * base64 `data:` URLs as a prompt's, capped at the API's AGENT_MAX_IMAGES. */
   images?: AgentAttachment[]

@@ -148,6 +148,13 @@ env and each agent launches with `env -u ANTHROPIC_API_KEY`, so nothing can fall
 to API-key billing. Agents run `claude --dangerously-skip-permissions` (headless) with
 `IS_SANDBOX=1`.
 
+The one exception is a spawn you deliberately put on a **[provider
+profile](PROVIDERS.md)** — the same harness against an Anthropic-compatible
+backend (DeepSeek via OpenRouter, …). That profile then owns the Anthropic
+variables for that agent alone, and sets `ANTHROPIC_API_KEY` explicitly empty
+rather than leaving it unset. Optional, off by default, and no profiles
+configured means nothing about the above changes.
+
 Each launched agent also loads one of the MCP configs in `api/src/mcp/` with
 `--strict-mcp-config`: `dev.mcp.json` (box-local dev agents — the seven read-only vault
 tools), `worker.mcp.json` (the paired Atlas worker — same profile) and
@@ -269,6 +276,11 @@ it costs and the config only you can supply — a cookie file, a feed list:
   RSS/Atom feeds → `Wiki/Sources/` pages plus a rolling digest.
 
 [docs/ADDONS.md](ADDONS.md) is the model, the hook API and the shipped catalog.
+
+Separately optional, and not an addon: **[model-provider profiles](PROVIDERS.md)** let a
+dev agent spawn against an Anthropic-compatible backend (DeepSeek via OpenRouter, …) in
+the unchanged harness. Copy `api/src/providers.example.json` to `providers.json`
+(gitignored — it holds your keys) and a picker appears on the spawn form.
 
 ---
 
