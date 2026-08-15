@@ -35,6 +35,24 @@
  * task writes this does NOT touch the Atlas repo — flags are dashboard metadata,
  * persisted to a server-side .state file (atlas-type-flags.mjs). The Type
  * Registry card's flag toggle is the UI half; the live list is GET /api/atlas/types.
+ *
+ * Task Prospects — a proposed task that does NOT exist in the vault yet (see
+ * atlas-prospects.mjs). Same non-vault-touching shape as the type-flag above (a
+ * server-side .state file), so a rejected prospect never touches the vault, not
+ * even transiently.
+ *   POST /api/prospects/new { title, body?, due?, project?/projectIdea?/area?,
+ *   source?, vault?, sourceKey?, producer? } — bearer-gated, for dev and
+ *   knowledge agents to PROPOSE a follow-up instead of filing it directly.
+ *   `sourceKey` (e.g. `dev-agent:<repo>:<slug>`) is the STICKY dedup key: a
+ *   source already decided (approved OR rejected) is silently skipped rather
+ *   than re-queued.
+ *   GET /api/prospects — the pending review queue (open; read-only).
+ *   POST /api/prospects/approve { id, edits? } — writes the REAL task through
+ *   createTask() (the exact /api/tasks/new path), optionally overridden by
+ *   `edits` (edit-then-approve), then stamps the sticky "approved" decision.
+ *   POST /api/prospects/reject { id } — discards the prospect and stamps the
+ *   sticky "rejected" decision. Both bearer-gated; the operator's review
+ *   surface is the UI half.
  * ------------------------------------------------------------------ */
 import express from 'express'
 import fs from 'node:fs'
@@ -42,6 +60,7 @@ import path from 'node:path'
 import { resolveVault, isTypedVault } from './vaults.mjs'
 import { enqueueAtlasCommit } from './atlas-commit-queue.mjs'
 import { setFlag, flagKey } from './atlas-type-flags.mjs'
+import { addProspect, listProspects, resolveProspect } from './atlas-prospects.mjs'
 
 const STATUSES = new Set(['inbox', 'next', 'doing', 'waiting', 'done'])
 // The Legend's `priority` enum (Wiki/Legend.md). '' clears the field.
@@ -59,6 +78,12 @@ const SOURCE_RE = /^[a-z][a-z0-9_-]{0,31}$/
 // Type Registry flag inputs: the three Legend categories + a safe type/key name.
 const TYPE_CATEGORIES = new Set(['node', 'edge', 'property'])
 const TYPE_NAME_RE = /^[A-Za-z0-9_.-]{1,64}$/
+// A prospect's sticky dedup key (a producer-chosen pointer at whatever it
+// re-notices, e.g. `dev-agent:<repo>:<slug>`) — bounded, printable, no whitespace.
+const SOURCE_KEY_RE = /^[\x21-\x7e]{1,200}$/
+// A prospect's `producer` label (which agent proposed it) — free text, bounded,
+// no need for a strict charset (it's display-only, never a path).
+const PRODUCER_MAX = 64
 
 function today() {
   return new Date().toISOString().slice(0, 10)
@@ -69,8 +94,8 @@ function today() {
 // TYPED vault (carries a Wiki/Legend.md) — the typed Kanban is the only task-write
 // surface, so this also keeps a stray key from scribbling Tasks/ into a plain
 // vault. Returns { key, path } or null when the vault is unknown / untyped.
-function taskVault(req) {
-  const key = String(req.body?.vault || 'atlas')
+function taskVault(vault) {
+  const key = String(vault || 'atlas')
   if (!isTypedVault(key)) return null
   return { key, path: resolveVault(key).path }
 }
@@ -179,6 +204,63 @@ function setBody(text, body, day) {
   return body ? `${head}\n${body}\n` : head
 }
 
+// Core of POST /api/tasks/new, factored out so an in-process caller (the
+// prospect-approval route below) can write through the EXACT same path — no
+// second task-writing path, no HTTP self-loop. Takes the same shape as the
+// route's req.body; returns { status, ok, error? } or { status, ok:true, ... }.
+//
+// The note is prose-first per the Atlas Guide — the title is the body's first
+// line (what the Kanban reads as the card title); the typed fields are filled in
+// later by editing the note.
+export async function createTask(body) {
+  const title = String(body?.title || '').trim()
+  if (!title) return { status: 400, ok: false, error: 'title required' }
+  const due = String(body?.due || '').trim()
+  if (due && !DATE_RE.test(due)) return { status: 400, ok: false, error: 'invalid due date' }
+  // Optional free-text body — the description paragraph(s) below the title line
+  // (the Atlas task body convention). Normalise CRLF so the note stays clean.
+  const bodyText = String(body?.body || '').replace(/\r\n/g, '\n').trim()
+  const project = String(body?.project || '').trim()
+  const projectIdea = String(body?.projectIdea || '').trim()
+  const area = String(body?.area || '').trim()
+  if (project && !CATEGORY_RE.test(project)) return { status: 400, ok: false, error: 'invalid project' }
+  if (projectIdea && !CATEGORY_RE.test(projectIdea)) return { status: 400, ok: false, error: 'invalid project idea' }
+  if (area && !CATEGORY_RE.test(area)) return { status: 400, ok: false, error: 'invalid area' }
+  // Optional provenance facet (the Legend `source` enum). A passthrough like
+  // project/area: written verbatim into the frontmatter; lowercased + validated
+  // to a safe bare scalar.
+  const source = String(body?.source || '').trim().toLowerCase()
+  if (source && !SOURCE_RE.test(source)) return { status: 400, ok: false, error: 'invalid source' }
+  const vault = taskVault(body?.vault)
+  if (!vault) return { status: 404, ok: false, error: 'unknown or non-typed vault' }
+
+  const base = slugify(title) || 'task'
+  // Pick a non-colliding Tasks/<slug>.md against the current tree.
+  let slug = base
+  for (let n = 2; fs.existsSync(path.join(vault.path, `Tasks/${slug}.md`)); n++) slug = `${base}-${n}`
+  const rel = `Tasks/${slug}.md`
+  const abs = path.join(vault.path, rel)
+  const day = today()
+  const cat = `${project ? `\nfor_project: "[[${project}]]"` : ''}${projectIdea ? `\nfor_project_idea: "[[${projectIdea}]]"` : ''}${area ? `\narea: "[[${area}]]"` : ''}`
+  const src = source ? `\nsource: ${source}` : ''
+  // Body convention: title line, then a blank line, then the optional body.
+  const note = `---\ntype: task\nstatus: inbox\ncreated: ${day}\nupdated: ${day}${due ? `\ndue: ${due}` : ''}${src}${cat}\n---\n\n${title}\n${bodyText ? `\n${bodyText}\n` : ''}`
+
+  const result = await enqueueAtlasCommit({
+    vault: vault.key,
+    message: `tasks: new ${slug}`,
+    paths: rel,
+    mutate: async () => {
+      // Re-check after the queue's pull so a concurrent create isn't clobbered.
+      if (fs.existsSync(abs)) throw new Error('task already exists')
+      fs.writeFileSync(abs, note)
+    },
+  })
+  return result.ok
+    ? { status: 200, ...result, path: rel, project: project || null, projectIdea: projectIdea || null, area: area || null }
+    : { status: 502, ...result }
+}
+
 export function atlasRouter(bearerAuth) {
   const r = express.Router()
 
@@ -188,7 +270,7 @@ export function atlasRouter(bearerAuth) {
     const status = String(req.body?.status || '').toLowerCase()
     if (!STATUSES.has(status)) return res.status(400).json({ ok: false, error: 'invalid status' })
     if (!TASK_RE.test(rel)) return res.status(400).json({ ok: false, error: 'invalid task path' })
-    const vault = taskVault(req)
+    const vault = taskVault(req.body?.vault)
     if (!vault) return res.status(404).json({ ok: false, error: 'unknown or non-typed vault' })
     const abs = path.join(vault.path, rel)
     if (!fs.existsSync(abs)) return res.status(404).json({ ok: false, error: 'task not found' })
@@ -210,68 +292,11 @@ export function atlasRouter(bearerAuth) {
   })
 
   // Create a task: scaffold a new type:task note in Tasks/ (status: inbox) and
-  // commit it. The note is prose-first per the Atlas Guide — the title is the
-  // body's first line (what the Kanban reads as the card title); the typed
-  // fields are filled in later by editing the note.
-  //
-  // Project/project-idea/area: an explicit `project`/`projectIdea`/`area` in the
-  // body is used verbatim (the operator picked it in the composer); otherwise the
-  // title is run through inference against the categories already in use, so the
-  // card lands pre-coloured. Inference runs BEFORE the commit queue so its model
-  // call never holds the wiki lock; a miss/failure just yields an uncategorised
-  // task.
+  // commit it — see createTask() above for the note-writing logic, shared with
+  // the prospect-approval route so there is only ever ONE task-writing path.
   r.post('/api/tasks/new', bearerAuth, async (req, res) => {
-    const title = String(req.body?.title || '').trim()
-    if (!title) return res.status(400).json({ ok: false, error: 'title required' })
-    const due = String(req.body?.due || '').trim()
-    if (due && !DATE_RE.test(due)) return res.status(400).json({ ok: false, error: 'invalid due date' })
-    // Optional free-text body — the description paragraph(s) below the title line
-    // (the Atlas task body convention). Normalise CRLF so the note stays clean.
-    const bodyText = String(req.body?.body || '').replace(/\r\n/g, '\n').trim()
-    let project = String(req.body?.project || '').trim()
-    let projectIdea = String(req.body?.projectIdea || '').trim()
-    let area = String(req.body?.area || '').trim()
-    if (project && !CATEGORY_RE.test(project)) return res.status(400).json({ ok: false, error: 'invalid project' })
-    if (projectIdea && !CATEGORY_RE.test(projectIdea))
-      return res.status(400).json({ ok: false, error: 'invalid project idea' })
-    if (area && !CATEGORY_RE.test(area)) return res.status(400).json({ ok: false, error: 'invalid area' })
-    // Optional provenance facet (the Legend `source` enum — e.g. `email` for tasks
-    // filed by the hourly email pass). A passthrough like project/area: written
-    // verbatim into the frontmatter; lowercased + validated to a safe bare scalar.
-    const source = String(req.body?.source || '').trim().toLowerCase()
-    if (source && !SOURCE_RE.test(source)) return res.status(400).json({ ok: false, error: 'invalid source' })
-    const vault = taskVault(req)
-    if (!vault) return res.status(404).json({ ok: false, error: 'unknown or non-typed vault' })
-
-    const base = slugify(title) || 'task'
-    // Pick a non-colliding Tasks/<slug>.md against the current tree.
-    let slug = base
-    for (let n = 2; fs.existsSync(path.join(vault.path, `Tasks/${slug}.md`)); n++) slug = `${base}-${n}`
-    const rel = `Tasks/${slug}.md`
-    const abs = path.join(vault.path, rel)
-    const day = today()
-    const cat = `${project ? `\nfor_project: "[[${project}]]"` : ''}${projectIdea ? `\nfor_project_idea: "[[${projectIdea}]]"` : ''}${area ? `\narea: "[[${area}]]"` : ''}`
-    const src = source ? `\nsource: ${source}` : ''
-    // Body convention: title line, then a blank line, then the optional body.
-    const note = `---\ntype: task\nstatus: inbox\ncreated: ${day}\nupdated: ${day}${due ? `\ndue: ${due}` : ''}${src}${cat}\n---\n\n${title}\n${bodyText ? `\n${bodyText}\n` : ''}`
-
-    const result = await enqueueAtlasCommit({
-      vault: vault.key,
-      message: `tasks: new ${slug}`,
-      paths: rel,
-      mutate: async () => {
-        // Re-check after the queue's pull so a concurrent create isn't clobbered.
-        if (fs.existsSync(abs)) throw new Error('task already exists')
-        fs.writeFileSync(abs, note)
-      },
-    })
-    res
-      .status(result.ok ? 200 : 502)
-      .json(
-        result.ok
-          ? { ...result, path: rel, project: project || null, projectIdea: projectIdea || null, area: area || null }
-          : result,
-      )
+    const { status, ...result } = await createTask(req.body || {})
+    res.status(status).json(result)
   })
 
   // Flag (or unflag) a Type Registry entry as a suspected duplicate. This is
@@ -290,13 +315,94 @@ export function atlasRouter(bearerAuth) {
     res.json({ ok: true })
   })
 
+  // File a new Task Prospect — a proposed task that does NOT exist in the vault
+  // yet (see atlas-prospects.mjs). Dev and knowledge agents call this INSTEAD of
+  // /api/tasks/new; the operator's review surface turns it into a real task via
+  // /api/prospects/approve. Validation mirrors createTask()'s (this is what an
+  // approved prospect becomes).
+  r.post('/api/prospects/new', bearerAuth, (req, res) => {
+    const title = String(req.body?.title || '').trim()
+    if (!title) return res.status(400).json({ ok: false, error: 'title required' })
+    const due = String(req.body?.due || '').trim()
+    if (due && !DATE_RE.test(due)) return res.status(400).json({ ok: false, error: 'invalid due date' })
+    const project = String(req.body?.project || '').trim()
+    if (project && !CATEGORY_RE.test(project)) return res.status(400).json({ ok: false, error: 'invalid project' })
+    const projectIdea = String(req.body?.projectIdea || '').trim()
+    if (projectIdea && !CATEGORY_RE.test(projectIdea))
+      return res.status(400).json({ ok: false, error: 'invalid project idea' })
+    const area = String(req.body?.area || '').trim()
+    if (area && !CATEGORY_RE.test(area)) return res.status(400).json({ ok: false, error: 'invalid area' })
+    const source = String(req.body?.source || '').trim().toLowerCase()
+    if (source && !SOURCE_RE.test(source)) return res.status(400).json({ ok: false, error: 'invalid source' })
+    const sourceKey = String(req.body?.sourceKey || '').trim()
+    if (sourceKey && !SOURCE_KEY_RE.test(sourceKey)) return res.status(400).json({ ok: false, error: 'invalid sourceKey' })
+    const vault = String(req.body?.vault || 'atlas')
+    if (!isTypedVault(vault)) return res.status(404).json({ ok: false, error: 'unknown or non-typed vault' })
+    const producer = String(req.body?.producer || '').trim().slice(0, PRODUCER_MAX) || null
+    const bodyText = String(req.body?.body || '').replace(/\r\n/g, '\n').trim()
+
+    // { ok:false, skipped } isn't an error — it's the sticky guarantee working
+    // as intended (a source already decided, or already queued, stays quiet).
+    const result = addProspect({
+      title,
+      body: bodyText,
+      due: due || null,
+      project: project || null,
+      projectIdea: projectIdea || null,
+      area: area || null,
+      source: source || null,
+      vault,
+      sourceKey: sourceKey || null,
+      producer,
+    })
+    res.json(result)
+  })
+
+  // The pending prospect queue — open, read-only (like the vault GET reads).
+  r.get('/api/prospects', (_req, res) => res.json({ items: listProspects() }))
+
+  // Approve a prospect: write the REAL task through createTask() — the EXACT
+  // /api/tasks/new path, so an approved prospect gets the normal frontmatter,
+  // typed edges, and `source:` provenance — optionally overridden by `edits`
+  // (edit-then-approve), then stamp the sticky "approved" decision.
+  r.post('/api/prospects/approve', bearerAuth, async (req, res) => {
+    const id = String(req.body?.id || '')
+    const prospect = listProspects().find((p) => p.id === id)
+    if (!prospect) return res.status(404).json({ ok: false, error: 'prospect not found' })
+    const edits = req.body?.edits && typeof req.body.edits === 'object' ? req.body.edits : {}
+    const { status, ...result } = await createTask({
+      title: edits.title ?? prospect.title,
+      body: edits.body ?? prospect.body,
+      due: edits.due ?? prospect.due,
+      project: edits.project ?? prospect.project,
+      projectIdea: edits.projectIdea ?? prospect.projectIdea,
+      area: edits.area ?? prospect.area,
+      source: prospect.source,
+      vault: prospect.vault,
+    })
+    // ⚠️ Only retire the prospect once the task is really on disk and committed —
+    // a failed write must leave it pending, not silently swallow the proposal.
+    if (!result.ok) return res.status(status).json(result)
+    resolveProspect(id, 'approved')
+    res.status(status).json(result)
+  })
+
+  // Reject a prospect: discard it (it never touches the vault) and stamp the
+  // sticky "rejected" decision so it's never re-proposed.
+  r.post('/api/prospects/reject', bearerAuth, (req, res) => {
+    const id = String(req.body?.id || '')
+    const prospect = resolveProspect(id, 'rejected')
+    if (!prospect) return res.status(404).json({ ok: false, error: 'prospect not found' })
+    res.json({ ok: true })
+  })
+
   // Set (or clear) a task's due date: rewrite its `due` frontmatter and commit.
   r.post('/api/tasks/due', bearerAuth, async (req, res) => {
     const rel = String(req.body?.path || '')
     const due = String(req.body?.due || '').trim()
     if (!TASK_RE.test(rel)) return res.status(400).json({ ok: false, error: 'invalid task path' })
     if (due && !DATE_RE.test(due)) return res.status(400).json({ ok: false, error: 'invalid due date' })
-    const vault = taskVault(req)
+    const vault = taskVault(req.body?.vault)
     if (!vault) return res.status(404).json({ ok: false, error: 'unknown or non-typed vault' })
     const abs = path.join(vault.path, rel)
     if (!fs.existsSync(abs)) return res.status(404).json({ ok: false, error: 'task not found' })
@@ -325,7 +431,7 @@ export function atlasRouter(bearerAuth) {
     const priority = String(req.body?.priority || '').trim().toLowerCase()
     if (!TASK_RE.test(rel)) return res.status(400).json({ ok: false, error: 'invalid task path' })
     if (priority && !PRIORITIES.has(priority)) return res.status(400).json({ ok: false, error: 'invalid priority' })
-    const vault = taskVault(req)
+    const vault = taskVault(req.body?.vault)
     if (!vault) return res.status(404).json({ ok: false, error: 'unknown or non-typed vault' })
     const abs = path.join(vault.path, rel)
     if (!fs.existsSync(abs)) return res.status(404).json({ ok: false, error: 'task not found' })
@@ -353,7 +459,7 @@ export function atlasRouter(bearerAuth) {
     const rel = String(req.body?.path || '')
     if (!TASK_RE.test(rel)) return res.status(400).json({ ok: false, error: 'invalid task path' })
     const body = String(req.body?.body || '').replace(/\r\n/g, '\n').trim()
-    const vault = taskVault(req)
+    const vault = taskVault(req.body?.vault)
     if (!vault) return res.status(404).json({ ok: false, error: 'unknown or non-typed vault' })
     const abs = path.join(vault.path, rel)
     if (!fs.existsSync(abs)) return res.status(404).json({ ok: false, error: 'task not found' })
@@ -391,7 +497,7 @@ export function atlasRouter(bearerAuth) {
     }
     if (!('project' in cat) && !('projectIdea' in cat) && !('area' in cat))
       return res.status(400).json({ ok: false, error: 'nothing to set' })
-    const vault = taskVault(req)
+    const vault = taskVault(req.body?.vault)
     if (!vault) return res.status(404).json({ ok: false, error: 'unknown or non-typed vault' })
     const abs = path.join(vault.path, rel)
     if (!fs.existsSync(abs)) return res.status(404).json({ ok: false, error: 'task not found' })

@@ -25,14 +25,18 @@ function parseJson(s, fallback) {
   }
 }
 
-// Normalize one raw entry → { label, url, token, repos:string[] } or null.
+// Normalize one raw entry → { label, url, token, repos:string[], maxAgents? } or
+// null. `maxAgents` (optional) is the operator's per-bridge ceiling on concurrent
+// agent sessions there; absent means "whatever that bridge says its own ceiling
+// is" (it reports one on /health) — see the capacity gate in agent-routes.mjs.
 function norm(e) {
   if (!e || typeof e !== 'object') return null
   const url = String(e.url || '').replace(/\/$/, '')
   const token = String(e.token || '')
   if (!url || !token) return null
   const repos = Array.isArray(e.repos) ? e.repos.map(String) : []
-  return { label: String(e.label || url), url, token, repos }
+  const maxAgents = Number(e.maxAgents)
+  return { label: String(e.label || url), url, token, repos, ...(maxAgents > 0 ? { maxAgents } : {}) }
 }
 
 // Explicit extra bridges from AGENT_BRIDGES (a JSON array) or bridges.json (a
@@ -75,7 +79,18 @@ export function bridges() {
   const out = []
   const durl = (process.env.AGENT_BRIDGE_URL || '').replace(/\/$/, '')
   const dtok = process.env.AGENT_BRIDGE_TOKEN || ''
-  if (durl && dtok) out.push({ label: DEFAULT_LABEL, url: durl, token: dtok, repos: [], advertise: defaultAdvertise() })
+  // The catch-all has no bridges.json entry to carry a `maxAgents` override, so
+  // it takes one from the env (absent = the ceiling that bridge reports itself).
+  const dmax = Number(process.env.AGENT_BRIDGE_MAX_AGENTS)
+  if (durl && dtok)
+    out.push({
+      label: DEFAULT_LABEL,
+      url: durl,
+      token: dtok,
+      repos: [],
+      advertise: defaultAdvertise(),
+      ...(dmax > 0 ? { maxAgents: dmax } : {}),
+    })
   out.push(...extraBridges())
   return out
 }

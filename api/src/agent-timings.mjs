@@ -55,6 +55,15 @@ const DAILY_DAYS = Number(process.env.AGENT_STATS_DAILY_DAYS || 30)
 const ACCURACY_POINTS = Number(process.env.AGENT_STATS_ACCURACY_POINTS || 60)
 // Cap stored prompt/task text so a giant paste can't bloat the log.
 const MAX_TEXT = 2000
+// How stale a session's spawn time may be and still anchor its FIRST observed
+// phase (see trackPhase). Box-local sessions are sampled by the 3s timer within
+// seconds of spawn, so they are never near this; a remote shadow recreated with
+// the remote agent's ORIGINAL spawn time can be days past it.
+const ANCHOR_MAX_AGE_MS = Number(process.env.AGENT_PHASE_ANCHOR_MAX_AGE_MS || 60 * 1000)
+// Backstop ceiling on a single recorded run. trackPhase flips to `wait` within
+// DEBOUNCE_MS of the agent going idle, so a run past this is definitionally an
+// observation error, not work — clamp it rather than let it poison the chart.
+const MAX_RUN_MS = Number(process.env.AGENT_RUN_MAX_MS || 4 * 60 * 60 * 1000)
 
 const nowIso = (ms) => new Date(ms).toISOString()
 
@@ -225,7 +234,20 @@ function openWait(s, atMs) {
 function closePhase(s, atMs) {
   if (s.phase === 'run' && s.runStartedAt) {
     const startedAt = s.runStartedAt
-    const actualMs = Math.max(0, atMs - Date.parse(startedAt))
+    const rawMs = Math.max(0, atMs - Date.parse(startedAt))
+    // Backstop: a run past the ceiling was never observed running that long —
+    // it's a stale anchor (the remote-shadow nesting below) or a phase left open
+    // across a blind gap. Log the capped value so one bad observation can't
+    // dwarf every real day on the chart, but keep the raw duration + a
+    // `clamped` flag on the record (and a warning) so it stays diagnosable.
+    const clamped = MAX_RUN_MS > 0 && rawMs > MAX_RUN_MS
+    if (clamped) {
+      console.warn(
+        `[agent-timings] run ${s.id} measured ${(rawMs / 3600000).toFixed(2)}h from ${startedAt} ` +
+          `— over AGENT_RUN_MAX_MS (${(MAX_RUN_MS / 3600000).toFixed(2)}h); clamping (observation error, not work)`,
+      )
+    }
+    const actualMs = clamped ? MAX_RUN_MS : rawMs
     const prompt = (s.runPrompt || '')
     s.lastRunMs = actualMs
     s.totalRunMs = (s.totalRunMs || 0) + actualMs
@@ -248,6 +270,8 @@ function closePhase(s, atMs) {
       promptLen: prompt.length,
       estimateMs: s.runEstimateMs ?? null,
       actualMs,
+      // Only on a clamped record — kept beside actualMs so one reader handles both.
+      ...(clamped ? { clamped: true, actualMsRaw: rawMs } : {}),
       startedAt,
       endedAt: nowIso(atMs),
     })
@@ -269,9 +293,18 @@ export function trackPhase(s, status, now) {
   const want = status === 'running' ? 'run' : 'wait'
 
   // First observation: anchor the phase at spawn time, so the initial run counts
-  // from when the agent actually started working rather than from first poll.
+  // from when the agent actually started working rather than from first poll —
+  // but ONLY while that spawn is fresh (ANCHOR_MAX_AGE_MS). Box-local sessions
+  // are sampled within seconds of spawn, so they always take the spawn anchor;
+  // a REMOTE shadow (agent-routes' trackRemotePhases) is recreated with the
+  // remote agent's ORIGINAL spawn time whenever a poll drops it, and anchoring
+  // an already-days-old session there re-bills it from its spawn on every
+  // recreation. Past the window we anchor at `now`, the same "first observation
+  // by this process" semantics revivePhase uses for the box-local recovery path;
+  // the unobserved gap is simply not counted as run or wait.
   if (s.phase !== 'run' && s.phase !== 'wait') {
-    const anchor = s.startedAt ? Date.parse(s.startedAt) : now
+    const spawn = s.startedAt ? Date.parse(s.startedAt) : NaN
+    const anchor = Number.isFinite(spawn) && now - spawn <= ANCHOR_MAX_AGE_MS ? spawn : now
     if (want === 'run') openRun(s, anchor)
     else openWait(s, anchor)
     s.phasePending = null
