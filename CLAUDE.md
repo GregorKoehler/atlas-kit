@@ -20,6 +20,8 @@ the same steps.
 web/      Vite + Preact + TS dashboard (one file per card in src/components/cards/)
 api/      Express API: the agent runtime (agent-local.mjs), routes, the MCP server,
           the serial vault commit queue, the typed query engine
+addons/   OPTIONAL, env-gated features (see docs/ADDONS.md). Core must run
+          byte-identical with zero addons enabled.
 scripts/  serve.sh (tmux service manager), refresh-atlas, clear-done, provisioning
 infra/    Caddyfile.example, cloudflared-config.example.yml, atlas-kit.cron
 agent-bridge/  optional host-native bridge to run agents in remote dev containers
@@ -30,6 +32,9 @@ agent-bridge/  optional host-native bridge to run agents in remote dev container
 - **Touching the agent runtime (queue/prompt/interrupt/kill/cleanup, the ship marker,
   or the BRIEF/INGEST flow)?** Read **[docs/PROTOCOLS.md](docs/PROTOCOLS.md)** first —
   it maps each protocol to exactly where it's implemented.
+- **Writing or changing an addon, or a core seam an addon plugs into?** Read
+  **[docs/ADDONS.md](docs/ADDONS.md)** — the hook API, and the invariant that a kit
+  with zero addons enabled must answer byte-identically to one without the framework.
 - **Build/verify:** `cd web && npm run build` (Vite; `npm run typecheck` for tsc).
   `cd api && node --env-file=../.env src/server.mjs` runs the API. `npm run dev`
   (root, via `scripts/dev.sh`) runs both for local dev.

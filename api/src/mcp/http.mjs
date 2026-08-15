@@ -30,6 +30,14 @@ import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/
 import { isInitializeRequest } from '@modelcontextprotocol/sdk/types.js'
 import { buildServer } from './tools.mjs'
 import { accessPolicy, accessPrincipal, cleanEnv, readTunnelIngress, toolSurface } from './http-policy.mjs'
+import { loadAddons } from '../addons.mjs'
+
+// Addons are loaded once here, at boot, not per session: buildServer() below
+// runs on every `initialize`, and an import of addon code per MCP session would
+// be a per-connection cost for something that cannot change without a restart.
+// ⚠️ Addon MCP TOOLS are still absent from this endpoint whenever the surface is
+// `knowledge` (the default) — see the registration block in tools.mjs.
+await loadAddons()
 
 const PORT = Number(process.env.MCP_PORT || 3002)
 const BIND = cleanEnv(process.env.MCP_BIND) || '127.0.0.1'

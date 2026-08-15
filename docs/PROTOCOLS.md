@@ -208,7 +208,14 @@ returns ONE byte-capped markdown block:
 | --- | --- | --- |
 | full-text | multi-term, IDF-ranked, several excerpts per page | `textPass()` |
 | typed | the project page for this repo (`agent_repo`), its open `Tasks/` (`for_project`), its hazard `Wiki/log.md` entries | `resolveProject()` + `queryAtlas()` |
-| semantic | dense/vector retrieval — **off in core**, an optional addon plugs into the seam | `atlas-evidence-semantic.mjs` |
+| semantic | dense/vector retrieval — **off in core**, supplied by an optional addon's `evidenceLeg` hook | `atlas-evidence-semantic.mjs` |
+
+That third row is a **seam**, not a stub: `atlas-evidence-semantic.mjs` delegates to the
+`evidenceLeg` of whichever addon supplies one (`addons/semantic-search` does) and answers
+`available: false` with a reason when none does. `atlas-candidates.mjs` does not change
+either way, and the addon's own leg is **additionally** gated on
+`ATLAS_EVIDENCE_SEMANTIC=1` — read that addon's README before enabling it, the default
+is off on the strength of its own measurement. See [ADDONS.md](ADDONS.md).
 
 The legs are **unioned, never fused**: each gets its own labelled section and keeps its
 own ranking. `evidencePrompt()` wraps the block in the framing it may not be read
@@ -522,3 +529,37 @@ any file type, not just images. They are validated once, above the kind branch, 
 resolved and **before** anything is registered or launched (so a bad attachment fails fast
 leaving nothing behind), and folds their absolute paths into the opening prompt as a
 single-line tail telling the agent to `Read` them first.
+
+---
+
+## 10. Optional addons — the seams core exposes
+
+`api/src/addons.mjs` is the entire framework: an addon is a directory under
+`addons/<name>/` whose `api/register.mjs` returns a manifest of hooks. Enablement is
+`ATLAS_ADDONS` (comma list, **wins whenever DEFINED** — empty means none) or the
+gitignored `addons.json`. Full model, hook contracts and how to write one:
+**[ADDONS.md](ADDONS.md)**.
+
+The invariant the code is arranged around: **with zero addons enabled, every response
+is byte-identical to a kit that never had the framework.** It is what
+`api/test/addons-framework.test.mjs` asserts first, before anything is loaded.
+
+| seam | core side | what an addon gets |
+| --- | --- | --- |
+| boot | `server.mjs` `await loadAddons()` then `app.use(addonRouter())`, **last** | its routes mounted where they cannot shadow a core route; `GET /api/addons` |
+| search | `read-routes.mjs` `searchAllLegs()` | a second retriever in `legs[]` — `items` (BM25F) untouched |
+| MCP | `mcp/tools.mjs` — `addonMcpTools()`, and `capLegs()` bounds the answer | read-only tools, **excluded from the knowledge-only surface** by design |
+| spawn evidence | `atlas-evidence-semantic.mjs` delegates; `atlas-candidates.mjs` does not change | `evidenceLeg` — at most one addon, since the block renders one labelled section |
+| scorecard | `read-routes.mjs` `scorecardData()` joins at READ time | `scorecardStats()` — one writer per file, so an addon never writes `data/scorecard.json` |
+| cron | `scripts/addon-cron.mjs --install` → `/etc/cron.d/atlas-kit-addons` | declared entries, regenerated (never hand-edited) from what is enabled |
+
+🔴 **The legs are UNIONED, NEVER FUSED** — on `/api/search` exactly as in the evidence
+block (§4). No router, no reciprocal-rank fusion, no blended ranking. Measured on the
+semantic leg, RRF took MRR from 70.4% to 23.8%: averaging destroys provenance, and it
+hides the honest abstention signal *"full-text 0 hits · semantic 24 hits, top similarity
+0.31"*.
+
+🔴 **A broken addon may never cost you the dashboard.** A missing directory, an import
+that throws, a `register()` that throws, a hook that throws — each is recorded in
+`GET /api/addons`'s `errors[]` and skipped. A search leg that throws degrades to
+`available: false` with a reason while the full-text leg still answers.

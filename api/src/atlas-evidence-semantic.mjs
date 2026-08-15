@@ -12,11 +12,12 @@
  * OPTIONAL ADDON rather than in core.
  *
  * This module is the whole interface between the two. Core calls `subAsks()` and
- * `semanticCandidates()` unconditionally and renders a semantic section whenever
- * rows come back; with no addon installed the leg reports itself UNAVAILABLE,
- * no section is emitted, and the block is byte-identical to a kit that never had
- * the hook. Installing the addon means replacing this module's implementation —
- * `atlas-candidates.mjs` does not change.
+ * `semanticCandidates()` unconditionally; each DELEGATES to the `evidenceLeg`
+ * hook of whichever enabled addon supplies one (`addons/semantic-search` does),
+ * and falls back to the inert answers below when none does. With no addon the
+ * leg reports itself UNAVAILABLE, no section is emitted, and the block is
+ * byte-identical to a kit that never had the hook — `atlas-candidates.mjs` does
+ * not change either way.
  *
  * 🔴 The legs are UNIONED, NEVER FUSED — see the header of atlas-candidates.mjs.
  * Whatever supplies `semanticCandidates` must keep its own ranking and its own
@@ -31,6 +32,7 @@
  *           best first; `text` is a WHOLE chunk, `closed` marks a done task
  *           (core charges it the same DONE_WEIGHT toll the keyword leg does).
  * ------------------------------------------------------------------ */
+import { addonEvidenceLeg } from './addons.mjs'
 
 // Off unless a leg is actually installed AND switched on. Read at import so a
 // spawn never pays for a lookup that cannot succeed.
@@ -39,17 +41,22 @@ export const EVIDENCE_SEMANTIC_ENABLED = process.env.ATLAS_EVIDENCE_SEMANTIC ===
 /** One sub-ask: the task as written. A real leg decomposes it (a paragraph-long
  *  dev task asks several things and a single vector averages them into none). */
 export function subAsks(task) {
+  const leg = addonEvidenceLeg()
+  if (leg?.subAsks) return leg.subAsks(task)
   const t = String(task || '').trim()
   return t ? [t] : []
 }
 
-/** The unavailable answer, in the shape core renders. `reason` is surfaced in
- *  the evidence header — "not running" and "ran, found nothing" are different
- *  facts and a reader needs both. */
-export async function semanticCandidates({ enabled = EVIDENCE_SEMANTIC_ENABLED } = {}) {
+/** The addon's leg, or the unavailable answer in the shape core renders.
+ *  `reason` is surfaced in the evidence header — "not running" and "ran, found
+ *  nothing" are different facts and a reader needs both. */
+export async function semanticCandidates(opts = {}) {
+  const leg = addonEvidenceLeg()
+  if (leg?.semanticCandidates) return leg.semanticCandidates(opts)
+  const enabled = opts.enabled ?? EVIDENCE_SEMANTIC_ENABLED
   return {
     available: false,
-    reason: enabled ? 'no semantic leg installed — see the semantic-search addon' : 'disabled by default; ATLAS_EVIDENCE_SEMANTIC=1 with the semantic-search addon turns it on',
+    reason: enabled ? 'no semantic leg installed — enable the semantic-search addon' : 'disabled by default; ATLAS_EVIDENCE_SEMANTIC=1 with the semantic-search addon turns it on',
     rows: [],
     pages: 0,
     ms: 0,

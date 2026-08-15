@@ -133,7 +133,49 @@ export interface SearchHit {
   subtitle: string
   path: string | null
   snippet: string
-  score: number
+  /** BM25F on the built-in leg; absent on an addon leg, which scores its own way. */
+  score?: number
+  /** Addon legs only — the matched section's heading breadcrumb + its cosine. */
+  section?: string
+  similarity?: number
+}
+
+/** One EXTRA retrieval leg an enabled addon contributes to /api/search.
+ *
+ * 🔴 The legs are unioned, never fused: `items` stays the built-in full-text
+ * ranking and each leg keeps its own list, its own order and its own score. A
+ * leg with `available: false` DID NOT RUN — a different fact from "ran and found
+ * nothing", which is why `reason` travels with it. */
+export interface SearchLeg {
+  key: string
+  label: string
+  addon: string
+  available: boolean
+  items: SearchHit[]
+  reason?: string
+  ms?: number
+  index?: { sweptAt?: string | null; ageMinutes?: number | null; chunks?: number }
+}
+export interface SearchResult {
+  items: SearchHit[]
+  total?: number
+  truncated?: boolean
+  limit?: number
+  /** Absent entirely when no addon registers a leg. */
+  legs?: SearchLeg[]
+}
+
+/** What `GET /api/addons` serves — the optional addons ENABLED on this box, so
+ *  the UI gates addon surfaces at runtime instead of at build time. */
+export interface AddonInfo {
+  name: string
+  description: string
+  hooks: string[]
+  status: Record<string, unknown> | null
+}
+export interface AddonsView {
+  addons: AddonInfo[]
+  errors: { name: string; error: string }[]
 }
 
 export interface NoteRef {
@@ -800,11 +842,18 @@ export async function fetchNotes(folder: string): Promise<NoteRef[]> {
   )
   return r?.items ?? []
 }
-export async function searchVault(q: string, vault?: string): Promise<SearchHit[]> {
-  const r = await getJson<{ items: SearchHit[] }>(
+/** The whole search response, not just `items` — an enabled addon's extra legs
+ *  ride in `legs[]` and the caller renders each one in its own labelled block. */
+export async function searchVault(q: string, vault?: string): Promise<SearchResult> {
+  const r = await getJson<SearchResult>(
     vaultQuery(`${API_BASE}/search?q=${encodeURIComponent(q)}`, vault),
   )
-  return r?.items ?? []
+  return { ...r, items: r?.items ?? [] }
+}
+
+/** Which optional addons this box runs. Null when the API predates addons. */
+export function fetchAddons(): Promise<AddonsView | null> {
+  return getJson<AddonsView>(`${API_BASE}/addons`)
 }
 
 /** Fire the server-side GitHub data refresh (cooldown-guarded server-side). */

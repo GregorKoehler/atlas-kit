@@ -18,6 +18,7 @@ import { runInVault, currentVaultPath, currentVaultKey } from './vaults.mjs'
 import { loadFlags, flagKey } from './atlas-type-flags.mjs'
 import { queryAtlas } from './atlas-query.mjs'
 import { createScorer, snippet } from './vault-search.mjs'
+import { addonSearchLegs, addonScorecardStats } from './addons.mjs'
 
 const execFileAsync = promisify(execFile)
 // The default vault path. DATA_DIR, /api/data, the dashboard bundle and projects
@@ -123,9 +124,29 @@ function readData(name) {
 // slow / independently-cached things (projects' git lookups, the wiki graph, the
 // agent stats) keep their own endpoints. scorecard/heatmap are optional machine-
 // written JSON (see scripts/refresh-github.mjs); they read as null when absent.
+/* `data/scorecard.json` plus whatever the enabled addons contribute, joined HERE
+ * — at READ time — and never by a second writer.
+ *
+ * 🔴 ONE WRITER PER FILE. `data/scorecard.json` is written WHOLESALE by its own
+ * producer (scripts/refresh-github.mjs and friends). An addon that
+ * read-modify-wrote it would be a silent clobber: whichever ran last wins and
+ * the loser's tiles simply vanish, with no error anywhere. So an addon returns
+ * its `Stat[]` from a hook and the join happens on the way out.
+ *
+ * Deliberately ADDITIVE, and a NO-OP when nothing is contributed: with no addon
+ * stats this returns the parsed file untouched (`null` included), so a kit with
+ * zero addons serves byte-identical bytes. Note `GET /api/data/scorecard` still
+ * serves the RAW file — only the dashboard bundle carries the join. */
+function scorecardData() {
+  const sc = readData('scorecard')
+  const extra = addonScorecardStats()
+  if (!extra.length) return sc
+  return { generated: sc?.generated ?? null, stats: [...(sc?.stats ?? []), ...extra] }
+}
+
 function dashboardBundle() {
   return {
-    scorecard: readData('scorecard'),
+    scorecard: scorecardData(),
     heatmap: readData('heatmap'),
     wikiPages: wikiPages(),
   }
@@ -775,6 +796,58 @@ export function search(q, limit = SEARCH_LIMIT) {
   return { items, total, truncated: total > items.length, limit: cap }
 }
 
+/**
+ * The built-in full-text pass PLUS every retrieval leg the enabled addons
+ * registered — e.g. the dense/vector leg of `addons/semantic-search`.
+ *
+ * 🔴 THE LEGS ARE UNIONED, NEVER FUSED. `items` keeps its exact meaning (BM25F,
+ * unchanged); an addon leg lands in its OWN entry of `legs[]`, labelled, with
+ * its own ranking and its own per-row score. Nothing is blended, reciprocal-rank
+ * fused or re-ranked across legs, and adding such a router is the one change
+ * this shape exists to prevent: averaging destroys provenance — the reader (a
+ * person or an agent) picks AFTER seeing the content, which is strictly more
+ * information than any router has BEFORE seeing it. It also keeps abstention
+ * honest: "full-text 0 hits · semantic 24 hits, top similarity 0.31" is a fact
+ * about the query that a merged list hides.
+ *
+ * With no addon leg registered this returns `search()`'s object unchanged — no
+ * `legs` key, no extra await — so a kit with zero addons answers byte-identical
+ * bytes.
+ */
+export async function searchAllLegs(q, limit = SEARCH_LIMIT) {
+  const legs = addonSearchLegs()
+  if (!legs.length) return search(q, limit)
+  const cap = Math.min(Math.max(1, Number(limit) || SEARCH_LIMIT), SEARCH_LIMIT_MAX)
+  const vaultPath = currentVaultPath()
+  // Dispatched BEFORE the synchronous BM25F walk, deliberately: a leg that hands
+  // work to a native runtime (ONNX inference on its own threads) then overlaps
+  // the tree scan instead of queueing behind it. A leg contracts never to throw;
+  // the catch is the belt that keeps that contract from being load-bearing.
+  const running = legs.map((leg) =>
+    Promise.resolve()
+      .then(() => leg.search({ q, limit: cap, vaultPath }))
+      .catch((e) => ({ available: false, reason: String(e?.message || e), items: [] })),
+  )
+  const lexical = search(q, cap)
+  const settled = await Promise.all(running)
+  return {
+    ...lexical,
+    legs: settled.map((r, i) => ({
+      key: legs[i].key || legs[i].addon,
+      label: legs[i].label || legs[i].addon,
+      addon: legs[i].addon,
+      available: !!r?.available,
+      items: Array.isArray(r?.items) ? r.items : [],
+      // "not running" and "ran, found nothing" are different facts and a reader
+      // needs both — so the reason travels with the leg rather than being
+      // flattened into an empty list.
+      ...(r?.reason ? { reason: r.reason } : {}),
+      ...(r?.index ? { index: r.index } : {}),
+      ...(Number.isFinite(r?.ms) ? { ms: r.ms } : {}),
+    })),
+  }
+}
+
 let lastGithubRefreshAt = 0
 
 // Run a cross-vault read handler inside the vault named by ?vault= (absent →
@@ -925,8 +998,16 @@ export function readRouter() {
   // `{ items, total, truncated, limit }` — `items` is unchanged in shape (now
   // BM25F-ranked), and `truncated` is there because silently dropping the tail is
   // indistinguishable from the vault not having it.
+  // …plus `legs[]` when an addon registers a second retriever (see
+  // searchAllLegs). ⚠️ The `.catch` is load-bearing: Express 4 does not catch a
+  // rejected handler promise, so without it an unhandled rejection would take
+  // the whole API down on a search.
   r.get('/api/search', (req, res) =>
-    withVault(req, res, () => res.json(search(String(req.query.q || ''), req.query.limit))),
+    withVault(req, res, () =>
+      searchAllLegs(String(req.query.q || ''), req.query.limit)
+        .then((out) => res.json(out))
+        .catch((e) => res.status(500).json({ error: String(e?.message || e) })),
+    ),
   )
 
   // Optional: refresh the GitHub-contributions scorecard/heatmap JSON. A fixed,
