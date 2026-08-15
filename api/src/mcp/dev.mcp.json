@@ -1,0 +1,16 @@
+{
+  "_comment": "MCP config for every BOX-LOCAL DEV AGENT (agent-local.mjs's LAUNCH_CMD/RESUME_CMD) — the SAME knowledge-only profile as worker.mcp.json, kept as its own file because the two are launched by different code paths and may diverge. ATLAS_MCP_KNOWLEDGE_ONLY=1 narrows registration to the vault/Atlas READ tools (query_atlas, query_vault, get_note, wiki_index, wiki_pages, wiki_graph, recent_activity): a dev agent gets the typed query engine instead of hand-grepping, and never the agent-control tools (no ATLAS_AGENT_CONTROL). That enforces in configuration what was previously only convention: a dev agent never writes the Atlas directly — its paired Atlas worker does, at the end of the run. The agents are TOLD they have these tools in their preamble (ATLAS_SEARCH_PREAMBLE); tools nobody announces go unused. Loaded via `--mcp-config <this> --strict-mcp-config`, which also REPLACES any .mcp.json the spawned repo ships of its own. Paths assume the kit is checked out at /workspace (see docs/SETUP.md); adjust both if you clone elsewhere.",
+  "mcpServers": {
+    "atlas-kit": {
+      "type": "stdio",
+      "command": "node",
+      "args": [
+        "--env-file=/workspace/.env",
+        "/workspace/api/src/mcp/server.mjs"
+      ],
+      "env": {
+        "ATLAS_MCP_KNOWLEDGE_ONLY": "1"
+      }
+    }
+  }
+}

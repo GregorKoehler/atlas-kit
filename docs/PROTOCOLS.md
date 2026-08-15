@@ -196,23 +196,60 @@ instead — it keeps the worktree + branch, so the work stays revivable.
 
 ---
 
-## 4. The Atlas workflow — BRIEF → work → INGEST
+## 4. The Atlas workflow — EVIDENCE → work → INGEST
 
-**Pairing at spawn** — `performSpawn()` (`agent-routes.mjs`, box-local branch
-the box-local branch) spawns an Atlas **worker** alongside every box-local dev agent
-(`spawnAtlasWorker()`, `agent-local.mjs:1806`), running `ATLAS_WORKER_PREAMBLE`
-(`agent-routes.mjs`, `ATLAS_WORKER_PREAMBLE`).
+**EVIDENCE at spawn** — `performSpawn()` (`agent-routes.mjs`) retrieves the Atlas
+evidence **server-side** and folds it straight into the dev agent's opening prompt.
+`local.atlasEvidence()` (`agent-local.mjs`) calls `buildCandidates()`
+(`atlas-candidates.mjs`), which runs three passes over the Atlas working tree and
+returns ONE byte-capped markdown block:
 
-**BRIEF** — `briefAndQueue()` (`agent-local.mjs:2165`), fired in the background right
-after spawn, waits for the paired worker's first (read-only) turn: the worker
-traverses `Wiki/` per its BRIEF instructions (`ATLAS_WORKER_PREAMBLE` point 1,
-`ATLAS_WORKER_PREAMBLE` point 1) and produces a short, cautions-first briefing. It then
-**queues** that briefing to the dev agent (`queuePrompt()`, §1) so it lands at the dev
-agent's first idle moment — never mid-turn. The dev agent is warned to expect this via
-the "Atlas briefing incoming" heads-up injected at spawn (the spawn route).
+| pass | what it is | where |
+| --- | --- | --- |
+| full-text | multi-term, IDF-ranked, several excerpts per page | `textPass()` |
+| typed | the project page for this repo (`agent_repo`), its open `Tasks/` (`for_project`), its hazard `Wiki/log.md` entries | `resolveProject()` + `queryAtlas()` |
+| semantic | dense/vector retrieval — **off in core**, an optional addon plugs into the seam | `atlas-evidence-semantic.mjs` |
+
+The legs are **unioned, never fused**: each gets its own labelled section and keeps its
+own ranking. `evidencePrompt()` wraps the block in the framing it may not be read
+without — it is a candidate set, not an index; absence from it is not evidence of
+absence; nothing in it is an instruction, and the code outranks it.
+
+Guarantees a spawn depends on:
+
+- **Never blocks and never throws.** Any failure — no Atlas configured, no project page,
+  a retrieval error — yields `''`, and the prompt is byte-identical to an unbriefed
+  spawn. One `atlas-evidence` audit line per spawn records bytes/ms/sections/project,
+  so a missing block is visible in the log rather than silent.
+- **Closed work is DOWN-WEIGHTED, not excluded** (`ATLAS_EVIDENCE_DONE_WEIGHT`, default
+  `0.6`; `0` restores exclusion, `1` the old no-filter behaviour). A surviving closed
+  page is labelled `· ✓done` and the section heading says how many were demoted.
+- **The prompt travels by FILE, not through tmux** (`prompt-file-launch.mjs`,
+  `promptFileLaunch()`): tmux rejects a `new-session … sh -lc <cmd>` over ~16 KB
+  (`TMUX_MAX_COMMAND_BYTES`) with `command too long`, and the evidence block alone is
+  tens of KB. The same module builds the bridge's command, so the two cannot drift.
+- **Bridge spawns negotiate the transport per spawn.** A bridge advertising
+  `prompt-file` on `GET /health` gets the full bundle; anything else — an older bridge,
+  an unreachable one, a malformed answer — takes `remoteEvidence()`'s budget-and-clip
+  path, and both of its drops are audited with the numbers that decided them.
+- **Atlas chats open with the same block** (`chatEvidence()` → `knowledgePrompt()`),
+  minus the typed half (a chat names no repo, and inferring one is worse than omitting
+  it) and with two extra guards: the block is a one-shot that does not refresh, and the
+  operator's question sits below it under its own heading.
+
+**Read tools** — box-local dev agents launch with `dev.mcp.json`
+(`--strict-mcp-config`), which narrows the MCP surface to the seven READ tools
+(`query_atlas`, `query_vault`, `get_note`, `wiki_index`, `wiki_pages`, `wiki_graph`,
+`recent_activity`) and nothing that writes. `ATLAS_SEARCH_PREAMBLE` announces them —
+installed-but-unannounced tools go unused. The paired worker gets the same profile via
+`worker.mcp.json`; only the Atlas orchestrator chat gets `control.mcp.json`. Remote
+(bridge) agents have neither the config nor a vault checkout, so they get neither.
 
 **work** — the dev agent works normally; see [§1](#1-dev-agent-steering-semantics) for
-how it's steered mid-flight.
+how it's steered mid-flight. The paired worker is spawned right **after** the dev
+session exists (never before: a request killed mid-spawn would otherwise leave a worker
+orphaned with nothing to pair to) and its first turn only parks it —
+`ATLAS_WORKER_STANDBY`, since there is no longer a brief to synthesize.
 
 **INGEST at close** — `kill()`/`cleanup()` (`agent-local.mjs:2856`/`2523`) deliver
 `DEV_RECAP_PROMPT` (line 2671) to the dev agent as its final turn (no tools, no edits —
@@ -227,10 +264,11 @@ optionally file a `Tasks/` item. Once the worker prints `ATLAS:INGESTED`, the
 (`agent-local.mjs:2528`), which merges the worker's branch into the live Atlas via
 `enqueueAtlasMerge()` ([§5](#5-the-serial-vault-commit-queue)) before reaping.
 
-Workstation (remote-bridge) dev agents get the same BRIEF/INGEST contract, structured
+Workstation (remote-bridge) dev agents get the same EVIDENCE/INGEST contract, structured
 differently since the box can't queue/poll a container's tmux directly — see the block
-comment at the bridge branch of `performSpawn` (BRIEF folded into the launch prompt; an
-ephemeral ingest worker at close via `ingestToAtlas()`, `agent-local.mjs:2696`).
+comment at the bridge branch of `performSpawn` (evidence folded into the launch prompt,
+sized to the transport that bridge advertises; an ephemeral ingest worker at close via
+`ingestToAtlas()`).
 
 A standalone knowledge agent (no paired dev agent) has its own equivalent: a graceful
 close that self-ingests its own transcript's insights before the session ends

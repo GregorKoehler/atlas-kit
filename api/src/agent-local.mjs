@@ -53,6 +53,11 @@ import { decideDelivery, deliveryBackoffMs } from './queue-delivery.mjs'
 // pane width and drops that marker mid-turn. Shared, not copied.
 import { isBusy } from './pane-busy.mjs'
 import { sanitizeForTyping, deliveryLanded, clearInputBox, TUI_CLEAR_KEY, TUI_VERIFY, TUI_VERIFY_MAX_CHARS, TUI_VERIFY_SETTLE_MS, TUI_VERIFY_TRIES } from './tui-input.mjs'
+// A launch prompt travels by FILE, never inside the tmux command — the shell
+// shape is shared with the bridge executor so the two cannot drift.
+import { promptFileBody, promptFileCommand } from './prompt-file-launch.mjs'
+// Server-side Atlas retrieval: what a dev agent (and an Atlas chat) opens with.
+import { buildCandidates, evidencePrompt } from './atlas-candidates.mjs'
 
 const HERE = path.dirname(new URL(import.meta.url).pathname)
 const REPOS_FILE = process.env.AGENT_LOCAL_REPOS || path.join(HERE, 'agent-local-repos.json')
@@ -73,9 +78,15 @@ const WORKSPACE = process.env.WORKSPACE_DIR || '/workspace'
 // one claude launch that goes through tmux: a new pane can inherit the tmux
 // SERVER's global env (see serve.sh), so a stray key could slip in even though
 // Express was launched with the key stripped. Belt-and-suspenders against that.
-const LAUNCH_CMD =
+// Box-local DEV agents load dev.mcp.json: the knowledge-only MCP profile, i.e.
+// the seven READ tools over the vault (query_atlas/query_vault/get_note/…) and
+// nothing that writes. They are told they have them in their preamble
+// (ATLAS_SEARCH_PREAMBLE) — tools nobody announces go unused.
+// ⚠️ `--strict-mcp-config` also REPLACES any `.mcp.json` the spawned repo ships.
+const DEV_MCP_CONFIG = `${WORKSPACE}/api/src/mcp/dev.mcp.json`
+export const LAUNCH_CMD =
   process.env.AGENT_LOCAL_LAUNCH_CMD ||
-  'IS_SANDBOX=1 env -u ANTHROPIC_API_KEY claude --model {model} --effort {effort} --dangerously-skip-permissions {task}'
+  `IS_SANDBOX=1 env -u ANTHROPIC_API_KEY claude --model {model} --effort {effort} --mcp-config ${DEV_MCP_CONFIG} --strict-mcp-config --dangerously-skip-permissions {task}`
 // Knowledge agents (vault chats) additionally pin `--session-id {sid}`: they all
 // share the vault as cwd, so without a pinned id the transcript reader's
 // newest-file heuristic would cross-read between concurrent chats.
@@ -95,6 +106,14 @@ const CONTROL_MCP_CONFIG = `${WORKSPACE}/api/src/mcp/control.mcp.json`
 const ATLAS_CONTROL_LAUNCH_CMD =
   process.env.AGENT_ATLAS_LAUNCH_CMD ||
   `IS_SANDBOX=1 ATLAS_SESSION={atlasSession} env -u ANTHROPIC_API_KEY claude --model {model} --effort {effort} --session-id {sid} --mcp-config ${CONTROL_MCP_CONFIG} --strict-mcp-config --dangerously-skip-permissions {task}`
+// The PAIRED ATLAS WORKER is a restricted, dashboard-driven session — the same
+// knowledge-only READ profile a dev agent gets (worker.mcp.json), and never the
+// orchestrator's control tools. It writes the Atlas through its own worktree, not
+// through a tool.
+const WORKER_MCP_CONFIG = `${WORKSPACE}/api/src/mcp/worker.mcp.json`
+const ATLAS_WORKER_LAUNCH_CMD =
+  process.env.AGENT_ATLAS_WORKER_LAUNCH_CMD ||
+  `IS_SANDBOX=1 env -u ANTHROPIC_API_KEY claude --model {model} --effort {effort} --session-id {sid} --mcp-config ${WORKER_MCP_CONFIG} --strict-mcp-config --dangerously-skip-permissions {task}`
 // Extended (1M) context is the DEFAULT and applies to EVERY model — the
 // subscription serves the 1M window without usage credits — so the fallback model
 // + the meter's window default to it. AGENT_EXTENDED_CONTEXT=0 (or false/no/off)
@@ -205,9 +224,9 @@ const REVIVE_MEM_PER_AGENT_MB = Number(process.env.AGENT_LOCAL_REVIVE_MEM_PER_AG
 const REVIVE_STAGGER_MS = Number(process.env.AGENT_LOCAL_REVIVE_STAGGER_MS || RECONCILE_STAGGER_MS)
 // Resume launch: like LAUNCH_CMD but `--resume {sid}` restores the full session
 // (the task/preamble is already in the transcript), so none is re-supplied.
-const RESUME_CMD =
+export const RESUME_CMD =
   process.env.AGENT_LOCAL_RESUME_CMD ||
-  'IS_SANDBOX=1 env -u ANTHROPIC_API_KEY claude --model {model} --effort {effort} --dangerously-skip-permissions --resume {sid}'
+  `IS_SANDBOX=1 env -u ANTHROPIC_API_KEY claude --model {model} --effort {effort} --mcp-config ${DEV_MCP_CONFIG} --strict-mcp-config --dangerously-skip-permissions --resume {sid}`
 // Resume launch for the Atlas ORCHESTRATOR (the vault:'atlas' chat): like RESUME_CMD
 // but re-attaches the agent-control MCP config + ATLAS_SESSION, so a revived
 // orchestrator gets its spawn/prompt/kill tools back — a plain resume would bring the
@@ -231,17 +250,54 @@ const SHIP_START_GRACE_MS = Number(process.env.AGENT_SHIP_START_GRACE_MS || 60 *
 
 const nowIso = () => new Date().toISOString()
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
-// Atlas worker brief: the spawn request BLOCKS up to ATLAS_BRIEF_TIMEOUT_MS for
-// the paired worker's first (brief) turn, then launches the dev agent — briefed
-// if it finished in time, unbriefed otherwise. Poll interval + a start-grace for
-// turns that finish between polls before we catch them busy.
-const ATLAS_BRIEF_TIMEOUT_MS = Number(process.env.ATLAS_BRIEF_TIMEOUT_MS || 45000)
-const ATLAS_BRIEF_POLL_MS = Number(process.env.ATLAS_BRIEF_POLL_MS || 2500)
-const ATLAS_BRIEF_GRACE_MS = Number(process.env.ATLAS_BRIEF_GRACE_MS || 12000)
+// Waiting on an Atlas worker's turn (the close-time INGEST): poll interval + a
+// start-grace for turns that finish between polls before we catch them busy.
+const ATLAS_TURN_POLL_MS = Number(process.env.ATLAS_TURN_POLL_MS || 2500)
+const ATLAS_TURN_GRACE_MS = Number(process.env.ATLAS_TURN_GRACE_MS || 12000)
 
 // POSIX single-quote escaping — safe to embed in an `sh -lc` string.
 function shquote(s) {
   return "'" + String(s).replace(/'/g, "'\\''") + "'"
+}
+
+// tmux's OWN limit on the command it is handed (`tmux new-session … sh -lc <cmd>`),
+// measured: a 16,000-byte <cmd> is accepted, 17,000 fails with exactly `command
+// too long` — i.e. tmux caps the whole command line at ~16 KiB, and this constant
+// is the usable ceiling for the <cmd> part of it (the rest of the new-session
+// line is ~100 B). It is NOT ARG_MAX (megabytes) — the kernel is nowhere near.
+// Folding a retrieved evidence bundle (~26 KB) into that string fails EVERY
+// spawn, silently: the agent starts anyway, unbriefed. So launch prompts travel
+// by FILE (promptFileLaunch below) and never through tmux, and this constant is
+// the ceiling the regression tests assert against.
+export const TMUX_MAX_COMMAND_BYTES = 16000
+
+// Where a session's launch prompt is materialized. Per-session (two concurrent
+// spawns can never collide) and OUTSIDE every repo/worktree — a file dropped in
+// the Atlas worktree would show up as untracked in the worker's own `git status`.
+function promptFile(id) {
+  return path.join(STATE_DIR, 'prompts', `${String(id).replace(/[^A-Za-z0-9._-]/g, '_')}.txt`)
+}
+
+/* Hand a launch prompt to `claude` WITHOUT putting it in the tmux command: write
+ * it to this session's file, and build the command around its PATH. The shell
+ * shape — and the byte-exactness / `&&` / `rm -f` reasoning behind it — lives in
+ * prompt-file-launch.mjs, because the bridge executor builds the same command
+ * around a file inside its container. */
+function promptFileLaunch(cmd, id, prompt) {
+  const file = promptFile(id)
+  fs.mkdirSync(path.dirname(file), { recursive: true })
+  fs.writeFileSync(file, promptFileBody(prompt))
+  return promptFileCommand(cmd, file)
+}
+
+// Drop a prompt file whose session never started (a failed `tmux new-session`) —
+// on the successful path the session's own shell removes it.
+function dropPromptFile(id) {
+  try {
+    fs.rmSync(promptFile(id), { force: true })
+  } catch {
+    /* best effort */
+  }
 }
 
 // Strict slug: lowercase alnum + dashes, bounded. id, branch (agent/<id>), tmux
@@ -335,7 +391,7 @@ export function repoPathFor(repo) {
   return target ? target.path || WORKSPACE : null
 }
 // Whether the box can run Atlas workers at all: box-local execution is on AND the
-// `atlas` vault is registered. Gates the paired-worker briefing/ingest — including
+// `atlas` vault is registered. Gates the paired-worker standby/ingest — including
 // the REMOTE (workstation) close ingest, which agent-routes drives through here.
 export function atlasAvailable() {
   return localRepoKeys().length > 0 && !!resolveVault('atlas')
@@ -491,7 +547,10 @@ export function setSize(id, size) {
 export function lastSpawnMap() {
   return { ...registry.lastSpawn }
 }
-function audit(entry) {
+// Exported so the REMOTE spawn path (agent-routes.mjs) writes to the same audit
+// log a box-local spawn does — a bridge agent's spawn and how much evidence it
+// left with must be reconstructable from one file, not two.
+export function audit(entry) {
   try {
     fs.mkdirSync(STATE_DIR, { recursive: true })
     fs.appendFileSync(AUDIT_LOG, JSON.stringify({ at: nowIso(), ...entry }) + '\n')
@@ -1312,7 +1371,7 @@ export async function listSessions() {
   // the side-by-side app pane.
   const appUp = await probeTcp(APP_PORT)
   for (const s of Object.values(registry.sessions)) {
-    // Paired Atlas workers (briefing/ingest attached to a BOX dev agent) surface on
+    // Paired Atlas workers (the close-time ingest attached to a BOX dev agent) surface on
     // that dev agent's card (the 📚 chip / closePhase), not as their own row. But a
     // STANDALONE worker — the ephemeral ingest spun up when a WORKSTATION agent
     // closes — has no box dev card to hang off, so show it in the agents overview.
@@ -1645,6 +1704,21 @@ export async function reviveAll() {
 }
 // ───────────────────────────────────────────────────────────────────────────
 
+/* The opening prompt a dev agent is launched with. Pure (path math only) and
+ * exported so the contract is testable without driving tmux
+ * (api/test/atlas-evidence-spawn.test.mjs): `context` is the pre-formed Atlas
+ * evidence block, injected BETWEEN the standing preamble and the task — and with
+ * none the prompt must stay BYTE-IDENTICAL to what an unbriefed spawn has always
+ * had. `{statsFile}`/`{worktree}` are this session's own paths (only the executor
+ * knows the id); attached-file paths fold into the task text as a single-line
+ * tail, the same mechanism a follow-up prompt's images use. */
+export function devPrompt({ id, task, repo, preamble, context, worktree, imagePaths = [] }) {
+  const taskBody = withImages(task, imagePaths)
+  if (!preamble) return taskBody
+  const head = injectApp(preamble.replaceAll('{statsFile}', statsFile(id)).replaceAll('{worktree}', worktree), repo, id)
+  return `${head}${context ? `\n\n${context}` : ''}\n\n---\n# Your task\n${taskBody}`
+}
+
 export async function spawn({ task, repo, preamble, model, effort, context, images }) {
   if (!task || typeof task !== 'string') return { status: 400, ok: false, error: 'task required' }
   const repos = loadRepos()
@@ -1694,31 +1768,28 @@ export async function spawn({ task, repo, preamble, model, effort, context, imag
     return { status: 502, ok: false, error: session.error }
   }
 
-  // The slug/branch derive from `task` only; an optional `preamble` (standing
-  // instructions injected by the proxy, e.g. the reconcile protocol) is appended
-  // to the prompt the agent actually receives — so branch names stay clean.
-  // `{statsFile}` in the preamble becomes this session's live-stats path (only
-  // the executor knows the id); the dir is pre-created so a bare `>` redirect
-  // from the agent's first background script just works.
+  // The slug/branch derive from `task` only; the preamble and the retrieved Atlas
+  // evidence (`context`) go into the prompt the agent actually receives — see
+  // devPrompt — so branch names stay clean. The stats dir is pre-created so a
+  // bare `>` redirect from the agent's first background script just works.
   fs.mkdirSync(path.join(STATE_DIR, 'stats'), { recursive: true })
-  // `context` (when present) is the pre-formed `## Relevant Atlas context` block
-  // from the spawn route's paired-worker briefing — injected between the standing
-  // preamble and the task so the agent starts WITH it.
-  // Attached-file paths fold into the task text (a single-line tail) so the agent
-  // reads them on its first turn — same mechanism as a follow-up prompt's images.
-  const taskBody = withImages(task, imagePaths)
-  const prompt = preamble
-    ? `${injectApp(preamble.replaceAll('{statsFile}', statsFile(id)).replaceAll('{worktree}', worktree), repo, id)}${context ? `\n\n${context}` : ''}\n\n---\n# Your task\n${taskBody}`
-    : taskBody
-  const launch = LAUNCH_CMD
-    .replace('{model}', shquote(model || DEFAULT_MODEL))
-    .replace('{effort}', shquote(effort || DEFAULT_EFFORT))
-    .replace('{task}', shquote(prompt))
+  const prompt = devPrompt({ id, task, repo, preamble, context, worktree, imagePaths })
+  // Prompt by FILE, not in the tmux command (promptFileLaunch): the retrieved
+  // Atlas evidence makes this prompt tens of KB, far past tmux's ~16 KB command
+  // ceiling — and that failure is silent-by-shape.
+  const launch = promptFileLaunch(
+    LAUNCH_CMD
+      .replace('{model}', shquote(model || DEFAULT_MODEL))
+      .replace('{effort}', shquote(effort || DEFAULT_EFFORT)),
+    id,
+    prompt,
+  )
   ensureRepoTrusted(repoPath) // so the worktree launch skips Claude Code's trust dialog
   const ns = await run([
     'tmux', 'new-session', '-d', '-s', tmux, '-c', worktree, 'sh', '-lc', launch,
   ])
   if (!ns.ok) {
+    dropPromptFile(id) // the session's shell never ran, so it never removed it
     session.status = 'error'
     session.error = (ns.stderr || 'tmux new-session failed').slice(0, 500)
     registry.sessions[id] = session
@@ -1731,6 +1802,37 @@ export async function spawn({ task, repo, preamble, model, effort, context, imag
   persist()
   audit({ action: 'spawn', id, repo, branch, model: model || DEFAULT_MODEL, effort: effort || DEFAULT_EFFORT, images: imagePaths.length, ok: true })
   return { status: 200, ok: true, id }
+}
+
+/* The opening prompt a knowledge chat is launched with. Pure and exported so the
+ * contract is testable without driving tmux: with no evidence it must stay
+ * byte-identical to what it has always been.
+ *
+ * `context` is the pre-formed Atlas evidence block (chatEvidence), placed between
+ * the standing preamble and the question. The question keeps its own
+ * `# Operator question` heading BELOW the evidence, so what the operator actually
+ * asked can never read as part of the briefing. */
+export function knowledgePrompt({ question, preamble, context }) {
+  return preamble ? `${preamble}${context ? `\n\n${context}` : ''}\n\n---\n# Operator question\n${question}` : question
+}
+
+/* A knowledge chat's launch line. Exported for the same reason atlasWorkerLaunch
+ * is: so the SIZE contract is testable without driving tmux
+ * (api/test/atlas-chat-evidence.test.mjs). The prompt travels by FILE
+ * (promptFileLaunch) and the command carries only its path — which is what keeps
+ * a chat prompt that now runs tens of KB (evidence + preamble) under tmux's
+ * ~16 KB command limit. The only side effect is writing the session's prompt
+ * file. */
+export function knowledgeLaunch({ id, sid, vaultKey, model, effort, prompt }) {
+  return promptFileLaunch(
+    (vaultKey === 'atlas' ? ATLAS_CONTROL_LAUNCH_CMD : KNOWLEDGE_LAUNCH_CMD)
+      .replace('{atlasSession}', shquote(id)) // no-op for the non-atlas template
+      .replace('{model}', shquote(model))
+      .replace('{effort}', shquote(effort))
+      .replace('{sid}', shquote(sid)),
+    id,
+    prompt,
+  )
 }
 
 /* Knowledge agent: an interactive vault chat (a vault chat).
@@ -1767,18 +1869,24 @@ export async function spawnKnowledge({ question, preamble, model, effort, vault 
     status: 'running', startedAt: nowIso(), lc: initLifecycle(LC.SPAWNED),
   }
 
-  const prompt = preamble ? `${preamble}\n\n---\n# Operator question\n${question}` : question
-  const launch = (vlt.key === 'atlas' ? ATLAS_CONTROL_LAUNCH_CMD : KNOWLEDGE_LAUNCH_CMD)
-    .replace('{atlasSession}', shquote(id)) // no-op for the non-atlas template
-    .replace('{model}', shquote(model || DEFAULT_MODEL))
-    .replace('{effort}', shquote(effort || DEFAULT_EFFORT))
-    .replace('{sid}', shquote(claudeSessionId))
-    .replace('{task}', shquote(prompt))
+  // The retrieved Atlas candidate set, folded into the chat's FIRST turn — the
+  // same retrieval a dev spawn gets (chatEvidence → atlasEvidence). '' on any
+  // failure and on every non-atlas vault, and then this prompt is byte-identical
+  // to the one chats have always had. Resolved key, not the caller's `vault` —
+  // the Atlas IS the default vault, so a chat spawned without one is still an
+  // Atlas chat.
+  const context = await chatEvidence({ vaultKey: vlt.key, question, id })
+  const prompt = knowledgePrompt({ question, preamble, context })
+  const launch = knowledgeLaunch({
+    id, sid: claudeSessionId, vaultKey: vlt.key,
+    model: model || DEFAULT_MODEL, effort: effort || DEFAULT_EFFORT, prompt,
+  })
   ensureRepoTrusted(vlt.path) // so the launch skips Claude Code's trust dialog
   const ns = await run([
     'tmux', 'new-session', '-d', '-s', tmux, '-c', vlt.path, 'sh', '-lc', launch,
   ])
   if (!ns.ok) {
+    dropPromptFile(id) // the session's shell never ran, so it never removed it
     session.status = 'error'
     session.error = (ns.stderr || 'tmux new-session failed').slice(0, 500)
     registry.sessions[id] = session
@@ -1793,16 +1901,108 @@ export async function spawnKnowledge({ question, preamble, model, effort, vault 
   return { status: 200, ok: true, id }
 }
 
+/**
+ * The Atlas evidence block for a dev agent's opening prompt — the retrieval that
+ * replaced a synthesized brief.
+ *
+ * Measured on the design this replaces: of the sessions that attempted an LLM
+ * brief, 84% never got one (the synthesis on top of this same retrieval took
+ * ~28 s and timed out at 45 s), and the late ones landed 3-44 min in — after the
+ * work they were meant to inform. The retrieval itself is neither slow nor
+ * flaky: sub-second over a whole vault. So the synthesis goes and the evidence
+ * stays.
+ *
+ * NEVER throws and never blocks a spawn on the Atlas: any failure — retrieval
+ * error, no atlas configured, no project page for the repo, unknown repo — yields
+ * '' and the agent launches exactly as it would on a box with no Atlas at all.
+ * `root` defaults to the live atlas checkout and is injectable for tests.
+ *
+ * Audited per spawn (bytes/ms/sections/present) because the design it replaces
+ * failed invisibly for weeks for exactly the want of that line.
+ *
+ * `kind` ('dev' | 'chat') picks the framing and labels the audit line — an Atlas
+ * CHAT gets the same retrieval through this same function (chatEvidence below);
+ * it must stay ONE path with one set of guards.
+ */
+export async function atlasEvidence({ task, repo, root, maxBytes, slug, kind = 'dev' }) {
+  const t0 = Date.now()
+  const atlasRoot = root || resolveVault('atlas')?.path
+  if (!atlasRoot) return ''
+  const id = slug || slugify(task) || null
+  try {
+    const { text, stats } = await buildCandidates({ task, repo, root: atlasRoot, ...(maxBytes ? { maxBytes } : {}) })
+    const block = evidencePrompt(text, { kind })
+    audit({ action: 'atlas-evidence', kind, id, repo, ...stats, block: block.length, ok: true })
+    return block
+  } catch (e) {
+    audit({ action: 'atlas-evidence', kind, id, repo, ms: Date.now() - t0, error: String(e?.message || e).slice(0, 200), ok: false })
+    return ''
+  }
+}
+
+/**
+ * The same retrieval for an Atlas CHAT's opening turn (spawnKnowledge above) —
+ * against the ~3 s per discovery turn a chat otherwise spends re-finding pages
+ * the dashboard can hand it before it says a word.
+ *
+ * ⚠️ NO `repo`, deliberately. A dev spawn names a repo, which resolves to a
+ * project page and unlocks the TYPED half (project page + its open Tasks/ + its
+ * hazards). A chat names nothing — only the operator's opening line — and
+ * inferring a project from it is worse than omitting it: a question naming two
+ * projects resolves to whichever matches an `agent_repo` key first, and a 4.6 KB
+ * project section plus 20 of the WRONG project's open tasks would then sit at the
+ * top of the block under a confident `Project:` header. So the chat gets the
+ * full-text half only; when the question does name a project, that project's page
+ * turns up as a ranked hit on its own merits, unlabelled and un-anchored.
+ *
+ * ⚠️ ATLAS ONLY. `buildCandidates` is written to the Atlas's shape — `Wiki/` +
+ * `Tasks/`, `for_project` edges, section headers that name that vault's own
+ * `index.md`/`log.md`. Another vault would not crash, it would produce
+ * MISLABELLED evidence — so it gets none, and its chats stay byte-identical.
+ */
+export async function chatEvidence({ vaultKey, question, id, root }) {
+  if (vaultKey !== 'atlas') return ''
+  return atlasEvidence({ task: question, kind: 'chat', slug: id, ...(root ? { root } : {}) })
+}
+
+// The paired worker's FIRST turn. It no longer briefs the dev agent (the
+// dashboard hands it the evidence directly, above) — but the worker still earns
+// its keep at close, ingesting the dev agent's session recap into the Atlas, so
+// it is still spawned and kept alive. This turn only parks it: one cheap no-tool
+// reply that also confirms it booted.
+export const ATLAS_WORKER_STANDBY =
+  '# Stand by\nYou are paired to a dev agent that has just started. Do NOT brief it — the dashboard hands it the retrieved Atlas evidence directly, so there is nothing to research now.\n\nReply with the single line `standing by` — no tools, no reads, no writes. Your work comes later: the dashboard will hand you that dev agent\'s session recap to INGEST per your standing instructions.'
+
+// The paired Atlas worker's launch line. Exported so its contract is testable
+// without driving tmux (api/test/atlas-worker-tools.test.mjs): which MCP config
+// it loads — the knowledge-only worker.mcp.json, never control.mcp.json — and
+// that it stays far under TMUX_MAX_COMMAND_BYTES whatever `head` weighs. The
+// only side effect is writing this session's prompt file (under STATE_DIR).
+export function atlasWorkerLaunch({ id, sid, head }) {
+  return promptFileLaunch(
+    ATLAS_WORKER_LAUNCH_CMD
+      .replace('{model}', shquote(DEFAULT_MODEL))
+      .replace('{effort}', shquote(DEFAULT_EFFORT))
+      .replace('{sid}', shquote(sid)),
+    id,
+    head,
+  )
+}
+
 /* Atlas worker: a knowledge worker PAIRED to a dev agent (see
  * the paired-worker design). Like spawnKnowledge it's a vault-
  * rooted interactive session with a pinned --session-id, BUT it works in a git
  * WORKTREE of the Atlas on its own branch `atlas/<slug>`, so its writes stay
- * isolated until the Atlas ship queue merges them. Spawned BEFORE the dev agent
- * (so its briefing can go into the dev agent's first prompt), then cross-linked
- * via pairAtlasWorker. Not operator-chatted — its first turn IS the brief
- * request; the dashboard later hands it the dev agent's recap at cleanup. The
- * Atlas path comes from the vault registry (`atlas`); a soft failure (atlas not
- * configured / box-local off) means the dev agent simply runs UNPAIRED. */
+ * isolated until the Atlas ship queue merges them. Spawned AFTER the dev agent
+ * it belongs to exists (so a request that dies mid-spawn cannot leave a worker
+ * with nothing to pair to), then cross-linked via pairAtlasWorker.
+ *
+ * Not operator-chatted, and it no longer briefs anyone: the dashboard retrieves
+ * the Atlas evidence itself and pastes it into the dev agent's opening prompt
+ * (atlasEvidence), so the worker's first turn only parks it (ATLAS_WORKER_STANDBY)
+ * and its real job is the close-time recap INGEST. The Atlas path comes from the
+ * vault registry (`atlas`); a soft failure (atlas not configured / box-local off)
+ * means the dev agent simply runs UNPAIRED. */
 export async function spawnAtlasWorker({ task, preamble, firstTurn }) {
   if (!task || typeof task !== 'string') return { status: 400, ok: false, error: 'task required' }
   if (!localRepoKeys().length) return { status: 503, ok: false, error: 'box-local executor disabled' }
@@ -1836,23 +2036,17 @@ export async function spawnAtlasWorker({ task, preamble, firstTurn }) {
     return { status: 502, ok: false, error: (wt.stderr || 'git worktree add failed').slice(0, 500) }
   }
 
-  // The first turn IS the brief request, so the worker starts traversing
-  // immediately; briefWorker (the caller) waits for it to finish and reads the
-  // reply. Standing BRIEF/INGEST/write rules live in the preamble.
-  // The worker's first turn: a BRIEF request by default; the remote-ingest path
-  // passes its own `firstTurn` (the INGEST prompt) instead. The preamble (standing
-  // BRIEF/INGEST/write rules) is prepended either way.
-  const body = firstTurn
-    || `# Brief the dev agent\nFollow your BRIEF instructions for the task below — traverse the Atlas and reply with a concise, prescriptive briefing (what's relevant + any ⚠️ cautions). Write nothing.\n\nTask: ${task}`
-  const head = preamble ? `${preamble}\n\n---\n${body}` : (firstTurn || task)
-  const launch = KNOWLEDGE_LAUNCH_CMD
-    .replace('{model}', shquote(DEFAULT_MODEL))
-    .replace('{effort}', shquote(DEFAULT_EFFORT))
-    .replace('{sid}', shquote(claudeSessionId))
-    .replace('{task}', shquote(head))
+  // The worker's first turn: STAND BY by default (there is nothing to brief —
+  // the dashboard hands the dev agent its evidence directly); the ingest path
+  // passes its own `firstTurn` (the INGEST prompt) instead. The preamble
+  // (standing INGEST/write rules) is prepended either way.
+  const body = firstTurn || ATLAS_WORKER_STANDBY
+  const head = preamble ? `${preamble}\n\n---\n${body}` : body
+  const launch = atlasWorkerLaunch({ id, sid: claudeSessionId, head })
   ensureRepoTrusted(atlas.path) // so the Atlas worktree launch skips Claude Code's trust dialog
   const ns = await run(['tmux', 'new-session', '-d', '-s', tmux, '-c', worktree, 'sh', '-lc', launch])
   if (!ns.ok) {
+    dropPromptFile(id) // the session's shell never ran, so it never removed it
     // Undo the worktree we just created so a failed launch leaves no orphan.
     await run(['git', '-C', atlas.path, 'worktree', 'remove', worktree, '--force'])
     await run(['git', '-C', atlas.path, 'branch', '-D', branch])
@@ -1867,7 +2061,7 @@ export async function spawnAtlasWorker({ task, preamble, firstTurn }) {
 }
 
 // The most recent assistant message's text (its text blocks, joined) from a
-// session's transcript — used to capture an Atlas worker's briefing reply. Same
+// session's transcript — used to capture a closing dev agent's recap. Same
 // pinned-session file resolution as readTranscript; '' when nothing readable.
 function lastAssistantText(s) {
   try {
@@ -1912,41 +2106,6 @@ function lastAssistantText(s) {
   } catch {
     return ''
   }
-}
-
-// Block until a freshly-spawned Atlas worker finishes its first (brief) turn,
-// then return its reply. Polls the pane for the busy→idle edge (with a start
-// grace for turns that finish faster than sampling) and reads the briefing from
-// the transcript. Bounded: { ok:false, timedOut:true } lets the caller launch
-// the dev agent unbriefed. NOTE: this BLOCKS the spawn request up to
-// ATLAS_BRIEF_TIMEOUT_MS — the deliberate cost of baking the briefing into the
-// dev agent's first prompt (deferred-launch is the future UX optimization).
-export async function briefWorker({ id, timeoutMs }) {
-  const s = registry.sessions[id]
-  if (!s) return { ok: false, error: 'no such worker' }
-  const started = Date.now()
-  const deadline = started + (Number(timeoutMs) || ATLAS_BRIEF_TIMEOUT_MS)
-  let sawBusy = false
-  while (Date.now() < deadline) {
-    await sleep(ATLAS_BRIEF_POLL_MS)
-    if (!(await sessionAlive(s))) return { ok: false, error: 'worker exited' }
-    const pane = await captureTail(s, TAIL_LINES)
-    if (isBusy(pane)) {
-      sawBusy = true
-      continue
-    }
-    // Idle: accept the briefing once we've seen the turn run, or after a short
-    // start grace (it may have finished between polls before we caught it busy).
-    if (sawBusy || Date.now() - started > ATLAS_BRIEF_GRACE_MS) {
-      const text = lastAssistantText(s)
-      if (text) {
-        audit({ action: 'atlas-brief', id, len: text.length, ok: true })
-        return { ok: true, text }
-      }
-    }
-  }
-  audit({ action: 'atlas-brief', id, ok: false, timedOut: true })
-  return { ok: false, timedOut: true }
 }
 
 // Cross-link a dev agent and its Atlas worker so kill/cleanup can find the worker
@@ -2136,48 +2295,6 @@ export async function queuePrompt({ id, text, images, kind, summary, steeredBy, 
   return { status: 200, ok: true }
 }
 
-// One-sentence gist of a briefing for the card's ⏱ chip — a visual confirmation
-// that the Atlas brief actually landed (debug aid; may be removed later). Flattens
-// the markdown to prose, takes the first sentence, caps the length. Cosmetic and
-// best-effort: returns '' when there's nothing usable.
-function briefSummary(text) {
-  const flat = String(text || '')
-    .replace(/```[\s\S]*?```/g, ' ') // drop fenced code blocks
-    .split('\n')
-    .map((l) => l.replace(/^[\s>#*+-]+/, '').trim()) // strip leading heading/list markers
-    .filter(Boolean)
-    .join(' ')
-    .replace(/[*_`#]/g, '') // drop inline emphasis / leftover marks
-    .replace(/\s+/g, ' ')
-    .trim()
-  if (!flat) return ''
-  const end = flat.search(/[.!?](\s|$)/) // first sentence terminator (decimals/versions skipped)
-  let s = end >= 0 ? flat.slice(0, end + 1) : flat
-  if (s.length > 200) s = s.slice(0, 199).trimEnd() + '…'
-  return s.trim()
-}
-
-// Background brief→queue (the non-blocking spawn path): wait for the paired
-// worker's brief turn, then QUEUE the briefing for the dev agent so flushQueued
-// delivers it at the first idle (never mid-turn). Tagged 'atlas-brief' so the card
-// shows a shorthand ⏱ chip. Fire-and-forget from the spawn route. Skips if the
-// brief failed/empty, the dev agent is gone, or the operator already parked a prompt.
-export async function briefAndQueue({ workerId, devId }) {
-  const brief = await briefWorker({ id: workerId })
-  if (!brief.ok || !brief.text) return
-  const dev = registry.sessions[devId]
-  if (!dev || !(await sessionAlive(dev))) return
-  if (Array.isArray(dev.queued) && dev.queued.length) {
-    audit({ action: 'atlas-brief-queue', id: devId, ok: false, error: 'queue occupied' })
-    return
-  }
-  await queuePrompt({
-    id: devId,
-    text: `## Relevant Atlas context\n_Prior knowledge from your Atlas knowledge base — treat any ⚠️ flags as constraints._\n\n${brief.text.trim()}`,
-    kind: 'atlas-brief',
-    summary: briefSummary(brief.text),
-  })
-}
 
 // Cancel a parked prompt. With a numeric `index`, drop just that one from the
 // FIFO queue (the card's per-chip ×); without one, clear the whole queue.
@@ -2670,7 +2787,7 @@ const KNOWLEDGE_CLOSE_TIMEOUT_MS = Number(process.env.AGENT_KNOWLEDGE_CLOSE_TIME
 // ingest. Reuses the KNOWLEDGE_CLOSE_* grace/timeout windows.
 const DEV_RECAP_PROMPT =
   process.env.AGENT_DEV_RECAP_PROMPT ||
-  'This session is closing. Final turn — no tools, no edits: reply with a TIGHT recap of THIS session for the Atlas knowledge base. What changed and why, the key decisions and any dead-ends, and anything that CONTRADICTS what the Atlas briefing told you at the start. A few sentences or a short list — durable knowledge only, not a play-by-play. The session ends when you finish.'
+  'This session is closing. Final turn — no tools, no edits: reply with a TIGHT recap of THIS session for the Atlas knowledge base. What changed and why, the key decisions and any dead-ends, and anything that CONTRADICTS the Atlas evidence you were given at the start. A few sentences or a short list — durable knowledge only, not a play-by-play. The session ends when you finish.'
 
 // The ingest prompt handed to the paired worker once the dev recap is captured.
 export function atlasIngestPrompt(recap, dev) {
@@ -2711,10 +2828,10 @@ export async function ingestToAtlas({ recap, devId, devTask, preamble }) {
   const started = Date.now()
   let sawBusy = false
   while (Date.now() - started < KNOWLEDGE_CLOSE_TIMEOUT_MS) {
-    await sleep(ATLAS_BRIEF_POLL_MS)
+    await sleep(ATLAS_TURN_POLL_MS)
     if (!(await sessionAlive(worker))) break
     if (isBusy(await captureTail(worker, TAIL_LINES))) { sawBusy = true; continue }
-    if (sawBusy || Date.now() - started > ATLAS_BRIEF_GRACE_MS) break
+    if (sawBusy || Date.now() - started > ATLAS_TURN_GRACE_MS) break
   }
   const merge = await enqueueAtlasMerge({ branch: worker.branch, message: `atlas: ingest from ${devId}` })
   if (merge && !merge.ok) {

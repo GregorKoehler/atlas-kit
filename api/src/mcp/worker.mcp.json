@@ -1,0 +1,16 @@
+{
+  "_comment": "MCP config for the PAIRED ATLAS WORKER (kind:'atlas', spawnAtlasWorker) — a restricted, dashboard-driven session, NOT an orchestrator. Same Atlas Kit server as control.mcp.json, but deliberately WITHOUT ATLAS_AGENT_CONTROL: no spawn/kill/steer tools ever. ATLAS_MCP_KNOWLEDGE_ONLY=1 narrows registration to the vault/Atlas READ tools (query_atlas, query_vault, get_note, wiki_index, wiki_pages, wiki_graph, recent_activity) — so the worker gets the typed query engine instead of hand-grepping, and nothing it could write outside its own worktree (its Atlas writes go through git, not through a tool). Loaded via `--mcp-config <this> --strict-mcp-config` in agent-local.mjs's ATLAS_WORKER_LAUNCH_CMD. Paths assume the kit is checked out at /workspace (see docs/SETUP.md); adjust both if you clone elsewhere.",
+  "mcpServers": {
+    "atlas-kit": {
+      "type": "stdio",
+      "command": "node",
+      "args": [
+        "--env-file=/workspace/.env",
+        "/workspace/api/src/mcp/server.mjs"
+      ],
+      "env": {
+        "ATLAS_MCP_KNOWLEDGE_ONLY": "1"
+      }
+    }
+  }
+}

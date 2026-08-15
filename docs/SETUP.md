@@ -136,6 +136,13 @@ env and each agent launches with `env -u ANTHROPIC_API_KEY`, so nothing can fall
 to API-key billing. Agents run `claude --dangerously-skip-permissions` (headless) with
 `IS_SANDBOX=1`.
 
+Each launched agent also loads one of the MCP configs in `api/src/mcp/` with
+`--strict-mcp-config`: `dev.mcp.json` (box-local dev agents — the seven read-only vault
+tools), `worker.mcp.json` (the paired Atlas worker — same profile) and
+`control.mcp.json` (the Atlas orchestrator chat — plus the agent-control tools). **All
+three hard-code `/workspace` as the repo root** — if you cloned elsewhere, edit the
+paths in all three (and in the root `.mcp.json`).
+
 ## 8. Create your vault + point `VAULT_PATH` at it
 
 Atlas Kit ships no vault. Create yours from the

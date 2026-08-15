@@ -33,6 +33,7 @@ import { diffShipNotes, deliverShipNotes, parseShipNotes, dumpShipNotes } from '
 import { createReceiptState, armReceipt, diffReceipts, receiptParent } from './atlas-reply-receipts.mjs'
 import { appendMessage, noteSend } from './agent-messages.mjs'
 import { resolveVault, isTypedVault } from './vaults.mjs'
+import { EVIDENCE_FRAMING_BYTES } from './atlas-candidates.mjs'
 
 // Remote bridges (workstation + any in bridges.json) are resolved per-repo /
 // per-id through bridges.mjs; the legacy AGENT_BRIDGE_URL/TOKEN is the default
@@ -136,6 +137,25 @@ Build exactly what's asked — no unrequested abstractions, config, flexibility,
 When FIXING A BUG, fix the root cause, not the symptom — grep every caller of the function you touch and fix the shared function once, where all callers route through.
 Never simplify away: input validation at trust boundaries, error handling that prevents data loss, security, or accessibility basics. Leave non-trivial logic with a way to verify it (a test or a runnable check), following this repo's conventions.
 When you deliberately defer something, say so in one line — skipped: <what>, add when <trigger>.`
+
+// Appended to BOX-LOCAL dev agents' preamble only — they are the ones launched
+// with dev.mcp.json (agent-local.mjs), so they are the ones that HAVE these
+// tools; a workstation agent has neither the MCP config nor a vault checkout.
+// The tools alone are not enough: installed-but-unannounced read tools go
+// essentially unused, so this block is the other half of the change. Wording
+// deliberately mirrors ATLAS_KNOWLEDGE_PREAMBLE ("PREFER them over hand-rolled
+// grep") and the evidence block's absence-of-evidence guard, so there is ONE
+// vocabulary across surfaces.
+export const ATLAS_SEARCH_PREAMBLE =
+  process.env.AGENT_ATLAS_SEARCH_PREAMBLE ||
+  `Atlas search — you can query the operator's Knowledge Atlas (a typed, queryable wiki of projects, decisions and open tasks) with these READ-ONLY tools:
+- \`query_atlas\` — the TYPED relational/temporal engine: filter and traverse the snake_case frontmatter keys (\`for_project\`, \`area\`, \`depends_on\`, \`stakeholders\`, \`status\`, \`due\`). Use it for "what else is in flight on this project", "what depends on this", "is there already an open task about X".
+- \`query_vault\` — full-text (prose) search over page CONTENT, when you have keywords rather than a relationship.
+- \`get_note\` reads one page; \`wiki_index\` / \`wiki_pages\` / \`wiki_graph\` list and link pages; \`recent_activity\` shows what changed recently.
+PREFER them over hand-rolled grep; if they aren't available to you, grepping those exact snake_case keys over a vault checkout is the fallback.
+Reach for them BEFORE assuming something is new, when a decision your task touches looks already-made, and when the task names a project, person or system this repo doesn't explain — the Atlas carries prior decisions, constraints and open tasks the code never states.
+⚠️ Absence from a search result is NOT evidence of absence: these retrieve by keyword and by typed key over what happens to be written down, so never conclude "X doesn't exist" or "this is new" from an empty result — say the search surfaced nothing. And a CODE question is answered by READING THE CODE: the Atlas records intent and history, the repo is the truth about behaviour.
+Read-only is deliberate — you never write the Atlas yourself; your paired Atlas worker does that at the end of your run.`
 
 // Appended to EVERY dev agent's preamble (box-local AND workstation). The
 // `{statsFile}` token is the live-stats file the agent rewrites; like APP_PREAMBLE
@@ -251,18 +271,22 @@ export const ATLAS_CONTROL_PREAMBLE =
 This orchestration is ADDITIVE to your knowledge work — grounding answers in the Atlas and writing insights back the typed way still applies.`
 
 // Standing instructions for an ATLAS WORKER — the knowledge worker PAIRED to a
-// dev agent (see the paired-worker design). Unlike a KNOWLEDGE
-// agent it is not operator-chatted: the dashboard drives it (brief the dev agent
-// at spawn, ingest the dev agent's recap at cleanup), and it works in a git
-// WORKTREE of the Atlas on its own branch — so its writes never touch the live
-// Atlas until the Atlas ship queue merges that branch. Box-local only.
+// dev agent (see the paired-worker design). Unlike a KNOWLEDGE agent it is not
+// operator-chatted: the dashboard drives it, and it works in a git WORKTREE of
+// the Atlas on its own branch — so its writes never touch the live Atlas until
+// the Atlas ship queue merges that branch. Box-local only.
+//
+// It used to have TWO jobs; briefing the dev agent was the first. That brief is
+// now the dashboard's own retrieval, folded into the dev agent's opening prompt
+// (local.atlasEvidence), so only the INGEST remains and the worker simply stands
+// by until its dev agent closes.
 export const ATLAS_WORKER_PREAMBLE =
   process.env.AGENT_ATLAS_WORKER_PREAMBLE ||
   `You are an ATLAS WORKER paired to a dev agent. Your working directory is a git worktree of the operator's Atlas — a typed, queryable LLM-wiki. Read its \`CLAUDE.md\` ("the Guide") and \`Wiki/Legend.md\` ("the Legend") before your first write: they are the schema and the write discipline.
 
-You have two jobs, both driven by the dashboard (this is NOT an operator chat):
+You have one job, driven by the dashboard (this is NOT an operator chat), plus a wait before it:
 
-1) BRIEF (at the start). When asked to brief the dev agent on a task, traverse the Atlas READ-ONLY — Grep/Glob/Read over \`Wiki/\` (start at \`Wiki/index.md\`), follow \`[[wikilinks]]\` — and reply with a SHORT briefing of what's relevant: prior decisions, related projects/people/concepts, constraints, and any open \`Tasks/\`. For relational/temporal lookups (\`for_project\`, \`area\`, \`depends_on\`, \`owes\`, \`due\`, \`last_contact\`), grep the EXACT snake_case typed keys (see the Legend) and filter/traverse their values — the typed layer gives exact answers where prose search misses (e.g. \`grep -rn 'for_project:.*ThisProject' Tasks/ Wiki/\`). Cite pages as \`[[wikilinks]]\`. Lead with what's LOAD-BEARING for this task, and end with explicit CAUTIONS the dev agent should act on — e.g. "⚠️ Respect: [[prior decision]] — don't change it without reason", "⚠️ Verify: the Atlas claims X; confirm it still holds". Skip generic background. If the Atlas has nothing relevant, say so plainly in one line. Write NOTHING at brief time.
+1) STAND BY (at the start). You do NOT brief the dev agent: the dashboard retrieves the Atlas evidence itself — server-side, in-process, in well under a second — and pastes it straight into the dev agent's opening prompt. So there is nothing to research now and nothing to synthesize. Acknowledge in one line and stop; do not read, search or write. (An LLM brief on top of that retrieval reached only a small fraction of sessions before it was removed, and the ones that arrived late arrived after the work.)
 
 2) INGEST (at the end). When handed the dev agent's session recap, fold it into the Atlas: update the most fitting existing page (or add one focused page) — and think QUERY-FIRST: add the typed edges and dates the operator would later *filter or traverse for* (\`for_project\`, \`depends_on\`, \`stakeholders\`, \`status\`, \`due\`, etc.), first consulting \`Wiki/Legend.md\` for the current node/edge/property types — reuse the key that fits, or coin + register a new snake_case key in the same edit when none does and the edge is worth querying; a bare \`[[link]]\` where a typed edge fits is a missed query. ALWAYS append at least one \`Wiki/log.md\` entry — newest at the bottom, format \`## [YYYY-MM-DD] <op> | <title>\` with \`op\` = \`ingest\`. Note any CONTRADICTION between the dev work and what a page previously claimed.
    TASKS (Kanban): if the recap names a concrete follow-up / next-step, or the dev agent's task was an explicit "add a task / Kanban item" request, file it as a focused \`Tasks/<slug>.md\` so it lands on the operator's Kanban — \`type: task\`, \`status: inbox\`, \`created\`/\`updated\` = today (YYYY-MM-DD). **Tag it to its project the typed way — \`for_project: "[[<Project>]]"\` — or it will NOT show under that project on the board.** Resolve \`<Project>\` by matching the named project against the ACTUAL \`Wiki/Projects/\` pages by title / filename / tag (partial or informal match is fine, e.g. "the payments project" → \`[[Payments-Service]]\`); if no project genuinely fits, use \`area: "[[<Area>]]"\` or \`for_project_idea: "[[<Idea>]]"\` per the Legend, or omit rather than guess. Add \`due\`/\`priority\`/\`tags\` only when the recap states them. Keep tasks FOCUSED — roadmap-level or a single named next-step with engineering consolidated, never one task per checkbox.
@@ -334,6 +358,93 @@ async function callBridge(method, path, body, timeoutMs = BRIDGE_TIMEOUT_MS, bri
   } finally {
     clearTimeout(timer)
   }
+}
+
+/* --- remote Atlas evidence, under the bridge's tmux ceiling ---------- *
+ * The box hands a dev agent its retrieved Atlas evidence in the launch prompt.
+ * Box-local that prompt travels by FILE, so its size is a non-issue. A bridge
+ * that has been redeployed since the prompt-file port does the same (it
+ * advertises `prompt-file` on /health — takesPromptFile below) and gets the
+ * identical full bundle.
+ *
+ * This path is what a bridge that has NOT gets: it still folds the WHOLE prompt
+ * into `tmux new-session … sh -lc <cmd>`, and tmux rejects a <cmd> over ~16 KB
+ * with `command too long`. That failure is silent-by-shape — the spawn just
+ * doesn't happen — so the evidence gets what is LEFT of the ceiling, and a hard
+ * check drops it entirely rather than let a spawn fail. Both drops are AUDITED:
+ * "did this agent get briefed?" has to be answerable from the log, and the
+ * numbers that decided the drop go on the line so the arithmetic can be
+ * re-checked from it alone.
+ * ------------------------------------------------------------------ */
+// Room left for the bridge's own launch line: its launch command + the
+// {statsFile}/{worktree}/{appAddress} substitutions it makes, which are
+// container paths this side cannot know.
+const REMOTE_LAUNCH_RESERVE = Number(process.env.AGENT_BRIDGE_LAUNCH_RESERVE || 1500)
+// Below this an evidence section is too clipped to be worth its framing.
+const REMOTE_EVIDENCE_MIN = 1200
+// `shquote` rewrites each `'` as `'\''` (+3 B), so what tmux measures is bigger
+// than what we wrote. Counted exactly, not estimated.
+const quotedBytes = (s) => Buffer.byteLength(s) + 3 * (s.match(/'/g)?.length || 0)
+
+// How many bytes of EVIDENCE a remote spawn can afford, given its already-quoted
+// base prompt. Exported for the test: this arithmetic is the only thing standing
+// between a 26 KB bundle and a silent `command too long` on the workstation.
+export function remoteEvidenceBudget(quotedPromptBytes) {
+  const room = local.TMUX_MAX_COMMAND_BYTES - REMOTE_LAUNCH_RESERVE - quotedPromptBytes
+  // The budget buys CHARACTERS (buildCandidates caps on string length) but tmux
+  // measures BYTES, after quoting. Measured over real bundles: UTF-8 costs
+  // +1.4-1.9% (em-dashes, ⚠), quoting +0.2-0.6% — so 5% is roughly double the
+  // worst observed, and the hard check downstream is the guarantee rather than
+  // this estimate.
+  const budget = room - EVIDENCE_FRAMING_BYTES - Math.ceil(room / 20)
+  return budget >= REMOTE_EVIDENCE_MIN ? budget : 0
+}
+
+// The remote counterpart of the box's `local.atlasEvidence` call: same retrieval,
+// sized to the ceiling above, and verified against it before it is sent.
+// Exported for the same reason remoteEvidenceBudget is: this arithmetic and its
+// two drops are the whole clipped path, and a test must be able to drive them
+// without a bridge (api/test/bridge-prompt-file.test.mjs).
+export async function remoteEvidence({ task, repo, preamble, bridge }) {
+  const base = quotedBytes(`${preamble}\n\n---\n# Your task\n${task}`)
+  const budget = remoteEvidenceBudget(base)
+  if (!budget) {
+    local.audit({
+      action: 'atlas-evidence', kind: 'dev', repo, remote: true, bridge, guard: 'no-budget',
+      base, reserve: REMOTE_LAUNCH_RESERVE, limit: local.TMUX_MAX_COMMAND_BYTES, block: 0, ok: false,
+    })
+    console.error(`[agent-routes] remote spawn: no room for Atlas evidence (prompt already ${base} B quoted)`)
+    return ''
+  }
+  const block = await local.atlasEvidence({ task, repo, maxBytes: budget })
+  // The budget is an estimate of quoting growth; this is the guarantee. Dropping
+  // the evidence is a no-op spawn, sending an oversized one is a FAILED spawn.
+  if (base + quotedBytes(block) + REMOTE_LAUNCH_RESERVE > local.TMUX_MAX_COMMAND_BYTES) {
+    local.audit({
+      action: 'atlas-evidence', kind: 'dev', repo, remote: true, bridge, guard: 'over-limit',
+      base, budget, reserve: REMOTE_LAUNCH_RESERVE, limit: local.TMUX_MAX_COMMAND_BYTES, block: quotedBytes(block), ok: false,
+    })
+    console.error(`[agent-routes] remote spawn: Atlas evidence dropped, ${quotedBytes(block)} B would exceed the bridge's tmux limit`)
+    return ''
+  }
+  return block
+}
+
+/* Does this bridge take a launch prompt as a FILE, or does it still fold the
+ * whole thing into its tmux command? Asked per spawn, never assumed: the bridge
+ * is deployed PER MACHINE, so at any moment one may have been redeployed and
+ * another not — and sending the full bundle to one that hasn't fails EVERY spawn
+ * against it, silently. The bridge advertises the capability on /health; anything
+ * else — an older bridge, an unreachable one, a malformed answer — reads as NO
+ * and takes the budget-and-clip path above. Deliberately uncached: a spawn is
+ * rare and already takes seconds, and a cached "yes" outliving a bridge ROLLBACK
+ * is the one stale answer that breaks spawns. */
+async function bridgeHealth(bridge) {
+  const h = await callBridge('GET', '/health', undefined, BRIDGE_TIMEOUT_MS, bridge)
+  return h.ok && h.body ? h.body : null
+}
+function takesPromptFile(health) {
+  return !!(Array.isArray(health?.features) && health.features.includes('prompt-file'))
 }
 
 // id → bridge LABEL index, rebuilt from every /sessions poll across bridges
@@ -522,8 +633,8 @@ if (bridges().length) {
 }
 
 /* --- remote (workstation) Atlas-paired graceful close --------------- *
- * Workstation dev agents get an Atlas BRIEFING at spawn (folded into their launch
- * prompt; that briefing worker is reaped right after). They have no live paired
+ * Workstation dev agents get the retrieved Atlas EVIDENCE at spawn (folded into
+ * their launch prompt by the spawn route). They have no live paired
  * worker, so at close we run an EPHEMERAL ingest: ask the agent for a marker-
  * delimited recap over the bridge, capture it from the bridge pane, then
  * local.ingestToAtlas spins up a short-lived box-local worker to fold it into the
@@ -539,7 +650,7 @@ const RECAP_START = '===ATLAS-RECAP-START==='
 const RECAP_END = '===ATLAS-RECAP-END==='
 const REMOTE_RECAP_PROMPT =
   process.env.AGENT_REMOTE_RECAP_PROMPT ||
-  `This session is closing. Final turn — no tools, no edits: write a TIGHT recap of THIS session for the Atlas knowledge base. Print the line ${RECAP_START} on its own, then the recap (what changed and why, the key decisions and any dead-ends, and anything that CONTRADICTS the Atlas briefing you got at the start), then the line ${RECAP_END} on its own. Durable knowledge only — a few sentences or a short list, not a play-by-play. The session ends after this.`
+  `This session is closing. Final turn — no tools, no edits: write a TIGHT recap of THIS session for the Atlas knowledge base. Print the line ${RECAP_START} on its own, then the recap (what changed and why, the key decisions and any dead-ends, and anything that CONTRADICTS the Atlas evidence you were given at the start), then the line ${RECAP_END} on its own. Durable knowledge only — a few sentences or a short list, not a play-by-play. The session ends after this.`
 
 // Remote dev agents mid graceful-close: id → { cleanup, phase }. GET /api/agents
 // stamps the session with closing/closePhase from this so the card shows the same
@@ -675,69 +786,78 @@ async function performSpawn(raw) {
     const { status, ...body } = r
     return { status, body }
   }
-  // The project-card "Now" protocol is box-local only (the executor that
-  // applies it owns the vault), so only those agents carry it.
+  // A dev agent's standing rules carry the SAME ship instruction the Ship button
+  // delivers, for THIS repo's delivery mode and default branch (reconcilePreamble).
+  const reconcile = reconcilePreamble({ mode: deliveryFor(repo), branch: await branchFor(repo) })
   // On success, kick off the spawn-time short title (fire-and-forget — the
   // response never waits; the overview falls back to the task until it lands).
   if (local.isLocalRepo(repo)) {
-    // BOX: pair with an Atlas worker but DON'T block the spawn — start the dev
-    // agent now, and once the worker's briefing is ready QUEUE it (briefAndQueue
-    // → flushQueued delivers at the first idle, never mid-turn; it shows as the
-    // ⏱ chip). Best-effort: no Atlas / box-local off → the dev agent runs unpaired.
-    const w = await local.spawnAtlasWorker({ task, preamble: ATLAS_WORKER_PREAMBLE })
-    const atlasWorker = w.ok && w.id ? w.id : null
-    // The standing preamble with the per-repo bits the executor can't know: the
-    // ONE ship instruction, byte-identical to what POST /api/agents/ship
-    // delivers, for THIS repo's delivery mode and default branch.
-    const reconcile = reconcilePreamble({ mode: deliveryFor(repo), branch: await branchFor(repo) })
-    const preamble = `${reconcile}\n\n${ATLAS_DEV_PREAMBLE}\n\n${STATS_PREAMBLE}\n\n${APP_PREAMBLE}`
-    // A short heads-up so the agent expects the briefing instead of charging ahead.
-    const heads = atlasWorker
-      ? '## Atlas briefing incoming\nA paired Atlas knowledge worker is preparing a briefing on prior knowledge relevant to this task — it will arrive shortly as a queued message (the ⏱ chip on your card). Fold it in when it lands before going deep.'
-      : ''
-    const r = await local.spawn({ task, repo, preamble, context: heads, model: modelId, effort: effortLevel, images: imgs })
+    // BOX: fold the RETRIEVED Atlas evidence straight into the launch prompt — no
+    // synthesis turn in between. The brief this replaces reached a small fraction
+    // of sessions, and when it did arrive late it was read minutes-to-hours in,
+    // after the work it was meant to inform. Prompts travel by FILE here
+    // (promptFileLaunch), so the full evidence budget fits — the tmux command
+    // limit applies only to the launch line.
+    // ATLAS_SEARCH_PREAMBLE is box-local only: these agents launch with
+    // dev.mcp.json, so they are the ones that actually hold the read tools.
+    const preamble = `${reconcile}\n\n${ATLAS_DEV_PREAMBLE}\n\n${ATLAS_SEARCH_PREAMBLE}\n\n${STATS_PREAMBLE}\n\n${APP_PREAMBLE}`
+    // '' on any failure (no atlas / no project / retrieval throw) — then the prompt
+    // is byte-identical to an unbriefed spawn. The spawn NEVER waits on the Atlas.
+    const context = await local.atlasEvidence({ task, repo })
+    const r = await local.spawn({ task, repo, preamble, context, model: modelId, effort: effortLevel, images: imgs })
     if (r.ok && r.id) {
       if (parent) setSpawnParent(r.id, parent)
-      if (atlasWorker) {
-        local.pairAtlasWorker({ devId: r.id, workerId: atlasWorker })
-        local.briefAndQueue({ workerId: atlasWorker, devId: r.id }).catch(() => {}) // background; queues at first idle
+      // The paired worker (close-time recap ingest) is started ONLY once the dev
+      // session it belongs to exists. ⚠️ ORDERING, not compensation: cleaning the
+      // worker up when `local.spawn` returns a failure covers a REFUSED spawn but
+      // not a KILLED PROCESS — a pkill'd API runs no catch block, no finally, no
+      // cleanup, and the orphan it leaves has an id that is a PREFIX of the
+      // retry's, so killing the orphan endangers the good one. Nothing can tidy up
+      // after SIGKILL, so the only durable fix is to have created nothing yet.
+      // The worker also boots a few seconds later, which costs nothing: its first
+      // turn only parks it on standby and its real job is the recap.
+      const w = await local.spawnAtlasWorker({ task, preamble: ATLAS_WORKER_PREAMBLE })
+      if (w.ok && w.id) local.pairAtlasWorker({ devId: r.id, workerId: w.id })
+      else if (local.atlasAvailable()) {
+        // A worker that fails to launch used to be audited and then swallowed:
+        // nothing would ingest the session's recap at close and no surface said
+        // so. Only when pairing is configured — a box without an Atlas is
+        // legitimately unpaired, not broken.
+        console.error('[agent-routes] paired Atlas worker failed to launch:', w.error || `status ${w.status}`)
       }
       local.recordSpawn(repo)
       generateTitle(r.id, task).then((m) => m?.size && local.setSize(r.id, m.size))
-    } else if (atlasWorker) {
-      local.cleanup({ id: atlasWorker }).catch(() => {}) // dev spawn failed — don't orphan the worker
     }
     const { status, ...body } = r
     return { status, body }
   }
-  // Workstation dev agents run in a container the box can't observe — there's no
-  // box-side queue for a remote session, so the briefing stays BLOCKING here:
-  // the worker brief is folded into the launch prompt, and the ephemeral worker
-  // is reaped before forwarding. (Non-blocking workstation briefing would need
-  // bridge-side queueing — a follow-up.)
-  let atlasContext = '',
-    atlasWorker = null
-  {
-    const w = await local.spawnAtlasWorker({ task, preamble: ATLAS_WORKER_PREAMBLE })
-    if (w.ok && w.id) {
-      atlasWorker = w.id
-      const brief = await local.briefWorker({ id: w.id })
-      if (brief.ok && brief.text)
-        atlasContext = `## Relevant Atlas context\n_Prior knowledge from your Atlas knowledge base — treat any ⚠️ flags as constraints._\n\n${brief.text.trim()}`
-    }
-  }
-  if (atlasWorker) local.cleanup({ id: atlasWorker }).catch(() => {})
+  // Workstation dev agents get the same retrieved Atlas evidence — but NOT the
+  // ephemeral worker that used to synthesize a brief from it: that worker existed
+  // only for the brief, and it made every workstation spawn block for tens of
+  // seconds (up to a 45 s timeout) before the agent even started. Retrieval is
+  // in-process and sub-second. The recap ingest at close is unaffected
+  // (ingestToAtlas spins up its own short-lived worker — it never used this one).
+  // STATS_PREAMBLE carries the `{statsFile}` token; the bridge substitutes it with
+  // a container-side path at spawn (mirroring how it fills APP_PREAMBLE's bind
+  // addr/port/base-path), so workstation agents publish live stats too.
+  const remotePreamble = `${reconcile}\n\n${ATLAS_DEV_PREAMBLE}\n\n${STATS_PREAMBLE}\n\n${APP_PREAMBLE}`
   const bridge = bridgeForRepo(repo)
+  // A bridge that takes the prompt as a FILE gets the SAME full bundle a box-local
+  // spawn does — no budget arithmetic, no clipping. One that doesn't gets whatever
+  // fits in its tmux command (see remoteEvidence). Asked per spawn, never cached:
+  // the bridge is deployed PER MACHINE, so a cached "yes" outliving a rollback is
+  // the one stale answer that breaks every spawn against it.
+  const promptFile = takesPromptFile(await bridgeHealth(bridge))
+  const atlasContext = promptFile
+    ? await local.atlasEvidence({ task, repo })
+    : await remoteEvidence({ task, repo, preamble: remotePreamble, bridge: bridge?.label || 'bridge' })
   const r = await callBridge(
     'POST',
     '/spawn',
     {
       task,
       repo,
-      // STATS_PREAMBLE carries the `{statsFile}` token; the bridge substitutes it
-      // with a container-side path at spawn (mirroring how it fills APP_PREAMBLE's
-      // bind addr/port/base-path), so workstation agents publish live stats too.
-      preamble: `${reconcilePreamble({ mode: deliveryFor(repo), branch: await branchFor(repo) })}\n\n${ATLAS_DEV_PREAMBLE}\n\n${STATS_PREAMBLE}\n\n${APP_PREAMBLE}${atlasContext ? `\n\n${atlasContext}` : ''}`,
+      preamble: `${remotePreamble}${atlasContext ? `\n\n${atlasContext}` : ''}`,
       model: modelId,
       effort: effortLevel,
       images: imgs,
@@ -751,6 +871,16 @@ async function performSpawn(raw) {
     local.recordSpawn(repo)
     generateTitle(r.body.id, task)
   }
+  // The box audits every box-local spawn but audited NOTHING for a remote one, so
+  // a bridge agent's spawn — and how much evidence it left with, over which
+  // transport — could not be reconstructed from the log the way a local one can.
+  local.audit({
+    action: 'spawn', remote: true, bridge: bridge?.label || null, id: r.body?.id || null, repo,
+    model: modelId, effort: effortLevel, images: imgs.length,
+    promptFile, evidence: atlasContext.length,
+    ok: !!(r.ok && r.body?.id),
+    ...(r.ok && r.body?.id ? {} : { error: String(r.body?.error || `status ${r.status}`).slice(0, 200) }),
+  })
   return { status: r.status, body: r.body }
 }
 
@@ -1231,8 +1361,8 @@ export function agentRouter(bearerAuth) {
       if (rs.shipState === 'shipped') remoteShipping.delete(rs.id)
       else rs.shipQueue = { pos: 1, active: true }
     }
-    // Every workstation dev agent is Atlas-paired for CLOSE purposes — it got an
-    // Atlas briefing at spawn and logs a recap to the Atlas on close — so surface
+    // Every workstation dev agent is Atlas-paired for CLOSE purposes — it got the
+    // Atlas evidence at spawn and logs a recap to the Atlas on close — so surface
     // the same graceful-close fields box agents carry: the card then uses the
     // two-step ✕ and renders the close phase. No-op (old behaviour) when the atlas
     // isn't configured. `closing`/`closePhase` come from an in-flight remoteClosing.

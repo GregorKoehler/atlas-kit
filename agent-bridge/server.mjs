@@ -59,6 +59,9 @@ import { parseChoiceMenu, currentHighlight, driveSelect } from '../api/src/menu.
 // The queued-prompt delivery gate, shared with the box-local executor so the two
 // cannot drift: one per-kind classification, one menu/pacing rule, one test.
 import { decideDelivery, deliveryBackoffMs } from '../api/src/queue-delivery.mjs'
+// A launch prompt travels by FILE, never inside the tmux command — the same
+// shell shape the box-local executor builds, so the two cannot drift.
+import { promptFileBody, promptFileCommand } from '../api/src/prompt-file-launch.mjs'
 // Is a turn running? Two witnesses — the footer's `esc to interrupt` marker and
 // the spinner line above the input box — because the footer is rendered to the
 // pane width and drops that marker mid-turn. IMPORTED, not copied: the box
@@ -85,6 +88,22 @@ const AUDIT_LOG = process.env.BRIDGE_AUDIT_LOG || path.join(HERE, 'audit.log')
 const LAUNCH_CMD =
   process.env.AGENT_LAUNCH_CMD ||
   'IS_SANDBOX=1 claude --model {model} --effort {effort} --dangerously-skip-permissions {task}'
+// Where a session's launch prompt is materialized INSIDE its container. The
+// prompt is NOT interpolated into the tmux command (see prompt-file-launch.mjs):
+// tmux rejects a `new-session … sh -lc <cmd>` over ~16 KB with `command too
+// long`, and the retrieved Atlas evidence the box folds into an opening prompt
+// is tens of KB on its own. Per-session (two concurrent spawns cannot collide)
+// and under /tmp — never inside the repo or its worktree, where it would show up
+// as untracked in the agent's own `git status`.
+const PROMPT_DIR = process.env.BRIDGE_PROMPT_DIR || '/tmp/atlas-kit-prompts'
+const promptFileFor = (id) => path.posix.join(PROMPT_DIR, `${String(id).replace(/[^A-Za-z0-9._-]/g, '_')}.txt`)
+// Capabilities this bridge advertises on GET /health. The box reads them before
+// it sizes a spawn's prompt: `prompt-file` says "send the whole thing, it does
+// not go through the tmux command line". A bridge that has not been redeployed
+// since this shipped simply doesn't list it, and the box clips to the old budget
+// — which is the ONLY thing keeping a mixed-version fleet spawning, because an
+// oversized prompt to an un-upgraded bridge fails the spawn SILENTLY.
+const FEATURES = ['prompt-file']
 // Fallback only — the proxy normally supplies the resolved model. Defaults to the
 // 1M Opus variant to match the proxy's default.
 const DEFAULT_MODEL = 'claude-opus-4-8[1m]'
@@ -957,14 +976,33 @@ async function spawn({ task, repo, preamble, model, effort, images }) {
   const prompt = preamble
     ? `${injectApp(preamble.replaceAll('{statsFile}', statsFile(id)).replaceAll('{worktree}', worktree), repo, id, appPort)}\n\n---\n# Your task\n${withImages(task, imagePaths)}`
     : withImages(task, imagePaths)
-  const launch = LAUNCH_CMD
-    .replace('{model}', shquote(model || DEFAULT_MODEL))
-    .replace('{effort}', shquote(effort || DEFAULT_EFFORT))
-    .replace('{task}', shquote(prompt))
+  // The prompt travels by FILE, not inside the tmux command — written into the
+  // container with `cat` over stdin, then read back by the session's own shell
+  // (promptFileCommand). A write that fails must FAIL THE SPAWN: launching anyway
+  // would start an unbriefed agent, which is the failure mode this whole path
+  // exists to end.
+  const promptPath = promptFileFor(id)
+  await dockerExec(container, ['mkdir', '-p', PROMPT_DIR])
+  const pw = await dockerExecInput(container, ['sh', '-c', `cat > ${shquote(promptPath)}`], Buffer.from(promptFileBody(prompt)))
+  if (!pw.ok) {
+    session.status = 'error'
+    session.error = (pw.stderr || 'prompt file write failed').slice(0, 500)
+    registry.sessions[id] = session
+    persist()
+    audit({ action: 'spawn', id, repo, ok: false, error: session.error })
+    return { status: 502, ok: false, error: session.error }
+  }
+  const launch = promptFileCommand(
+    LAUNCH_CMD
+      .replace('{model}', shquote(model || DEFAULT_MODEL))
+      .replace('{effort}', shquote(effort || DEFAULT_EFFORT)),
+    promptPath,
+  )
   const ns = await dockerExec(container, [
     'tmux', 'new-session', '-d', '-s', tmux, '-c', worktree, 'sh', '-lc', launch,
   ])
   if (!ns.ok) {
+    await dockerExec(container, ['rm', '-f', promptPath]) // the session's shell never ran, so it never removed it
     session.status = 'error'
     session.error = (ns.stderr || 'tmux new-session failed').slice(0, 500)
     registry.sessions[id] = session
@@ -1422,7 +1460,9 @@ const server = http.createServer(async (req, res) => {
     const p = url.pathname
 
     if (req.method === 'GET' && p === '/health') {
-      return send(res, 200, { ok: true, service: 'agent-bridge' })
+      // `features` is how the box decides a spawn's prompt TRANSPORT before it
+      // sizes the prompt — see FEATURES.
+      return send(res, 200, { ok: true, service: 'agent-bridge', features: FEATURES })
     }
     if (!authed(req)) return send(res, 401, { ok: false, error: 'unauthorized' })
 
