@@ -10,6 +10,7 @@
  *
  * Config (env):
  *   ATLAS_API_BASE          default http://127.0.0.1:3001 (Express, direct)
+ *   ATLAS_MCP_TIMEOUT_MS    per-call bound on the API round trip (default 120 s)
  *   DASHBOARD_BEARER_TOKEN  sent on write calls (server-side only)
  *   ATLAS_AGENT_CONTROL     when set, adds the agent-control tools (orchestrator)
  * ------------------------------------------------------------------ */
@@ -21,7 +22,58 @@ import { addonMcpTools, addonSearchLegs } from '../addons.mjs'
 const API_BASE = (process.env.ATLAS_API_BASE || 'http://127.0.0.1:3001').replace(/\/$/, '')
 const BEARER = process.env.DASHBOARD_BEARER_TOKEN || ''
 
-/* The API answered with a status: it DECIDED, so nothing was carried out.
+/* Every call here is to loopback, so nothing is slow because of the network — a
+ * call is slow only because the API process itself is busy. This bound is not
+ * about waiting less, then. It is about never hanging FOREVER on a process that
+ * has stopped answering, and about the classification below being able to say
+ * WHEN it gave up. 120 s sits far above the slowest legitimate call (a spawn:
+ * evidence retrieval + launch). */
+const TIMEOUT_MS = Number(process.env.ATLAS_MCP_TIMEOUT_MS || 120_000)
+
+/* Turn a transport-level failure into something the caller can ACT on.
+ *
+ * ⚠️ `fetch failed` is not an answer, and that is the whole problem. When the API
+ * dies mid-request — a watchdog restart, an OOM kill, a redeploy — an
+ * orchestrator that had just called `spawn_agent` gets exactly that string back,
+ * with no way to tell "the spawn never happened" from "the spawn happened and I
+ * lost the answer". The natural retry then makes a SECOND agent on the same task.
+ *
+ * undici puts the real reason in `cause.code`, and it answers precisely that
+ * question:
+ *   · ECONNREFUSED / ENOTFOUND / EAI_AGAIN — no connection was ever
+ *     established, so the request cannot have been carried out. Safe to retry.
+ *   · anything else (ECONNRESET, UND_ERR_SOCKET, the timeout above) — the
+ *     request was ON THE WIRE when it died, so it may well have been carried
+ *     out. Verify before retrying.
+ * A GET is idempotent, so it is safe to retry either way.
+ *
+ * ⚠️ UND_ERR_SOCKET deliberately lands in the CAUTIOUS branch even though it
+ * often means the bytes never left. undici keeps a connection pool, so the first
+ * POST after the API dies reuses a socket and only then finds the far end gone —
+ * and at that point "were the bytes transmitted first" is genuinely unknowable.
+ * Only a refused CONNECT proves nothing happened.
+ *
+ * The advice is spelled out because the caller is a model reading a tool error,
+ * and "safe to retry" vs "check first" is the one bit it has to get right. */
+function transportError(method, path, e, ms) {
+  const timedOut = e?.name === 'TimeoutError' || e?.name === 'AbortError'
+  const code = e?.cause?.code || e?.code || ''
+  const why = timedOut ? `no response within ${TIMEOUT_MS} ms` : code || String(e?.message || e)
+  const notSent = code === 'ECONNREFUSED' || code === 'ENOTFOUND' || code === 'EAI_AGAIN'
+  if (notSent)
+    return new Error(
+      `${method} ${path} → NOT SENT after ${ms} ms (${why}) — the API is not accepting connections, so nothing was carried out. Safe to retry.`,
+    )
+  if (method === 'GET')
+    return new Error(`${method} ${path} → NO ANSWER after ${ms} ms (${why}). A read changes nothing; safe to retry.`)
+  return new Error(
+    `${method} ${path} → NO ANSWER after ${ms} ms (${why}) — the request REACHED the API, so it may already have been carried out. ` +
+      `Check the current state (e.g. list_agents) before retrying; a blind retry can duplicate it.`,
+  )
+}
+
+/* The API answered with a status: it DECIDED, so nothing was carried out — the
+ * one thing a bare `fetch failed` could never tell the caller.
  *
  * ⚠️ The status rides on the error OBJECT, not just in the text. A caller that
  * degrades on a specific code (recent_activity treats a 404 log as an empty
@@ -29,13 +81,23 @@ const BEARER = process.env.DASHBOARD_BEARER_TOKEN || ''
  * degradation back into a tool error. A message is for the reader; `.status` is
  * the contract. */
 function refusal(method, path, status, detail) {
-  const e = new Error(`${method} ${path} → refused with ${status}${detail ? `: ${detail}` : ''}`)
+  const e = new Error(
+    `${method} ${path} → refused with ${status}${detail ? `: ${detail}` : ''} (the API answered, so nothing was carried out)`,
+  )
   e.status = status
   return e
 }
 
 async function apiGet(path) {
-  const res = await fetch(API_BASE + path)
+  const t0 = Date.now()
+  let res
+  try {
+    res = await fetch(API_BASE + path, { signal: AbortSignal.timeout(TIMEOUT_MS) })
+  } catch (e) {
+    throw transportError('GET', path, e, Date.now() - t0)
+  }
+  // The API ANSWERED and refused — a different class from the throws above, and
+  // an unambiguous one: nothing was carried out.
   if (!res.ok) throw refusal('GET', path, res.status)
   const ct = res.headers.get('content-type') || ''
   return ct.includes('json') ? res.json() : res.text()
@@ -49,14 +111,21 @@ function withVault(apiPath, vault) {
 }
 
 async function apiPost(path, body) {
-  const res = await fetch(API_BASE + path, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      ...(BEARER ? { Authorization: `Bearer ${BEARER}` } : {}),
-    },
-    body: body ? JSON.stringify(body) : undefined,
-  })
+  const t0 = Date.now()
+  let res
+  try {
+    res = await fetch(API_BASE + path, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...(BEARER ? { Authorization: `Bearer ${BEARER}` } : {}),
+      },
+      body: body ? JSON.stringify(body) : undefined,
+      signal: AbortSignal.timeout(TIMEOUT_MS),
+    })
+  } catch (e) {
+    throw transportError('POST', path, e, Date.now() - t0)
+  }
   const data = await res.json().catch(() => ({}))
   if (!res.ok) throw refusal('POST', path, res.status, JSON.stringify(data))
   return data
@@ -615,13 +684,37 @@ function registerAgentControl(server) {
     return body
   }
 
-  // This orchestrator's own session id, when it has one — used to mark which of
-  // a silenced bridge's stale sessions are its OWN children.
+  // This orchestrator's own session id, when it has one — the same stamp the
+  // spawn lineage and the steers use. Used to mark which sessions (including a
+  // silenced bridge's stale ones) are its OWN children, and — for the
+  // DESTRUCTIVE tools below — as the identity the server scopes a teardown by.
+  // Absent for anything but an orchestrator's MCP child.
   const me = process.env.ATLAS_SESSION
+
+  // The body kill/cleanup send. No `by` means the dashboard's own ✕/⌦, i.e. the
+  // operator, who is never scoped — so an unstamped MCP child simply behaves as
+  // it did before rather than being locked out of its own agents.
+  const teardownBody = (id, scope) => {
+    const body = { id }
+    if (me) body.by = me
+    if (scope === 'any') body.scope = 'any'
+    return body
+  }
+  const SCOPE_ANY = z
+    .enum(['any'])
+    .optional()
+    .describe(
+      'ONLY when the operator explicitly told you to clean up agents that are not yours ("clean up all of them", "the whole fleet"): "any" lifts the own-children-only scope for THIS call and is audited (who tore down whose child). It applies to that one instruction — never carry it forward.',
+    )
 
   // Compact one-row-per-agent projection for the monitoring feed — the full
   // session objects carry sub-agent/job/transcript detail that would flood the
   // model; keep the fields an orchestrator reasons over.
+  //
+  // `spawnedBy`/`yours` are the OWNERSHIP pair: the roster is fleet-wide, so
+  // without them an orchestrator cannot tell its own children from another
+  // chat's and has only ship state to gate a teardown on. `yours` is the
+  // comparison already done, so it cannot be forgotten at the call site.
   const slim = (s) => ({
     id: s.id,
     kind: s.kind || 'dev',
@@ -643,6 +736,8 @@ function registerAgentControl(server) {
     ship: s.shipState ? { state: s.shipState, info: s.shipInfo, ...(s.shipWarning ? { warning: s.shipWarning } : {}) } : undefined,
     shipQueue: s.shipQueue,
     closing: s.closing || undefined,
+    spawnedBy: s.spawnedBy,
+    yours: me && s.spawnedBy === me ? true : undefined,
     atlasWorker: s.atlasWorker,
     pairedDev: s.pairedDev,
     lastSeen: s.lastSeen,
@@ -653,7 +748,7 @@ function registerAgentControl(server) {
     'list_agents',
     {
       description:
-        'List every agent the dashboard knows about (dev + knowledge, box-local AND remote bridges) with live status — your monitoring feed. Returns `localRepos` (box-local repo keys you may spawn a DEV agent on), `bridges` (remote hosts, each `{label, repos}` — a bridge\'s `repos` are ALSO spawnable dev-repo keys, e.g. a remote repo like `my-app`), and `sessions` (each with id, kind, repo/vault, status, phase, task, context usage, sub-agent/bg-job/queued counts, ship state). To spawn a DEV agent, pass any key from `localRepos` OR any `bridges[].repos` entry as `repo`. Use a session `id` with agent_transcript to read its work, or with prompt_agent/queue_agent/interrupt_agent/kill_agent to steer it.' +
+        'List every agent the dashboard knows about (dev + knowledge, box-local AND remote bridges) with live status — your monitoring feed. ⚠️ The roster is FLEET-WIDE: some of it belongs to OTHER Atlas chats, not to you. Each session carries `spawnedBy` (the chat that spawned it — absent means the operator started it from the dashboard and nobody owns it) and `yours: true` on the ones YOU spawned; only those are yours to kill_agent/cleanup_agent. Returns `localRepos` (box-local repo keys you may spawn a DEV agent on), `bridges` (remote hosts, each `{label, repos}` — a bridge\'s `repos` are ALSO spawnable dev-repo keys, e.g. a remote repo like `my-app`), and `sessions` (each with id, kind, repo/vault, status, phase, task, context usage, sub-agent/bg-job/queued counts, ship state). To spawn a DEV agent, pass any key from `localRepos` OR any `bridges[].repos` entry as `repo`. Use a session `id` with agent_transcript to read its work, or with prompt_agent/queue_agent/interrupt_agent/kill_agent to steer it.' +
         ' — and read that bridge\'s `capacity` FIRST: `capacity.slots` is how many more agents that box will admit right now, so `slots: 0` means your next spawn there is refused (503) rather than queued. `capacity.known === false` means that bridge has not been redeployed since spawn capacity shipped and NOTHING is limiting agents on it — spawn conservatively there and tell the operator it needs `scripts/restart-agent-bridge.sh`.' +
         ' ⚠️ A REMOTE agent missing from `sessions` does NOT mean it died — check its bridge: each entry in `bridges` carries `reachable`, and an unreachable one carries `lastSeen` (the last time it answered) plus `staleSessions` (the roster it answered with, `yours: true` on your own children). While a bridge is silent its agents are invisible to the box and are NOT in `sessions` — they are almost always still running (a saturated bridge box simply cannot answer inside the timeout). Report it as "the <label> bridge has not answered since <lastSeen>; its N agents were last seen <status>", NEVER as "your agents were killed", and do not respawn or re-task them until the bridge answers again.',
       inputSchema: {},
@@ -792,19 +887,19 @@ function registerAgentControl(server) {
     'kill_agent',
     {
       description:
-        "Close an agent session. A dev agent's worktree/branch are kept for review (clean up from the dashboard); a knowledge agent closes gracefully (flushing insights), which may take a turn — call again to force. Use when an agent's work is done or it was started in error.",
-      inputSchema: { id: z.string() },
+        "Close an agent session. A dev agent's worktree/branch are kept for review (clean up from the dashboard); a knowledge agent closes gracefully (flushing insights), which may take a turn — call again to force. Use when an agent's work is done or it was started in error. ONLY for agents YOU spawned (`yours: true` in list_agents) — the server refuses another chat's agent and names the chat that owns it.",
+      inputSchema: { id: z.string(), scope: SCOPE_ANY },
     },
-    tool(({ id }) => apiPost('/api/agents/kill', { id })),
+    tool(({ id, scope }) => apiPost('/api/agents/kill', teardownBody(id, scope))),
   )
 
   server.registerTool(
     'cleanup_agent',
     {
       description:
-        "Fully tear down a DEV agent whose work is DONE or already merged — the dashboard's ⌦ button. Closes gracefully like kill_agent (a paired dev agent recaps → its Atlas worker logs the session), but ALSO removes the git worktree and deletes the agent's branch afterward, where a plain kill_agent keeps them for review. Destructive of the local branch — use once the agent's PR is merged/abandoned, NOT while it still has unpushed work. Call again to force if the graceful recap stalls.",
-      inputSchema: { id: z.string() },
+        "Fully tear down a DEV agent whose work is DONE or already merged — the dashboard's ⌦ button. Closes gracefully like kill_agent (a paired dev agent recaps → its Atlas worker logs the session), but ALSO removes the git worktree and deletes the agent's branch afterward, where a plain kill_agent keeps them for review. Destructive of the local branch — use once the agent's PR is merged/abandoned, NOT while it still has unpushed work. Call again to force if the graceful recap stalls. ONLY for agents YOU spawned (`yours: true` in list_agents): another chat's agent is refused server-side, naming the owning chat — tell the operator that name rather than retrying.",
+      inputSchema: { id: z.string(), scope: SCOPE_ANY },
     },
-    tool(({ id }) => apiPost('/api/agents/cleanup', { id })),
+    tool(({ id, scope }) => apiPost('/api/agents/cleanup', teardownBody(id, scope))),
   )
 }

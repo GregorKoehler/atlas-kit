@@ -76,7 +76,7 @@ Runtime, and why it does).
 manifest. Every key is optional; returning `{}` is a legal addon.
 
 ```js
-export default function register({ name, dir, repoRoot }) {
+export default function register({ name, dir, repoRoot, express, Router }) {
   return {
     description,     // one line, shown by GET /api/addons
     routes,          // an Express Router, mounted on the app AFTER core's
@@ -104,10 +104,17 @@ Mounted **after** every core router, so an addon can extend the API but never
 shadow a core route. It gets **no bearer gate**: core's write routes are behind
 `DASHBOARD_BEARER_TOKEN` and an addon that adds a write must gate it itself.
 Prefer read-only routes. (`instagram-ingest/api/register.mjs` is the worked
-example of both halves: the constant-time bearer check on its one write route,
-and how to get `express` at all — a bare `import 'express'` resolves from the
-importing file's directory, which for an addon walks up to a repo root with no
-`node_modules`, so it is `createRequire`'d out of core's tree.)
+example of the constant-time bearer check on its one write route.)
+
+**`express` is handed to you, not imported.** A bare `import 'express'` resolves
+from the importing file's directory, and `addons/<name>/api/` walks up to a repo
+root with no `node_modules` — so it does not resolve from inside an addon at
+all. Core already has express loaded and passes it in: `const routes = Router()`
+is the whole of it, and take `express` itself when you also need
+`express.json()`. Addons written before this seam `createRequire` express out of
+core's tree instead; that still works and none of them has to change, but a new
+addon should take the injected one — it is the only form that needs no knowledge
+of where core keeps its `node_modules`.
 
 ### `mcpTools` — read-only tools
 
