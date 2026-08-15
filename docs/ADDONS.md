@@ -106,6 +106,28 @@ shadow a core route. It gets **no bearer gate**: core's write routes are behind
 Prefer read-only routes. (`instagram-ingest/api/register.mjs` is the worked
 example of the constant-time bearer check on its one write route.)
 
+> 🔴 **A write route is two things: the gate AND a Caddyfile block.** The browser
+> never holds `DASHBOARD_BEARER_TOKEN` — `infra/Caddyfile` injects it per path
+> prefix — so a self-gated route with no `handle` block answers **401 to the
+> dashboard** while `curl` against `127.0.0.1:3001` with an explicit header
+> works. Add the block next to the core write handlers, **above** the open
+> `handle /api/*` read handler (Caddy takes the first matching one):
+>
+> ```
+> handle /api/<your-addon>/* {
+> 	reverse_proxy localhost:3001 {
+> 		header_up Authorization "Bearer {env.DASHBOARD_BEARER_TOKEN}"
+> 	}
+> }
+> ```
+>
+> `api/test/addon-caddyfile-bearer.test.mjs` loads every shipped addon and fails
+> if any non-GET route it registers isn't matched by a bearer-injecting block in
+> `infra/Caddyfile.example` — so this is checked, not remembered. (A Caddyfile
+> change takes a `scripts/serve.sh restart`, not a web rebuild. An operator whose
+> `infra/Caddyfile` predates the addon has to add the block by hand; say so in
+> the addon's README.)
+
 **`express` is handed to you, not imported.** A bare `import 'express'` resolves
 from the importing file's directory, and `addons/<name>/api/` walks up to a repo
 root with no `node_modules` — so it does not resolve from inside an addon at
