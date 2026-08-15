@@ -103,7 +103,11 @@ The checks below are SETUP.md's "Verifying it works" list, distributed per step.
   `scripts/install-agent-bridge.sh` on the **workstation** (it's a separate machine —
   you can't run it from here), then set `AGENT_BRIDGE_URL` (the workstation tailnet IP)
   + `AGENT_BRIDGE_TOKEN` in `.env` and `scripts/serve.sh restart`. **Verify:** `curl -s
-  http://127.0.0.1:8080/api/agents` shows the bridge with `reachable: true`.
+  http://127.0.0.1:8080/api/agents` shows the bridge with `reachable: true` **and**
+  `capacity.known: true` — `known: false` means that bridge predates spawn-capacity
+  reporting and nothing is limiting agents on it; have the operator re-run
+  `sudo scripts/restart-agent-bridge.sh` there. While you're in `bridge.env`, set
+  `BRIDGE_PULL_USER=<their-user>` so the dashboard's "Redeploy bridge" button works.
 - **Final — spawn readiness.** To make box-local dev agents spawnable, `cp
   api/src/agent-local-repos.example.json api/src/agent-local-repos.json` and add a repo
   the operator has checked out here. Offer a smoke test: add a `Wiki/Projects/*.md` page
