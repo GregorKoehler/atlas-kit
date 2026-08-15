@@ -1,0 +1,27 @@
+{
+  "_comment": "OPTIONAL model-PROVIDER profiles, read by api/src/providers.mjs. Each KEY is a profile name (lowercase/digits/dashes) the dashboard spawn dropdown, POST /api/agents/spawn and the MCP spawn_agent tool accept as `provider`; the agent then runs the UNCHANGED Claude-Code harness against that backend. `env` is OPAQUE — every NAME=value in it is injected verbatim into the agent's environment before `claude` starts, so any Anthropic-compatible backend works without a code change. `label` is what the dropdown shows. WITHOUT this file (or without a `provider` on the spawn) every agent runs exactly as before, on the Anthropic subscription. Copy to providers.json (GITIGNORED — it holds your API keys) and edit. Caveats, tier mapping and setup: docs/PROVIDERS.md.",
+  "deepseek-openrouter": {
+    "label": "DeepSeek (OpenRouter)",
+    "env": {
+      "ANTHROPIC_BASE_URL": "https://openrouter.ai/api",
+      "ANTHROPIC_AUTH_TOKEN": "REPLACE_WITH_YOUR_OPENROUTER_KEY",
+      "ANTHROPIC_API_KEY": "",
+      "ANTHROPIC_DEFAULT_OPUS_MODEL": "deepseek/deepseek-v4-pro",
+      "ANTHROPIC_DEFAULT_SONNET_MODEL": "deepseek/deepseek-v4-flash",
+      "ANTHROPIC_DEFAULT_HAIKU_MODEL": "deepseek/deepseek-v4-flash",
+      "CLAUDE_CODE_SUBAGENT_MODEL": "deepseek/deepseek-v4-flash"
+    }
+  },
+  "deepseek-direct": {
+    "label": "DeepSeek (direct)",
+    "env": {
+      "ANTHROPIC_BASE_URL": "https://api.deepseek.com/anthropic",
+      "ANTHROPIC_AUTH_TOKEN": "REPLACE_WITH_YOUR_DEEPSEEK_KEY",
+      "ANTHROPIC_API_KEY": "",
+      "ANTHROPIC_DEFAULT_OPUS_MODEL": "deepseek-v4-pro",
+      "ANTHROPIC_DEFAULT_SONNET_MODEL": "deepseek-v4-flash",
+      "ANTHROPIC_DEFAULT_HAIKU_MODEL": "deepseek-v4-flash",
+      "CLAUDE_CODE_SUBAGENT_MODEL": "deepseek-v4-flash"
+    }
+  }
+}
