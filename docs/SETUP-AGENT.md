@@ -24,7 +24,8 @@ Drive a full Atlas Kit install on this box by executing **[docs/SETUP.md](SETUP.
 steps 2–10** in order, adapted to the operator's answers. You are running as a
 `claude` session inside the repo (assume `/workspace` unless the operator says
 otherwise). SETUP.md is the source of truth for the *what*; this file is the *how you
-drive it*: interview first, verify every step, stay safe, summarize at the end.
+drive it*: interview first, verify every step, stay safe, offer the optional addons once
+the core install is green, summarize at the end.
 
 Read [docs/SETUP.md](SETUP.md) now, in full, before you touch anything.
 
@@ -116,6 +117,89 @@ The checks below are SETUP.md's "Verifying it works" list, distributed per step.
   card — its `tmux` transcript should stream into the card. (Ask before spawning; it
   consumes their subscription.)
 
+## Phase 1b — Offer the optional addons (only once the core install verifies)
+
+Core is a whole install on its own. The **addons** are extras with a different class of
+dependency — a 1.4 GB encoder, a browser cookie jar, a feed poller on a timer — and with
+none enabled the kit is byte-identical to one that never had the framework
+([docs/ADDONS.md](ADDONS.md)). So "none" is a finished install, not a partial one: offer
+them **after** step 6's health check and step 8's vault check have passed, never during
+Phase 1, and take a no for an answer.
+
+Read [docs/ADDONS.md](ADDONS.md) and the three `addons/*/README.md` files before you
+offer anything. Then present all three in **one** message — what each does **and** what
+it costs, taken from that README's **"What it costs"** table:
+
+- **[`semantic-search`](../addons/semantic-search/README.md)** — a second, dense retrieval
+  leg beside core's full-text pass (it finds the page when you don't know the words that
+  page uses). **Costs:** ~1.4 GB of disk out of tree, ~660 MB resident while warm, ~35 MB
+  of vectors per ~11k chunks, and a first full index measured at ~82 min on a 1.6k-page
+  vault.
+- **[`instagram-ingest`](../addons/instagram-ingest/README.md)** — one Instagram post or
+  reel → a `Wiki/Sources/` page (caption verbatim, stills, a `claude -p` read). **Costs:**
+  `yt-dlp` (~30 MB out of tree), **their own** Instagram cookies, and stills committed
+  into the vault's git history permanently. Nothing runs unless it is called.
+- **[`news-ingest`](../addons/news-ingest/README.md)** — an hourly RSS/Atom sweep; every
+  unseen item → a `Wiki/Sources/` page plus a rolling digest. **Costs:** the one addon
+  that spends on a timer — one `claude -p` call per NEW item on their subscription, capped
+  at 12 per sweep, so ≤ 288 short calls/day at the defaults, plus one permanent markdown
+  page per item.
+
+⚠️ **State the cost before enabling, every time, and do not round it down.** The operator
+is deciding whether to spend their disk, RAM and subscription calls; the honest table is
+in each README and quoting it is the point. If they decline one, name the one-liner that
+enables it later and move on — Phase 3 records it as skipped.
+
+For each addon they say yes to, five moves in this order:
+
+1. **Install its dependencies.** `bash addons/<name>/install.sh` — idempotent, and
+   `--check` reports state without installing (`0` installed · `2` installable · `1`
+   cannot). ⚠️ `semantic-search`'s is a ~1.4 GB download and `news-ingest`'s writes
+   `/etc/cron.d/atlas-kit-addons` as root — both are Safety §2 "ask first" actions. Run
+   non-root and the cron step is skipped with the `sudo node scripts/addon-cron.mjs
+   --install` line to run instead.
+2. **Enable it.** Either `ATLAS_ADDONS=<name>[,<name>]` in `.env` — it **wins whenever
+   defined**, and `ATLAS_ADDONS=` (empty) means *no addons*, not "read the file" — or
+   `cp addons.example.json addons.json` and list them in its `enabled` array (gitignored,
+   used only when `ATLAS_ADDONS` is unset). Pick one mechanism; don't set both.
+3. **The per-addon config you cannot do for them** — see below.
+4. **`scripts/serve.sh restart`.** Enabling is a restart, not a reload.
+5. **Verify:** `curl -s http://127.0.0.1:8080/api/addons` lists the addon with its hooks
+   and its `status`, and `errors` is empty. An addon that failed to load is *recorded
+   there and skipped* — the API comes up regardless, so a working dashboard is no
+   evidence that the addon loaded.
+
+- **`semantic-search` — the index has to be built.** Until it is, the leg answers
+  `available: false` with a reason and the full-text leg is unchanged: inert, not broken.
+  Build it with `node addons/semantic-search/scripts/index.mjs`; say the measured ~90 min
+  cold first pass out loud before you start it, and run it in the background. `install.sh`
+  wires the five-minute sweep when run as root. **Verify:** `GET /api/addons` shows its
+  status, and after a sweep the dashboard scorecard grows a **Semantic index** group.
+- **`instagram-ingest` — the cookie jar is theirs, and only theirs.** ⚠️ **You never
+  handle it.** Do not export it, read it, open it, copy it, print it, or put any part of
+  it in a file, a prompt or the chat: a cookie jar is a **live login session** — anyone
+  holding it can act as them on Instagram without a password and without 2FA. Hand them
+  §2 *"Your own cookies"* of the addon's README and let them do it themselves — Option A,
+  export a Netscape `cookies.txt` and keep it **outside the repo tree** (`~/.atlas-kit/`,
+  `chmod 600`); or Option B, `ATLAS_IG_COOKIES_BROWSER=firefox` when this box is the
+  machine they browse on. Your part is one line of `.env`: the *path* in
+  `ATLAS_IG_COOKIES_FILE` or the browser in `ATLAS_IG_COOKIES_BROWSER` (if both are set,
+  the file wins). Never relocate the jar into the repo, and never commit it (Safety §3).
+  **Verify:** `GET /api/addons` reports whether `yt-dlp` resolved and which cookie mode is
+  configured. A test ingest is optional and needs a yes — it writes a vault page plus
+  permanent image blobs and spends a subscription call.
+- **`news-ingest` — the feed list is theirs to write.** `install.sh` seeds
+  `addons/news-ingest/feeds.json` (gitignored) from an example carrying one neutral
+  placeholder, and never touches it again. **Do not pick feeds for them:** ask for the
+  URLs and write exactly those — `{url, tag?, title?}` entries or bare URL strings,
+  `http(s)` only. A bad entry is dropped, not fatal, and comes back in `errors[]`. Feed
+  edits take effect on the next sweep — no restart; only enabling the addon is a restart.
+  Say the timer cost plainly and offer to lower `ATLAS_NEWS_MAX_ITEMS` *before* they add
+  many feeds, not after. **Verify:** `/etc/cron.d/atlas-kit-addons` carries the hourly
+  sweep line (that file is regenerated from the enabled addons, never hand-edited), and
+  `GET /api/addons` reports the feed list and the last run; the manual-sweep and CLI forms
+  are in §4 of the README.
+
 ## Phase 2 — Safety rules (apply throughout)
 
 1. **Idempotent.** Assume this may be a re-run after a partial install. Detect what's
@@ -145,5 +229,7 @@ When every chosen step's check has passed, report:
 - **Where the vault lives** — its path + repo, and that the box commits back to it.
 - **How to open the dashboard** and **how to spawn a first agent** (add the repo key to
   `agent-local-repos.json`, give a project page an `agent_repo:`, click Spawn).
-- **What was skipped** and why (no domain ⇒ no Cloudflare; no bridge; etc.), and the
-  one-liner to enable each later.
+- **Which addons are enabled**, if any — what each now costs on this box, and what still
+  needs the operator (a cookie file that expires, a feed list to grow).
+- **What was skipped** and why (no domain ⇒ no Cloudflare; no bridge; addons declined;
+  etc.), and the one-liner to enable each later.
