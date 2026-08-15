@@ -119,7 +119,15 @@ export async function sweepNews({ requestedBy = 'cron', fetchImpl = fetch, summa
       try {
         const parsed = parseFeed(await fetchFeed(feed.url, fetchImpl), { excerptChars: cap.excerptChars })
         checked += parsed.items.length
-        const fresh = parsed.items.filter((item) => !state.seen[itemKey(feed.url, item.id)])
+        // Deduped against the seen-state AND within the feed itself: a feed that
+        // repeats an entry (they do) must not buy two model calls for one item.
+        const here = new Set()
+        const fresh = parsed.items.filter((item) => {
+          const key = itemKey(feed.url, item.id)
+          if (state.seen[key] || here.has(key)) return false
+          here.add(key)
+          return true
+        })
         buckets.push({ feed: { ...feed, title: feed.title || parsed.title }, items: fresh })
       } catch (e) {
         const msg = `${feed.tag}: ${String(e?.message || e)}`

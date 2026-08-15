@@ -211,6 +211,23 @@ test('the caps bound a run round-robin across feeds, and what they held back is 
   assert.ok(feeds.includes('alpha') && feeds.includes('beta'), 'round-robin: one busy feed cannot eat the whole run')
 })
 
+test('a feed that repeats an entry buys ONE model call, not two', async () => {
+  const dupFeeds = path.join(root, 'feeds-dup.json')
+  const DUP = 'https://dup.test/feed.xml'
+  fs.writeFileSync(dupFeeds, JSON.stringify({ feeds: [{ url: DUP, tag: 'dup' }] }))
+  bodies.set(DUP, `<rss version="2.0"><channel><title>Dup Feed</title>${rssItem(1)}${rssItem(1)}</channel></rss>`)
+  fs.rmSync(process.env.ATLAS_NEWS_STATE_FILE)
+  process.env.ATLAS_NEWS_FEEDS_FILE = dupFeeds
+
+  let calls = 0
+  const r = await sweep({ summarizeImpl: async (a) => (calls++, summarizeImpl(a)) })
+  process.env.ATLAS_NEWS_FEEDS_FILE = feedsFile
+
+  assert.equal(r.checked, 2, 'the feed really did serve the entry twice')
+  assert.equal(r.new, 1)
+  assert.equal(calls, 1)
+})
+
 /* --- 4. degraded, never dropped ------------------------------------------- */
 
 test('an item whose summary fails is still filed, and the page says so', async () => {
