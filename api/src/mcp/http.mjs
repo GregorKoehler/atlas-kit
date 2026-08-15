@@ -105,7 +105,7 @@ app.post('/mcp', cfAccess, body, async (req, res) => {
     // KNOWLEDGE-ONLY unless explicitly widened, and NEVER agent-control: this is
     // the surface a remote connector (or a remote dev-agent container) reaches, so
     // it gets reads over the vault and nothing that spawns, steers or kills an agent.
-    await buildServer({ knowledgeOnly: SURFACE === 'knowledge', agentControl: false }).connect(transport)
+    await buildServer({ knowledgeOnly: SURFACE === 'knowledge', agentControl: false, propose: false }).connect(transport)
   } else if (!transport && sid) {
     // Stale session id: the session is gone (server restart wiped this in-memory
     // map, or it was reaped) but the client still holds the old id. Spec says

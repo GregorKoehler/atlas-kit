@@ -9,7 +9,8 @@
         "/workspace/api/src/mcp/server.mjs"
       ],
       "env": {
-        "ATLAS_MCP_KNOWLEDGE_ONLY": "1"
+        "ATLAS_MCP_KNOWLEDGE_ONLY": "1",
+        "ATLAS_MCP_PROPOSE": "1"
       }
     }
   }

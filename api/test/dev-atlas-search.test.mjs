@@ -54,10 +54,12 @@ test('dev.mcp.json asks for the knowledge-only profile and no agent control', ()
   const cfg = JSON.parse(fs.readFileSync(DEV_CONFIG, 'utf-8'))
   const env = cfg.mcpServers['atlas-kit'].env
   assert.equal(env.ATLAS_MCP_KNOWLEDGE_ONLY, '1')
+  // Propose-only write: the dev agent may PROPOSE follow-up work, never file it.
+  assert.equal(env.ATLAS_MCP_PROPOSE, '1')
   assert.equal(env.ATLAS_AGENT_CONTROL, undefined)
 })
 
-test('that profile yields exactly the seven read tools — nothing that writes or steers', async () => {
+test('that profile yields exactly the seven read tools plus propose_task — nothing that writes the vault or steers', async () => {
   const cfg = JSON.parse(fs.readFileSync(DEV_CONFIG, 'utf-8'))
   Object.assign(process.env, cfg.mcpServers['atlas-kit'].env) // launch the server as the config would
   try {
@@ -69,11 +71,16 @@ test('that profile yields exactly the seven read tools — nothing that writes o
     const { tools } = await client.listTools()
     await client.close()
     await server.close()
+    // `propose_task` is the ONE non-read tool here, and it is deliberately not a
+    // vault write: it files a Task Prospect the operator signs off before any
+    // Tasks/ note exists. Everything that writes the vault or steers an agent
+    // stays absent.
     assert.deepEqual(tools.map((t) => t.name).sort(), [
-      'get_note', 'query_atlas', 'query_vault', 'recent_activity', 'wiki_graph', 'wiki_index', 'wiki_pages',
+      'get_note', 'propose_task', 'query_atlas', 'query_vault', 'recent_activity', 'wiki_graph', 'wiki_index', 'wiki_pages',
     ])
   } finally {
     delete process.env.ATLAS_MCP_KNOWLEDGE_ONLY
+    delete process.env.ATLAS_MCP_PROPOSE
   }
 })
 

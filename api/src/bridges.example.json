@@ -1,11 +1,14 @@
 {
-  "_comment": "OPTIONAL extra remote agent bridges, read by api/src/agent-routes.mjs + agent-app-proxy.mjs. A repo KEY listed in a bridge's `repos` routes that repo's dev agents to that bridge (the BRIDGE bearer is injected server-side; the card degrades to 'offline' when the bridge is unreachable). The AGENT_BRIDGE_URL/AGENT_BRIDGE_TOKEN env vars define the DEFAULT bridge, which is the CATCH-ALL for any repo no bridge here claims. Copy to bridges.json (gitignored) and edit. `label` = card name; `url` = the bridge base URL on your tailnet; `token` = its BRIDGE_TOKEN; `repos` = the repo keys this bridge owns (empty list = catch-all). Don't list one repo on two bridges (first match wins).",
+  "_comment": "OPTIONAL extra remote agent bridges, read by api/src/agent-routes.mjs + agent-app-proxy.mjs. A repo KEY listed in a bridge's `repos` routes that repo's dev agents to that bridge (the BRIDGE bearer is injected server-side; the card degrades to 'offline' when the bridge is unreachable). The AGENT_BRIDGE_URL/AGENT_BRIDGE_TOKEN env vars define the DEFAULT bridge, which is the CATCH-ALL for any repo no bridge here claims. Copy to bridges.json (gitignored) and edit. `label` = card name; `url` = the bridge base URL on your tailnet; `token` = its BRIDGE_TOKEN; `repos` = the repo keys this bridge owns (empty list = catch-all). Don't list one repo on two bridges (first match wins). `maxAgents` (optional) = a ceiling on concurrent agent sessions on that box, overriding the one the bridge reports for itself on /health — omit it and the bridge's own BRIDGE_AGENT_MAX_CONCURRENT applies (the catch-all takes AGENT_BRIDGE_MAX_AGENTS from the env instead, having no entry here).",
   "bridges": [
     {
       "label": "my-box",
       "url": "http://my-box:7878",
       "token": "REPLACE_WITH_MY_BOX_BRIDGE_TOKEN",
-      "repos": ["my-remote-project"]
+      "repos": [
+        "my-remote-project"
+      ],
+      "maxAgents": 4
     }
   ]
 }

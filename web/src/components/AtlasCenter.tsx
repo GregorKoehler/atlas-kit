@@ -3,6 +3,7 @@ import { motion, type Transition, type Variants } from 'framer-motion'
 import { WikiGraph } from './cards/WikiGraph'
 import { SearchBar } from './SearchBar'
 import { Kanban } from './cards/Kanban'
+import { TaskProspects } from './cards/TaskProspects'
 import { NoteReader } from './NoteReader'
 import { useData } from '../lib/useData'
 import { useNoteReader } from '../lib/useNoteReader'
@@ -68,6 +69,10 @@ export function AtlasCenter() {
           onSetPriority={(t, priority) => setTaskPriority(t.path, priority, VAULT)}
           refreshSignal={taskRev}
         />
+        {/* Task Prospects — follow-up work the dev + knowledge agents PROPOSE
+            rather than file. Nothing lands in Tasks/ until Approve, which writes
+            the real note through the same serial commit queue as the board. */}
+        <TaskProspects className="col-span-12" />
         <WikiGraph className="col-span-12" onOpenPath={openPath} highlight={highlight} vault={VAULT} />
       </motion.div>
 

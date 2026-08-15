@@ -209,6 +209,22 @@ export function AgentsOverview({ switcher = false, currentId }: { switcher?: boo
   ].filter(live)
   const anything = atlasLanes.length > 0 || indepLanes.length > 0 || errors > 0
 
+  /* ⚠️ A bridge that CANNOT ANSWER is not a bridge with no agents. While it is
+   * silent its sessions are (correctly) absent from `view.sessions`, so every
+   * count above reads zero — and rendering that as "none active" is how a
+   * silent bridge gets mistaken for a killed fleet. The server carries the last
+   * roster each unreachable bridge answered with (`staleSessions` + `lastSeen`);
+   * draw THAT instead of the empty state. */
+  const silenced = (view.bridges ?? []).filter((b) => !b.reachable && (b.staleSessions?.length ?? 0) > 0)
+  const silencedCount = silenced.reduce((n, b) => n + (b.staleSessions?.length ?? 0), 0)
+  const silencedNote = silenced
+    .map((b) => {
+      const n = b.staleSessions?.length ?? 0
+      const since = b.lastSeen ? new Date(b.lastSeen).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '?'
+      return `${b.label}: ${n} agent${n === 1 ? '' : 's'} last seen ${since}`
+    })
+    .join(' · ')
+
   // Headline count next to the label: every agent live right now — sessions
   // (working + awaiting input), active research/ingest runs, plus the running
   // sub-agents they've fanned out to. Queued capture jobs aren't counted (no
@@ -252,9 +268,14 @@ export function AgentsOverview({ switcher = false, currentId }: { switcher?: boo
           title={view.workstationReachable ? `${view.workstation} reachable` : `${view.workstation} offline`}
         />
       </div>
-      {!anything ? (
+      {silenced.length ? (
+        <span className="agents-ov__idle" title={silencedNote}>
+          ⚠ {silencedCount} agent{silencedCount === 1 ? '' : 's'} unreachable — {silencedNote}
+        </span>
+      ) : null}
+      {!anything && !silenced.length ? (
         <span className="agents-ov__idle">none active</span>
-      ) : (
+      ) : !anything ? null : (
         <div className="agents-ov__tree">
           {atlasLanes.length > 0 ? <AtlasGroup lanes={atlasLanes} currentId={currentId} /> : null}
           {indepLanes.length > 0 || errors ? (
