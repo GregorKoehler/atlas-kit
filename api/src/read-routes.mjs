@@ -17,6 +17,7 @@ import { promisify } from 'node:util'
 import { runInVault, currentVaultPath, currentVaultKey } from './vaults.mjs'
 import { loadFlags, flagKey } from './atlas-type-flags.mjs'
 import { queryAtlas } from './atlas-query.mjs'
+import { createScorer, snippet } from './vault-search.mjs'
 
 const execFileAsync = promisify(execFile)
 // The default vault path. DATA_DIR, /api/data, the dashboard bundle and projects
@@ -687,46 +688,62 @@ function atlasTypes() {
   return { generated: new Date().toISOString(), legendPath: 'Wiki/Legend.md', hasLegend: legendMd != null, categories }
 }
 
-function snippetFor(body, q) {
-  const i = body.toLowerCase().indexOf(q)
-  if (i === -1) return ''
-  const start = Math.max(0, i - 40)
-  const end = Math.min(body.length, i + q.length + 60)
-  return (
-    (start > 0 ? '…' : '') +
-    body.slice(start, end).replace(/\s+/g, ' ').trim() +
-    (end < body.length ? '…' : '')
-  )
-}
+// Default page of results. Unchanged from the hard-coded 24 this used to slice
+// to — but it is now a PARAMETER, and what falls off the end is reported
+// (`total`/`truncated`) instead of vanishing.
+const SEARCH_LIMIT = 24
+const SEARCH_LIMIT_MAX = 200
 
-function search(q) {
-  const query = q.trim().toLowerCase()
-  if (!query) return []
+/**
+ * Full-text search over the active vault, ranked by `vault-search.mjs` (BM25F —
+ * see that file for why).
+ *
+ * Returns `{ items, total, truncated, limit }`. `items` keeps every field it
+ * always had, with its existing meaning — the shape is load-bearing for the MCP
+ * `query_vault` tool, the bridge relay and the dashboard's search box, so this
+ * is additive only.
+ */
+export function search(q, limit = SEARCH_LIMIT) {
+  const cap = Math.min(Math.max(1, Number(limit) || SEARCH_LIMIT), SEARCH_LIMIT_MAX)
+  const scorer = createScorer(q)
+  if (!scorer.clauses.length) return { items: [], total: 0, truncated: false, limit: cap }
   const root = currentVaultPath()
-  const hits = []
+  // Metadata for every file, but never its text: a vault tree is many MB and the
+  // box is RAM-bound. The handful of pages that survive ranking are re-read below
+  // for their snippets.
+  const meta = new Map()
   for (const abs of listMdRecursive(root)) {
     const md = readMd(abs)
     if (md == null) continue
     const rel = path.relative(root, abs)
     const isWiki = rel === 'Wiki' || rel.startsWith('Wiki' + path.sep)
-    const body = stripFrontmatter(md)
     const title = firstHeading(md, path.basename(abs, '.md'))
-    const inTitle = title.toLowerCase().includes(query) || rel.toLowerCase().includes(query)
-    const inBody = body.toLowerCase().includes(query)
-    if (!inTitle && !inBody) continue
-    const folder = path.dirname(rel)
-    hits.push({
+    meta.set(rel, { abs, isWiki, title })
+    scorer.add({ id: rel, title, path: rel, body: stripFrontmatter(md), isWiki })
+  }
+  const ranked = scorer.rank()
+  const items = ranked.slice(0, cap).map(({ id, score }) => {
+    const { abs, isWiki, title } = meta.get(id)
+    const folder = path.dirname(id)
+    const md = readMd(abs)
+    return {
       type: isWiki ? 'wiki' : 'note',
       title,
       subtitle: isWiki ? folder.replace(/^Wiki[/\\]?/, '') || 'Wiki' : folder === '.' ? 'vault' : folder,
-      path: rel,
-      score: (inTitle ? (isWiki ? 100 : 60) : 0) + (inBody ? (isWiki ? 30 : 20) : 0) + (isWiki ? 50 : 0),
-      snippet: inBody ? snippetFor(body, query) : '',
-    })
-  }
-  // data/*.json is work-only (DATA_DIR), so only fold it into results when
-  // searching the default vault — not when a ?vault=… points elsewhere.
+      path: id,
+      score,
+      snippet: md == null ? '' : snippet(stripFrontmatter(md), scorer.clauses),
+    }
+  })
+
+  // data/*.json is machine state under DATA_DIR, so only fold it into results
+  // when searching the default vault — not when a ?vault=… points elsewhere.
+  // Left as an unranked substring match (every clause must appear) and appended
+  // BELOW the ranked pages, which is exactly where its flat score of 10 always
+  // put it against the old scorer's 80-180.
+  let total = ranked.length
   if (root === VAULT) {
+    const tail = items.length ? items[items.length - 1].score / 2 : 0
     for (const name of DATA_ALLOWLIST) {
       let raw = null
       try {
@@ -734,13 +751,13 @@ function search(q) {
       } catch {
         continue
       }
-      if (raw.toLowerCase().includes(query)) {
-        hits.push({ type: 'data', title: name, subtitle: 'data', path: null, snippet: snippetFor(raw, query), score: 10 })
-      }
+      const lower = raw.toLowerCase()
+      if (!scorer.clauses.every((c) => lower.includes(c.text))) continue
+      total++
+      if (items.length < cap) items.push({ type: 'data', title: name, subtitle: 'data', path: null, snippet: snippet(raw, scorer.clauses), score: tail })
     }
   }
-  hits.sort((a, b) => b.score - a.score)
-  return hits.slice(0, 24)
+  return { items, total, truncated: total > items.length, limit: cap }
 }
 
 let lastGithubRefreshAt = 0
@@ -889,7 +906,12 @@ export function readRouter() {
   // Bundled Command Center data — one request per poll instead of ~8.
   r.get('/api/dashboard', (_req, res) => res.json(dashboardBundle()))
 
-  r.get('/api/search', (req, res) => withVault(req, res, () => res.json({ items: search(String(req.query.q || '')) })))
+  // `{ items, total, truncated, limit }` — `items` is unchanged in shape (now
+  // BM25F-ranked), and `truncated` is there because silently dropping the tail is
+  // indistinguishable from the vault not having it.
+  r.get('/api/search', (req, res) =>
+    withVault(req, res, () => res.json(search(String(req.query.q || ''), req.query.limit))),
+  )
 
   // Optional: refresh the GitHub-contributions scorecard/heatmap JSON. A fixed,
   // parameterless action (NOT arbitrary exec). Cooldown-guarded; only runs with a
