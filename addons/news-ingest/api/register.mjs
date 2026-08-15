@@ -61,8 +61,9 @@ export default function register() {
     })
   })
 
-  /* The manual sweep — the same run cron fires, on demand (the skill and the
-   * card's button use it). Bearer-gated: it spends the subscription. */
+  /* The manual sweep — the same run cron fires, on demand (what the skill and
+   * `curl` use; the card only reads). Bearer-gated: it spends the subscription,
+   * so it may not be reachable by anything that can merely reach the API. */
   routes.post('/api/news/sweep', bearerAuth, async (_req, res) => {
     const { status, ...body } = await sweepNews({ requestedBy: 'api' })
     res.status(status || 200).json(body)
