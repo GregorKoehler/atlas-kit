@@ -45,8 +45,10 @@ import { lockBodyScroll } from '../../lib/scrollLock'
 import { MicField } from '../MicField'
 import { ScheduleButton } from '../ScheduleButton'
 
-// Atlas Kit ships without the self-deploy button and without voice/dictation, so
-// these are inert stubs (the surrounding ship/prompt logic is otherwise unchanged).
+// Atlas Kit ships without voice/dictation here, so these are inert stubs (the
+// surrounding ship/prompt logic is otherwise unchanged). kickDeploy is a no-op
+// too: the Redeploy button (DeployButton.tsx) owns its own status poll, so a
+// just-shipped merge shows up there on its next tick without a nudge.
 const kickDeploy = () => {}
 const scrollFieldToEnd = (..._a: unknown[]) => {}
 const useDictation = (_v: string, _set: (s: string) => void) => ({

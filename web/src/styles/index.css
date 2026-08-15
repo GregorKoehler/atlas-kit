@@ -4670,7 +4670,7 @@ button.capture-job__title--link {
 
 /* Per-project dev-agent section: the global Dev Agents
    card scoped to this project's repo — reuses the .agents/.agent__* styles. */
-/* Self-deploy button (unused in Atlas Kit) — pull master + build + restart on the box. */
+/* Redeploy button on a `self_deploy: true` card — pull + build + restart on the box. */
 .proj-deploy {
   margin-top: 0.7rem;
   display: flex;

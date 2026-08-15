@@ -26,8 +26,12 @@ function StatChip({ stat }: { stat: Stat }) {
   )
 }
 
-// A GitHub contribution stat fed by refresh-github.mjs — used to anchor the
-// cumulative sparkline right after the trio of GitHub tiles.
+// A GitHub contribution stat fed by scripts/refresh-github.mjs — used to anchor
+// the cumulative sparkline right after the trio of GitHub tiles. Optional by
+// construction: that script only writes when ATLAS_GITHUB_USER is set, so an
+// unconfigured install has no GitHub frame and no sparkline, and nothing errors.
+// ⚠️ These two patterns are the pact with `ownsStat` in that script — the labels
+// must keep matching on both sides (api/test/refresh-github.test.mjs pins them).
 const isGithubStat = (label: string) =>
   /github contributions/i.test(label) || /^contributions (today|yesterday)$/i.test(label)
 

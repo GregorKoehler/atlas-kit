@@ -106,6 +106,14 @@ spawn** via a bridge (the workstation-over-Tailscale pattern, `bridges.json`). K
 visually close to the source: the **scorecard**, the **Atlas search**, the **hero
 overview**, and the **glass-HUD** look (Tailwind + CSS-variable design tokens).
 
+The kit ships **its own card**: setup seeds `Wiki/Projects/Atlas-Kit.md` into your vault
+(`scripts/seed-self-card.mjs` — idempotent, never overwrites), and any card whose page
+carries `self_deploy: true` + `repo_path:` gets a **Redeploy** button: fetch →
+fast-forward merge → install deps only if a lockfile moved → build → `serve.sh restart`,
+run in a transient `systemd-run` unit so it survives restarting the API that launched it.
+It refuses a dirty or diverged checkout with the reason instead of forcing anything —
+[docs/UPDATING.md](docs/UPDATING.md).
+
 ---
 
 ## Components & how they fit together
@@ -167,9 +175,10 @@ flowchart TB
 | **The vault** | A separate repo, created from the [llm-atlas](https://github.com/GregorKoehler/llm-atlas) template. `Wiki/` is the knowledge; `Tasks/` is the Kanban's backing store. Never bundled into this repo. | `VAULT_PATH` |
 | **Knowledge agents** | Chat over the vault. On the vault keyed `atlas` the chat becomes the **orchestrator** and can drive the fleet. Each dev agent also gets a **paired worker** that writes the run's insights back at close — the dev agent itself never writes the Atlas. | `api/src/agent-local.mjs`, `agent-routes.mjs` |
 | **agent-bridge** | A dependency-free host-native executor on another machine, reached over Tailscale with a bearer, driving dev containers via `docker exec`. Its agents get peer mail and read-only Atlas queries relayed over the same channel — no new listening socket. | `agent-bridge/` |
+| **Self card + Redeploy** | The kit's own project card, seeded into the vault at setup. `self_deploy: true` + `repo_path:` on any project page adds a bearer-gated, single-flight Redeploy button; the run lives in a transient systemd unit (detached `setsid` fallback) and reports back through a state file, since it restarts the API mid-flight. | `scripts/seed-self-card.mjs`, `api/src/deploy-routes.mjs`, `docs/UPDATING.md` |
 | **Claude Code skills** | Four operator workflows shipped with the repo: `fleet-status`, `ship-protocol`, `deep-research`, `update-config`. | `.claude/skills/` |
 | **Optional addons** | Env-gated directories with an `api/register.mjs` manifest. Four ship today: `semantic-search`, `instagram-ingest`, `news-ingest`, `voice`. Zero enabled = byte-identical to a kit without the framework. | `addons/` |
-| **scripts / infra / CI** | `serve.sh` runs three tmux windows (Express, Caddy, the MCP HTTP server) with a `--env-file` and no inherited API key; cron does a 15-min vault refresh, a daily done-clear and a 2-min health watchdog. CI globs every `*.test.mjs` under `api/test` and `addons/*/test` and subtracts an explicit opt-out list, so **adding a test file is enough to gate it**. | `scripts/`, `infra/`, `.github/workflows/ci.yml` |
+| **scripts / infra / CI** | `serve.sh` runs three tmux windows (Express, Caddy, the MCP HTTP server) with a `--env-file` and no inherited API key; cron does a 15-min vault refresh, a daily done-clear, a 2-min health watchdog and (once `ATLAS_GITHUB_USER` is set) a half-hourly GitHub-contributions pull for the Scorecard. CI globs every `*.test.mjs` under `api/test` and `addons/*/test` and subtracts an explicit opt-out list, so **adding a test file is enough to gate it**. | `scripts/`, `infra/`, `.github/workflows/ci.yml` |
 
 ### The flows
 
@@ -236,6 +245,7 @@ api/          Express API + the agent runtime + the MCP server
   src/atlas-query.mjs     the typed relational/temporal query engine (query_atlas)
   src/read-routes.mjs     open GET reads: notes, wiki, search, tasks, projects
   src/atlas-routes.mjs    Kanban task writes + the Task Prospects inbox (bearer-gated)
+  src/deploy-routes.mjs   the Redeploy button on a `self_deploy` card (docs/UPDATING.md)
   src/atlas-prospects.mjs agent-PROPOSED tasks awaiting sign-off (server-side, never the vault)
   src/mcp/                the MCP server (query_vault/query_atlas + agent control)
   src/bridges.mjs         repo → remote-bridge routing
@@ -246,8 +256,10 @@ api/          Express API + the agent runtime + the MCP server
 agent-bridge/ Host-native bridge to drive agents in remote dev containers (Tailscale)
 addons/       OPTIONAL, env-gated features (docs/ADDONS.md). Zero enabled = zero cost.
   semantic-search/        dense/vector retrieval as a SECOND search leg
-scripts/      serve.sh (tmux service manager), refresh-atlas, clear-done, provisioning
-infra/        Caddyfile.example, cloudflared-config.example.yml, atlas-kit.cron
+scripts/      serve.sh (tmux service manager), refresh-atlas, clear-done, seed-self-card,
+              refresh-github (optional Scorecard stat), provisioning
+infra/        Caddyfile.example, cloudflared-config.example.yml, atlas-kit.cron,
+              atlas-kit-card.template.md (the self card setup seeds)
 ```
 
 **Request/auth model:** the browser talks to Caddy on one origin. Read routes are open

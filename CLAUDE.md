@@ -22,7 +22,8 @@ api/      Express API: the agent runtime (agent-local.mjs), routes, the MCP serv
           the serial vault commit queue, the typed query engine
 addons/   OPTIONAL, env-gated features (see docs/ADDONS.md). Core must run
           byte-identical with zero addons enabled.
-scripts/  serve.sh (tmux service manager), refresh-atlas, clear-done, provisioning
+scripts/  serve.sh (tmux service manager), refresh-atlas, clear-done, seed-self-card,
+          refresh-github, provisioning
 infra/    Caddyfile.example, cloudflared-config.example.yml, atlas-kit.cron
 agent-bridge/  optional host-native bridge to run agents in remote dev containers
 ```
@@ -35,6 +36,9 @@ agent-bridge/  optional host-native bridge to run agents in remote dev container
 - **Writing or changing an addon, or a core seam an addon plugs into?** Read
   **[docs/ADDONS.md](docs/ADDONS.md)** — the hook API, and the invariant that a kit
   with zero addons enabled must answer byte-identically to one without the framework.
+- **Touching how an install updates itself** (the Redeploy button, `deploy-routes.mjs`,
+  `seed-self-card.mjs`)? Read **[docs/UPDATING.md](docs/UPDATING.md)** — it is the
+  operator-facing contract those two implement.
 - **Build/verify:** `cd web && npm run build` (Vite; `npm run typecheck` for tsc).
   `cd api && node --env-file=../.env src/server.mjs` runs the API. `npm run dev`
   (root, via `scripts/dev.sh`) runs both for local dev.

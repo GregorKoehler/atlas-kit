@@ -6,6 +6,8 @@
  *                   + the typed Atlas query)
  *   - agent-routes (dev + knowledge agent lifecycle; writes bearer-gated)
  *   - atlas-routes (Kanban task writes via the serial commit queue; bearer)
+ *   - deploy-routes (the Redeploy button on a `self_deploy` project card:
+ *                    GET /api/deploy/status open, POST /api/deploy bearer)
  *   - agent-app-proxy (dev-agent live-app preview: HTTP + WebSocket)
  *   - addons        (GET /api/addons + every ENABLED addon's own routes; with
  *                    no addons enabled this mounts one list endpoint and
@@ -21,6 +23,7 @@ import crypto from 'node:crypto'
 import { readRouter } from './read-routes.mjs'
 import { agentRouter } from './agent-routes.mjs'
 import { atlasRouter } from './atlas-routes.mjs'
+import { deployRouter } from './deploy-routes.mjs'
 import { usageRouter } from './usage-routes.mjs'
 import { hostRouter } from './host-stats-routes.mjs'
 import { appProxyHttp, attachAppUpgrade, isAppPath } from './agent-app-proxy.mjs'
@@ -68,6 +71,9 @@ app.get('/api/health', (_req, res) => res.json({ ok: true, service: 'atlas-kit-a
 app.use(readRouter())
 app.use(agentRouter(bearerAuth))
 app.use(atlasRouter(bearerAuth))
+// Redeploy a `self_deploy: true` project's checkout from its card:
+// GET /api/deploy/status open, POST /api/deploy bearer-gated + single-flight.
+app.use(deployRouter(bearerAuth))
 app.use(usageRouter()) // GET /api/usage — Claude 5h/weekly budget (Hero meters)
 app.use(hostRouter()) // GET /api/host — box RAM/swap (Hero meters)
 

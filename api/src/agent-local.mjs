@@ -214,6 +214,14 @@ const MAX_LIVE = Number(process.env.AGENT_LOCAL_MAX_CONCURRENT || 12)
 // `serve.sh restart` is session-scoped, so agent tmux SURVIVES it; this only
 // fires on a true tmux-server death (reboot/OOM), which is exactly the case.
 const RECONCILE = !/^(0|false|no|off)$/i.test(process.env.AGENT_LOCAL_RECONCILE || '1')
+// Whether that self-heal RE-ATTACHES (default) or only PARKS the orphans it finds
+// as 'dormant' for the operator's Revive button. Off (0/false/off) is the older,
+// strictly-manual behaviour — worth having on a box where an unattended resume
+// burst is unwelcome. Even when on, the memory floor can still park the remainder.
+const REATTACH = !/^(0|false|no|off)$/i.test(process.env.AGENT_LOCAL_REATTACH || '1')
+// …and how many it may bring back unattended. Deliberately well under MAX_LIVE:
+// nobody is watching this one, and every other one is a click away on the card.
+const REATTACH_MAX = Number(process.env.AGENT_LOCAL_REATTACH_MAX || 4)
 // Lifecycle driver kill-switch (0/false/off): when off, the flush timer stops
 // advancing the state machine (ship/close/reap). Spawns/kills still mutate state;
 // only the autonomous progression pauses. Default on. (Used by tests to keep the
@@ -1682,9 +1690,9 @@ function scheduleMenuClear(tmux) {
 }
 // Park an orphan as 'dormant': its tmux died (a tmux-server death — reboot/OOM,
 // or `tmux kill-server`) but its worktree + Claude transcript are intact, so it's
-// revivable. We DON'T auto-revive (a burst would OOM the RAM-bound box) — the card
-// shows it 'dormant' with a Revive button and the operator brings back the ones
-// they want (one at a time, or the memory-gated "Revive all").
+// revivable. The boot self-heal re-attaches what fits and parks the rest here
+// (see reconcileOrphans) — the card then shows those 'dormant' with a Revive
+// button, one at a time or the memory-gated "Revive all".
 function markDormant(s) {
   s.status = 'dormant'
   // Clear the "lost"/terminal stamps the poll may have set, so the card reads
@@ -1711,17 +1719,80 @@ export function liveSessionsFromLs(r) {
   if (/error connecting|no server running/i.test(r.stderr || '')) return new Set()
   return null // inconclusive — a hiccup, not a dead server: don't risk parking
 }
-// Boot self-heal: PARK (don't revive) sessions a tmux-server death orphaned —
-// present in BOOT_ALIVE (alive when we loaded state.json) but with no live tmux.
-// They go 'dormant'; the operator revives them from the dashboard. Kill-switch:
-// AGENT_LOCAL_RECONCILE=0/off. NOTE a `serve.sh restart` is session-scoped, so
-// agent tmux SURVIVES it — this only finds orphans after a true server death.
+/** Which orphans this boot re-attaches, and which it leaves parked: newest first
+ *  (the session someone was most likely mid-conversation with is worth the scarce
+ *  slot), capped at `max`. Everything past the cap stays dormant — a FALLBACK,
+ *  never a loss, so an over-cap fleet still comes back one Revive click at a
+ *  time. Pure + exported so the split is unit-tested without tmux
+ *  (test/agent-boot-reattach.test.mjs). */
+export function planReattach(candidates, { max = 0 } = {}) {
+  const cap = Math.max(0, max)
+  const ordered = [...candidates].sort((a, b) => (b.startedAt || '').localeCompare(a.startedAt || ''))
+  return { reattach: ordered.slice(0, cap), park: ordered.slice(cap) }
+}
+
+/**
+ * Re-attach the planned set, stopping at the memory floor.
+ *
+ * The gate is checked BEFORE EVERY launch, and the moment it refuses the ENTIRE
+ * remainder parks — the exact opposite of retrying, because the box this runs on
+ * is RAM-bound and a resume burst is what OOMs it. So a low-memory box degrades
+ * to precisely the old behaviour (everything dormant, the Revive button as the
+ * fallback) instead of spiralling.
+ *
+ * `memOk` and `launch` are injected so the whole decision — cap, stagger,
+ * refusal remainder — is testable with no tmux and no real memory pressure.
+ * Returns { attached, park }; the caller parks and persists.
+ */
+export async function runReattach(candidates, { max, memOk, launch, stagger = 0 }) {
+  const { reattach, park } = planReattach(candidates, { max })
+  const attached = []
+  for (let i = 0; i < reattach.length; i++) {
+    if (!memOk()) {
+      park.push(...reattach.slice(i))
+      break
+    }
+    if (await launch(reattach[i])) {
+      attached.push(reattach[i])
+      if (stagger && i < reattach.length - 1) await sleep(stagger)
+    } else {
+      park.push(reattach[i]) // the resume itself failed — dormant, so it can be retried
+    }
+  }
+  return { attached, park }
+}
+
+// Boot self-heal: PARK every session a tmux-server death orphaned — present in
+// BOOT_ALIVE (alive when we loaded state.json) but with no live tmux — and then
+// RE-ATTACH the newest few. Re-attaching is what makes a restart (a Redeploy, a
+// reboot) invisible to a running fleet; parking is what it degrades to.
+//
+// Park FIRST, and persist that, before any resume: the re-attach loop sleeps
+// between launches, and a crash inside that window must leave every session it
+// hasn't reached 'dormant' with a working Revive button, never in limbo.
+//
+// Bounded three ways, because an unattended resume burst on a RAM-bound box is
+// the failure this must not cause (it is why auto-resume was dropped for parking
+// in the first place): capped at REATTACH_MAX and at the room left under
+// MAX_LIVE, staggered by REVIVE_STAGGER_MS, and gated on the SAME memory floor
+// the Revive button uses, re-read before every launch.
+//
+// The resume itself goes through launchResume — the one place that decides which
+// MCP profile a session gets back (the Atlas orchestrator resumes WITH its
+// agent-control config; everything else resumes on the knowledge-only profile,
+// which dev.mcp.json and worker.mcp.json both are) — so boot re-attach and a
+// manual revive can never drift apart.
+//
+// Kill-switches: AGENT_LOCAL_RECONCILE=0/off (no self-heal at all),
+// AGENT_LOCAL_REATTACH=0/off (find + park, never resume). NOTE a `serve.sh
+// restart` is session-scoped, so agent tmux SURVIVES it — this only finds
+// orphans after a true server death.
 async function reconcileOrphans() {
   if (!RECONCILE) return
   const live = liveSessionsFromLs(await run(['tmux', 'ls', '-F', '#{session_name}']))
   // tmux ls failed for some reason OTHER than a dead server — inconclusive. Bail
-  // rather than mass-park live agents on a transient glitch (Express now restarts
-  // on every deploy, so this path runs each time and a false-orphan is costly).
+  // rather than mass-park live agents on a transient glitch (Express restarts on
+  // every deploy, so this path runs each time and a false-orphan is costly).
   if (!live) return
   const candidates = Object.values(registry.sessions).filter((s) => {
     if (!BOOT_ALIVE.has(s.id)) return false // wasn't alive at load — leave it
@@ -1739,6 +1810,21 @@ async function reconcileOrphans() {
     audit({ action: 'dormant', id: s.id, repo: s.repo, kind: s.kind || 'dev', ok: true })
   }
   persist()
+  if (!REATTACH) return
+  // Room left under the ceiling, counting the agents that DID survive.
+  const stillLive = Object.values(registry.sessions).filter((s) => live.has(s.tmux)).length
+  const { attached, park } = await runReattach(candidates, {
+    max: Math.min(REATTACH_MAX, Math.max(0, MAX_LIVE - stillLive)),
+    memOk: () => memHeadroom().ok,
+    launch: async (s) => (await launchResume(s)).ok, // sets status back to 'running'
+    stagger: REVIVE_STAGGER_MS,
+  })
+  for (const s of attached) audit({ action: 'reattach', id: s.id, repo: s.repo, kind: s.kind || 'dev', ok: true })
+  // `park` is already dormant from the pass above — nothing to undo, which is the
+  // point of parking first. Just record what the Revive button is left holding.
+  if (park.length)
+    audit({ action: 'reattach-held', attached: attached.length, held: park.length, floorMb: REVIVE_MEM_FLOOR_MB, availMb: availMemMb(), ok: true })
+  if (attached.length) persist()
 }
 // Relaunch a session's Claude session in a fresh tmux under its expected name —
 // the shared core of revive()/reviveAll() (the launch the old auto-reconciler ran):
@@ -3182,9 +3268,10 @@ const flushTimer = setInterval(() => {
 }, QUEUE_FLUSH_MS)
 if (flushTimer.unref) flushTimer.unref() // don't keep the process alive for this
 
-// Crash self-heal: once the process is up, re-attach any sessions a tmux-server
-// death orphaned (capped + staggered — see reconcileOrphans). Delayed so Express
-// finishes starting; best-effort so a hiccup never blocks boot.
+// Crash self-heal: once the process is up, park any sessions a tmux-server death
+// orphaned and re-attach the newest few (capped + staggered + memory-gated — see
+// reconcileOrphans). Delayed so Express finishes starting; detached and
+// best-effort, so neither a hiccup nor the staggered launches block boot.
 if (RECONCILE) {
   const reconcileTimer = setTimeout(() => reconcileOrphans().catch(() => {}), RECONCILE_BOOT_DELAY_MS)
   if (reconcileTimer.unref) reconcileTimer.unref()

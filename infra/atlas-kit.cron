@@ -25,6 +25,7 @@ MAILTO=""
 30 3 * * * root cd /workspace && /usr/bin/node --env-file=.env scripts/clear-done.mjs >> /tmp/atlas-kit-cron.log 2>&1
 
 # (Optional) GitHub contributions → data/scorecard.json + data/heatmap.json for the
-# hero Scorecard. Ship your own scripts/refresh-github.mjs writing that JSON contract,
-# then uncomment. The dashboard also exposes POST /api/refresh/github as an on-open hook.
-# 7,37 * * * * root cd /workspace && /usr/bin/node --env-file=.env scripts/refresh-github.mjs >> /tmp/atlas-kit-cron.log 2>&1
+# hero Scorecard — twice an hour. A clean no-op (exit 0, one log line) until you set
+# ATLAS_GITHUB_USER in .env and `gh auth login` as that user, so this line is safe to
+# leave installed. The dashboard also fires POST /api/refresh/github on open.
+7,37 * * * * root cd /workspace && /usr/bin/node --env-file=.env scripts/refresh-github.mjs >> /tmp/atlas-kit-cron.log 2>&1

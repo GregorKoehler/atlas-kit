@@ -695,6 +695,54 @@ export async function fetchProjects(): Promise<Project[]> {
   return r?.projects ?? []
 }
 
+/* --- Redeploy (a `self_deploy: true` project card) ------------------ *
+ * The run outlives the API process it restarts, so its phases come back
+ * through a state file the API re-reads — not through the POST. */
+export interface DeployRun {
+  phase: 'deploying' | 'done' | 'error'
+  step: string
+  /** Human sentence for the phase/failure (the refusal reason). */
+  reason: string
+  /** Short sha the run merged to ('' before the merge). */
+  targetSha: string
+  at: string
+}
+export interface DeployStatus {
+  ok: boolean
+  project: string
+  repoPath: string
+  sha: string
+  branch: string
+  dirty: boolean
+  /** Commits behind the last-known upstream ref — no fetch, so 0 is "nothing
+   *  known to be pending", not "definitely live". */
+  behind: number
+  lastDeploy: DeployRun | null
+  /** Set when the last run failed: the running build does NOT match HEAD. */
+  deployError: string | null
+  running: boolean
+  error?: string
+}
+
+export async function fetchDeployStatus(project: string): Promise<DeployStatus | null> {
+  return getJson<DeployStatus>(`${API_BASE}/deploy/status?project=${encodeURIComponent(project)}`)
+}
+
+export async function triggerDeploy(project: string): Promise<{ ok: boolean; launcher?: string; error?: string }> {
+  try {
+    const res = await fetch(`${API_BASE}/deploy`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ project }),
+    })
+    const data = (await res.json().catch(() => ({}))) as { ok?: boolean; launcher?: string; error?: string }
+    if (!res.ok) return { ok: false, error: data.error || `HTTP ${res.status}` }
+    return { ok: data.ok !== false, launcher: data.launcher }
+  } catch (e) {
+    return { ok: false, error: String(e) }
+  }
+}
+
 /* --- Atlas typed query (relational + temporal) --------------------- *
  * The payoff of the typed layer (Guide §7): exact filters/traversals over
  * typed edges, node types, status, and dates — the counterpart of the fuzzy

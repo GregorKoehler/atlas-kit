@@ -4,6 +4,7 @@ import { useData } from '../../lib/useData'
 import { useAgents } from '../../lib/useAgents'
 import { useMediaQuery } from '../../lib/useMediaQuery'
 import { AgentList, fmtDur } from './AgentList'
+import { DeployButton } from './DeployButton'
 import { fetchProjects, type Project, type AgentSession } from '../../lib/api'
 
 // One full card per project (so each can later host that project's live
@@ -210,6 +211,10 @@ function ProjectCard({ p }: { p: Project }) {
             {p.tag ? <span className="proj-related__tag">#{p.tag}</span> : null}
           </div>
         ) : null}
+
+        {/* This project IS an app running on this box (`self_deploy: true` +
+            `repo_path:`) → it can be taken live from its own card. */}
+        {p.selfDeploy && p.repo ? <DeployButton project={p.name} /> : null}
 
         {repoReachable ? (
           <div className="proj-agents">

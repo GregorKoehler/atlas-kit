@@ -35,6 +35,14 @@
 			header_up Authorization "Bearer {env.DASHBOARD_BEARER_TOKEN}"
 		}
 	}
+	# Redeploy button on a `self_deploy: true` project card: POST /api/deploy is a
+	# bearer-gated exec route. (GET /api/deploy/status is an open read and matches
+	# this same handler — the token is harmless on it.)
+	handle /api/deploy* {
+		reverse_proxy localhost:3001 {
+			header_up Authorization "Bearer {env.DASHBOARD_BEARER_TOKEN}"
+		}
+	}
 	# (The token is harmless on the read routes below; only writes require it.)
 
 	# --- Read routes (open; Cloudflare Access gates them at the edge) ---
