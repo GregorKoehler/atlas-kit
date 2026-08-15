@@ -37,10 +37,11 @@ The button then shows `Deploying…` through the restart blip and settles on
 
 **Running agents come back on their own.** `serve.sh restart` is session-scoped, so agent
 tmux sessions usually survive it untouched; and when a restart *does* orphan them (a
-reboot, an OOM that took the tmux server with it), the API's boot self-heal re-attaches
-them — newest first, capped at the concurrency ceiling, staggered, and gated on the same
-memory floor the Revive button uses. Whatever doesn't fit stays `dormant` on its card with
-that button as the fallback, so a low-RAM box degrades instead of OOM-spiralling. Set
+reboot, an OOM that took the tmux server with it), the API's boot self-heal parks them and
+then re-attaches the newest few — capped (`AGENT_LOCAL_REATTACH_MAX`, default 4, and never
+past the concurrency ceiling), staggered, and gated on the same memory floor the Revive
+button uses. Whatever doesn't fit stays `dormant` on its card with that button as the
+fallback, so a low-RAM box degrades instead of OOM-spiralling. Set
 `AGENT_LOCAL_REATTACH=0` to go back to parking everything for a manual revive (or
 `AGENT_LOCAL_RECONCILE=0` to switch the self-heal off entirely).
 
