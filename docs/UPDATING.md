@@ -35,6 +35,15 @@ Pressing it runs, on that checkout:
 The button then shows `Deploying…` through the restart blip and settles on
 `Redeployed ✓ <sha>`, or on the refusal.
 
+**Running agents come back on their own.** `serve.sh restart` is session-scoped, so agent
+tmux sessions usually survive it untouched; and when a restart *does* orphan them (a
+reboot, an OOM that took the tmux server with it), the API's boot self-heal re-attaches
+them — newest first, capped at the concurrency ceiling, staggered, and gated on the same
+memory floor the Revive button uses. Whatever doesn't fit stays `dormant` on its card with
+that button as the fallback, so a low-RAM box degrades instead of OOM-spiralling. Set
+`AGENT_LOCAL_REATTACH=0` to go back to parking everything for a manual revive (or
+`AGENT_LOCAL_RECONCILE=0` to switch the self-heal off entirely).
+
 **It survives the restart it triggers.** Step 5 kills the very Express process that
 started the deploy, so the run is launched into a transient **`systemd-run`** unit — its
 own unit and cgroup, outside the API's lifecycle. On a box without systemd (a container)
