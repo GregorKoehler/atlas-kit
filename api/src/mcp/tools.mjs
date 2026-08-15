@@ -61,8 +61,43 @@ const tool = (fn) => async (args) => {
   }
 }
 
-export function buildServer() {
-  const server = new McpServer({ name: 'atlas-kit', version: '0.1.0' })
+// The knowledge-base READ tools — the only ones a knowledge-only session gets.
+// Exported so a narrowed tool surface is assertable (mcp-http-fail-closed.test.mjs).
+export const KNOWLEDGE_TOOLS = new Set([
+  'query_atlas',
+  'query_vault',
+  'get_note',
+  'wiki_index',
+  'wiki_pages',
+  'wiki_graph',
+  'recent_activity',
+])
+
+/**
+ * Build the MCP server.
+ *
+ * `knowledgeOnly` narrows registration to KNOWLEDGE_TOOLS — reads over the vault,
+ * nothing else. `agentControl` gates the spawn/steer/kill tools; it defaults to the
+ * ATLAS_AGENT_CONTROL env flag (set only by control.mcp.json, i.e. the Atlas
+ * orchestrator's own MCP child) but the HTTP entry passes `false` outright, so a
+ * remote connector can never reach them however the env is configured.
+ *
+ * Filtering at registration (rather than at each call site) keeps the tool
+ * definitions below untouched and means agent-control could not register even if
+ * both flags were somehow set.
+ */
+export function buildServer({
+  knowledgeOnly = !!process.env.ATLAS_MCP_KNOWLEDGE_ONLY,
+  agentControl = !!process.env.ATLAS_AGENT_CONTROL,
+} = {}) {
+  const full = new McpServer({ name: 'atlas-kit', version: '0.1.0' })
+  const server = knowledgeOnly
+    ? {
+        registerTool: (name, def, handler) => {
+          if (KNOWLEDGE_TOOLS.has(name)) full.registerTool(name, def, handler)
+        },
+      }
+    : full
 
   // Optional `vault` on the write tools — route ingest/research/amend to a
   // specific knowledge base. Only added when more than one vault is configured;
@@ -180,10 +215,36 @@ export function buildServer() {
 
   // Opt-in: only the Atlas ORCHESTRATOR launches the MCP server with this flag
   // set (its control.mcp.json sets ATLAS_AGENT_CONTROL=1), so a normal vault
-  // chat / dev-agent session never sees the agent-control tools.
-  if (process.env.ATLAS_AGENT_CONTROL) registerAgentControl(server)
+  // chat / dev-agent session never sees the agent-control tools. `knowledgeOnly`
+  // is belt-and-braces on top: the filter above would drop them anyway.
+  if (agentControl && !knowledgeOnly) registerAgentControl(server)
 
-  return server
+  return full
+}
+
+/**
+ * The POST body for a spawn_agent call. A DEV agent spawned by an Atlas
+ * orchestrator defaults to Opus at `high` effort — passed EXPLICITLY, because the
+ * /api/agents/spawn route's dev default (Sonnet) belongs to the dashboard's own
+ * spawn dropdown and must stay there; the route cannot tell its two dev callers
+ * apart. A knowledge agent sends neither key, so it picks up the route's knowledge
+ * default (Opus at xhigh). Pure + exported so the defaults are testable
+ * (api/test/agent-model-default.test.mjs).
+ */
+export function spawnBody({ task, repo, kind, vault, model, effort, parent }) {
+  const body = { task }
+  if (parent) body.parent = parent
+  if (kind === 'knowledge') {
+    body.kind = 'knowledge'
+    if (vault) body.vault = vault
+    if (model) body.model = model
+    if (effort) body.effort = effort
+  } else {
+    body.repo = repo
+    body.model = model || 'opus'
+    body.effort = effort || 'high'
+  }
+  return body
 }
 
 /* ---- AGENT-CONTROL tools (opt-in: ATLAS_AGENT_CONTROL) -------------
@@ -223,7 +284,11 @@ function registerAgentControl(server) {
     subAgents: Array.isArray(s.subAgents) && s.subAgents.length ? s.subAgents.length : undefined,
     bgJobs: Array.isArray(s.bgJobs) ? s.bgJobs.filter((j) => j && j.status === 'running').length || undefined : undefined,
     queued: Array.isArray(s.queued) && s.queued.length ? s.queued.length : undefined,
-    ship: s.shipState ? { state: s.shipState, info: s.shipInfo } : undefined,
+    // `state` is 'ready' | 'shipped' | 'merged' — 'merged' is the REPO's own
+    // verdict (a merge commit landing this branch), so it covers a PR the
+    // orchestrator or the operator merged, not just the agent's own claim.
+    ship: s.shipState ? { state: s.shipState, info: s.shipInfo, ...(s.shipWarning ? { warning: s.shipWarning } : {}) } : undefined,
+    shipQueue: s.shipQueue,
     closing: s.closing || undefined,
     atlasWorker: s.atlasWorker,
     pairedDev: s.pairedDev,
@@ -276,26 +341,14 @@ function registerAgentControl(server) {
         repo: z.string().optional().describe('repo key for a DEV agent (a localRepos key or a bridges[].repos entry from list_agents); omit for a knowledge agent'),
         kind: z.enum(['dev', 'knowledge']).optional().describe('default "dev"'),
         vault: z.string().optional().describe('for a knowledge agent: which vault (e.g. "atlas")'),
-        model: z.enum(['opus', 'fable', 'sonnet']).optional().describe('default opus'),
-        effort: z.enum(['high', 'xhigh', 'max']).optional().describe('default xhigh'),
+        model: z.enum(['opus', 'fable', 'sonnet']).optional().describe('default opus for a dev agent you spawn; opus for a knowledge agent'),
+        effort: z.enum(['high', 'xhigh', 'max']).optional().describe('default high (dev) / xhigh (knowledge)'),
       },
     },
-    tool(({ task, repo, kind, vault, model, effort }) => {
-      const body = { task }
-      if (model) body.model = model
-      if (effort) body.effort = effort
-      // Stamp this orchestrator as the parent so the dashboard can draw the spawn
-      // lineage (ATLAS_SESSION is injected into the MCP child's env by the
-      // Atlas launch — agent-local.mjs's ATLAS_CONTROL_LAUNCH_CMD).
-      if (process.env.ATLAS_SESSION) body.parent = process.env.ATLAS_SESSION
-      if (kind === 'knowledge') {
-        body.kind = 'knowledge'
-        if (vault) body.vault = vault
-      } else {
-        body.repo = repo
-      }
-      return apiPost('/api/agents/spawn', body)
-    }),
+    // Stamp this orchestrator as the parent so the dashboard can draw the spawn
+    // lineage (ATLAS_SESSION is injected into the MCP child's env by the Atlas
+    // launch — agent-local.mjs's ATLAS_CONTROL_LAUNCH_CMD).
+    tool((args) => apiPost('/api/agents/spawn', spawnBody({ ...args, parent: process.env.ATLAS_SESSION }))),
   )
 
   server.registerTool(
@@ -326,6 +379,36 @@ function registerAgentControl(server) {
       inputSchema: { id: z.string(), text: z.string() },
     },
     tool(({ id, text }) => apiPost('/api/agents/interrupt', steerBody(id, text))),
+  )
+
+  server.registerTool(
+    'ship_agent',
+    {
+      description:
+        "Tell a DEV agent to ship its finished work — the dashboard's Ship button, as a tool, and the way to ship: prefer it over hand-writing a ship instruction with queue_agent/prompt_agent. The dashboard delivers the canonical ship prompt (re-sync onto a fresh fetch of the repo's default branch → open/update the PR → follow THAT repo's own ship/CI rules and wait for its required checks to go green → merge → report PR + SHA), including the right delivery tail for how that project actually goes live, so nothing is left to improvisation. For a BOX-LOCAL agent it also joins the SERIAL ship train — several ready agents merge one at a time, each re-syncing onto the previous merge, instead of racing; the reply's `position` is its place in that queue (a bridge agent is simply queued the same prompt). The agent ships on its own turn — watch it with list_agents/agent_transcript rather than expecting the merge in this reply.",
+      inputSchema: { id: z.string().describe('the dev agent session id to ship (from list_agents)') },
+    },
+    tool(({ id }) => apiPost('/api/agents/ship', { id })),
+  )
+
+  server.registerTool(
+    'merge_pr',
+    {
+      description:
+        "Merge a dev agent's PR (`gh pr merge --merge` on its branch) — use this INSTEAD of running `gh pr merge` yourself in Bash. It merges AND records that YOU merged it in the one call, so the dashboard stops reporting the merge back to you minutes later as a fleet update about your own action; merging by hand still works, it just costs you that redundant note. It also PRE-FLIGHTS the PR server-side and REFUSES to merge one that is stale (branch behind its base), conflicted, blocked, red, or still waiting on checks — the error names the actual state. It does not rebase or fix anything: the answer to a refusal is to ship the agent (its ship protocol re-fetches and rebases), not to retry. Only for a BOX-LOCAL dev agent (a `localRepos` repo); for a bridge repo, merge with `gh pr merge` as before. Returns gh's output; a refused or failed merge comes back as an error and nothing is claimed.",
+      inputSchema: {
+        id: z.string().describe('the dev agent session id whose PR to merge (from list_agents)'),
+        force: z
+          .boolean()
+          .optional()
+          .describe(
+            'Skip the pre-flight and merge even if the PR is stale, conflicted, blocked, red or still running checks. Only when the operator has told you that specific PR is fine to land as-is — otherwise ship the agent so it rebases. Audited as a forced merge.',
+          ),
+      },
+    },
+    // The same ATLAS_SESSION stamp the spawn lineage and steers use — the agent
+    // never supplies it, so a chat can only ever claim its OWN merges.
+    tool(({ id, force }) => apiPost('/api/agents/merge', { id, force, mergedBy: process.env.ATLAS_SESSION })),
   )
 
   server.registerTool(

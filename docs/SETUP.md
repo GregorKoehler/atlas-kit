@@ -86,7 +86,12 @@ for a box-local-only setup; the whole bridge layer stays dormant.)
      `https://claude.ai/api/mcp/auth_callback`). Copy the app's **AUD tag** and your
      **team domain** (`<team>.cloudflareaccess.com`) into `.env` as `CF_ACCESS_AUD`
      and `CF_ACCESS_TEAM_DOMAIN` — the MCP server verifies the Access JWT as
-     defense-in-depth (a no-op until both are set).
+     defense-in-depth. ⚠️ Both are **required** once the tunnel routes
+     `mcp.<your-domain>`: the MCP server refuses to start (non-zero exit, with the
+     reason on stderr) if it finds an ingress rule for its port — or a non-loopback
+     `MCP_BIND` — while either value is blank. A 127.0.0.1 bind does *not* make it
+     unreachable; cloudflared dials loopback. The remote endpoint serves the vault
+     READ tools only, never agent control.
 
 Outbound-only: the box never opens 80/443; every request arrives already
 identity-checked by Access.

@@ -73,8 +73,10 @@ The checks below are SETUP.md's "Verifying it works" list, distributed per step.
   `/root/.cloudflared/config.yml` from `infra/cloudflared-config.example.yml`. The Access
   apps + Managed-OAuth AUD/team-domain are a human/browser step in the Cloudflare
   dashboard — hand the operator the exact values to enter, then have them paste back the
-  AUD tag + team domain for `.env`. **Verify:** `cloudflared tunnel list` shows the
-  tunnel; `dashboard.<domain>` resolves and hits the Access login. (No domain ⇒ skip;
+  AUD tag + team domain for `.env`. ⚠️ Both values are load-bearing: once the tunnel
+  routes `mcp.<domain>`, the MCP server refuses to start with either blank — check its
+  log for `Access JWT check: ENFORCED` rather than `REFUSING TO START`.
+  **Verify:** `cloudflared tunnel list` shows the tunnel; `dashboard.<domain>` resolves and hits the Access login. (No domain ⇒ skip;
   note that the dashboard is reached via the tailnet IP or `ssh -L 8080:127.0.0.1:8080`.)
 - **Step 5 — Caddy.** `cp infra/Caddyfile.example infra/Caddyfile` and replace
   `<REPO_ROOT>` with the repo path. **Verify:** `caddy validate --config infra/Caddyfile`

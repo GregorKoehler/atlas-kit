@@ -1,0 +1,75 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+# ── How tests are gated ──────────────────────────────────────────────────────
+# EVERY test file RUNS BY DEFAULT. The api job globs `api/test/**/*.test.mjs` and
+# subtracts an explicit, commented opt-out list. Adding a test file is therefore
+# enough to gate it, and a file can only stop running if someone names it and
+# says why, in the diff.
+#
+# That inversion is the whole point: a hand-maintained list of test files decays
+# silently — files get added and never listed, and nobody notices that "green"
+# meant "never ran". Silence must mean "runs", never "never runs".
+#
+# A test that needs box state must be made HERMETIC rather than listed as an
+# opt-out: pin the ambient fact in the fixture (a temp dir, VAULTS_FILE,
+# CLOUDFLARED_CONFIG, a stub HTTP server on an OS-assigned port). A test must
+# never pass merely because the data or privilege it asserts on happens to be
+# absent — that reads as coverage while guarding nothing.
+#
+# Per-test rationale is NOT duplicated here — every file in api/test carries a
+# header comment explaining what it guards. `--test-reporter=spec` names each
+# file and each failing test, so a failure still identifies itself.
+
+jobs:
+  web:
+    name: web — typecheck + build
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm run build
+
+  api:
+    name: api — full test suite
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: api/package-lock.json
+      # tmux is the whole point of serve-tmux.test.sh; not preinstalled on the runner.
+      - run: sudo apt-get update && sudo apt-get install -y tmux
+      # Guards serve.sh's no-teardown invariant + ensure_session convergence.
+      # Self-contained: a throwaway tmux socket, a stub command, no real ports.
+      # A shell test, so it is not part of the api/test glob below.
+      - run: bash scripts/serve-tmux.test.sh
+      - name: install api deps
+        working-directory: api
+        run: npm ci
+      - name: api tests — every *.test.mjs under api/test
+        working-directory: api
+        run: |
+          # Opt-out list: one `test/…` path per line, each with a reason on the
+          # same line. EMPTY today — every file passes on a clean runner.
+          cat > "$RUNNER_TEMP/ci-skip.txt" <<'SKIP'
+          SKIP
+          files=$(find test -name '*.test.mjs' | sort | grep -vxFf "$RUNNER_TEMP/ci-skip.txt")
+          echo "$files" | sed 's/^/  · /'
+          node --test --test-reporter=spec $files

@@ -1,8 +1,6 @@
 import { useState } from 'preact/hooks'
-import { useData } from '../../lib/useData'
-import { fetchProjects, shipAgent, unshipAgent, queueAgent, type AgentSession } from '../../lib/api'
+import { shipAgent, unshipAgent, queueAgent, type AgentSession } from '../../lib/api'
 import { focusAgent } from '../../lib/agentFocus'
-import { buildShipPrompt } from './AgentList'
 
 /**
  * The dev agents an Atlas orchestrator chat spawned, surfaced inside that chat so
@@ -28,12 +26,7 @@ export function AtlasSpawnedAgents({
   sessions: AgentSession[]
   onChanged: () => void
 }) {
-  const { data: projects } = useData(() => fetchProjects())
   const [busy, setBusy] = useState<string | null>(null)
-
-  // Self-deploy projects (only the dashboard) deploy via the Deploy-master button;
-  // it changes one sentence of the ship prompt, so match the dev card per repo.
-  const selfDeployOf = (repo: string) => !!projects?.find((p) => p.agentRepo === repo)?.selfDeploy
 
   // Dev agents THIS orchestrator chat spawned. Knowledge sub-chats, the standalone
   // 'atlas' ingest worker, and 'atlas-pass' runs are not ship-able dev agents.
@@ -45,13 +38,13 @@ export function AtlasSpawnedAgents({
   const ship = async (c: AgentSession) => {
     if (busy) return
     setBusy(c.id)
-    const r = await shipAgent({ id: c.id, text: buildShipPrompt(selfDeployOf(c.repo)) })
+    const r = await shipAgent({ id: c.id })
     if (r.ok) {
       await queueAgent({
         id: parentId,
         text: `⤴ Fleet update — the operator pressed Ship on the dev agent you spawned on ${c.repo} (${c.id}${
           c.task ? ` — "${c.task.slice(0, 80)}"` : ''
-        }) from your chat. It is re-syncing onto master and merging its PR now; you'll get a ✅ note here when it lands.`,
+        }) from your chat. It is re-syncing onto the default branch and merging its PR now; you'll get a ✅ note here when it lands.`,
       })
       onChanged()
     }
@@ -124,7 +117,7 @@ export function AtlasSpawnedAgents({
               disabled={busy === c.id}
               title={`${
                 c.shipState === 'ready' ? 'agent reports this is READY TO SHIP — ' : ''
-              }ship: queue re-sync onto latest master → push → merge the PR. Tells me (this chat) it's in process; I'll note here when it lands.`}
+              }ship: queue re-sync onto the latest default branch → push → merge the PR. Tells me (this chat) it's in process; I'll note here when it lands.`}
             >
               ⤴
             </button>

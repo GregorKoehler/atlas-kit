@@ -149,7 +149,7 @@ function noteTags(md) {
 
 // Each Wiki/Projects/<name>.md is a project (type: project). Frontmatter carries
 // tag / optional repo / now / goal; the H1 is the display name.
-function listProjects() {
+export function listProjects() {
   const dir = path.join(VAULT, 'Wiki', 'Projects')
   let files = []
   try {
@@ -171,6 +171,12 @@ function listProjects() {
       agentRepo: String(fm.agent_repo || ''),
       repo: String(fm.repo || ''),
       github: String(fm.github || ''),
+      // Delivery flags — how this project actually goes live. `self_deploy: true`
+      // means the operator takes a merge live from the dashboard; `deploy_manual`
+      // is a note saying the live instance is redeployed by hand and NOT per PR.
+      // Neither set ⇒ merging IS the delivery (ship-prompt.mjs's deliveryMode).
+      selfDeploy: fm.self_deploy === true,
+      deployManual: String(fm.deploy_manual || ''),
       now: String(fm.now || ''),
       goal: String(fm.goal || ''),
       path: path.relative(VAULT, abs),
