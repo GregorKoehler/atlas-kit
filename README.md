@@ -108,6 +108,100 @@ overview**, and the **glass-HUD** look (Tailwind + CSS-variable design tokens).
 
 ---
 
+## Components & how they fit together
+
+Two things are load-bearing: **one Express process** on the box, and **one git
+checkout of your vault**. Everything else either talks to that API or writes to that
+vault — and every vault write goes through a single serial queue, so "what is allowed
+to touch the checkout" has exactly one answer.
+
+```mermaid
+flowchart TB
+  UI["Dashboard — Preact PWA"]
+  CADDY["Caddy — injects the bearer"]
+  API["Express API :3001"]
+  MCPHTTP["MCP over HTTP :3002<br/>knowledge-only"]
+  ORCH["Atlas orchestrator chat<br/>control MCP tools"]
+  RT["Agent runtime<br/>agent-local.mjs"]
+  EV["Evidence at spawn<br/>atlas-candidates.mjs"]
+  DEV["Dev agent — own tmux session<br/>own worktree, agent/id branch"]
+  WORKER["Paired Atlas worker"]
+  BRIDGE["agent-bridge — dev agents<br/>in remote containers"]
+  GH["GitHub — PR + CI"]
+  Q["Serial commit queue"]
+  VAULT[("Vault — Wiki/ + Tasks/")]
+  ADDONS["Optional addons — env-gated"]
+
+  UI -->|"GET /api/agents · /api/addons"| CADDY
+  UI -->|"Kanban drag — bearer-gated write"| CADDY
+  CADDY --> API
+  ORCH -->|"spawn · prompt · ship · merge"| API
+  MCPHTTP -->|"vault reads"| API
+  ADDONS -.->|"search · evidence · cron seams"| API
+  API --> RT
+  API -->|"remote spawn · poll · relay"| BRIDGE
+  API -->|"task + prospect writes"| Q
+  RT --> EV
+  EV -->|"full-text + typed read"| VAULT
+  RT -->|"1 · evidence → prompt file → tmux"| DEV
+  DEV -->|"2 · ATLAS:READY-TO-SHIP scanned from transcript"| RT
+  RT -->|"3 · ship train, one at a time"| DEV
+  DEV -->|"PR"| GH
+  GH -->|"merge verdict from the repo"| RT
+  DEV -->|"4 · recap at close"| WORKER
+  WORKER -->|"commits its ingest → branch merged"| Q
+  Q -->|"pull --rebase → commit → push"| VAULT
+```
+
+### The parts
+
+| Component | What it is | Where |
+|---|---|---|
+| **Web dashboard** | Vite + Preact + TS glass-HUD PWA, one file per card. One module-level poll feeds every card — 5s while an agent is alive, 30s idle, paused on a hidden tab. | `web/`, `web/src/lib/useAgents.ts` |
+| **Express API** | The single process behind everything: agent routes, vault reads, Kanban writes, the prospect inbox. Binds `127.0.0.1`; Caddy fronts it and injects the bearer. | `api/src/server.mjs` |
+| **MCP surfaces** | One tool core, two transports. **stdio** for local Claude Code, across four `*.mcp.json` profiles: dev agents and the paired worker get the seven read tools + `propose_task`; only the Atlas orchestrator's `control.mcp.json` sets `ATLAS_AGENT_CONTROL=1` and unlocks `spawn_agent`/`ship_agent`/`merge_pr`/`kill_agent`/…. **HTTP** (`:3002`, behind a Cloudflare Access JWT) is knowledge-only *by construction* — it passes `agentControl: false` unconditionally, so no env var can put agent control on it. | `api/src/mcp/` |
+| **Dev-agent runtime** | Spawns `claude` in its own detached tmux session on a fresh `git worktree`. Queued messages land at the next **tool-call boundary** for course-changing kinds and a full idle for observational ones — one shared decision module, so box and bridge can't drift. | `api/src/agent-local.mjs`, `queue-delivery.mjs` |
+| **Transcript scanner** | Tail-reads the session JSONL for two things: the `ATLAS:READY-TO-SHIP` / `ATLAS:SHIPPED` ship markers (assistant text only, latest wins) and the sub-agents a session fanned out to. | `api/src/subagent-scan.mjs` |
+| **Evidence at spawn** | The server searches the Atlas *itself* before the agent starts — full-text plus the typed layer — and folds one byte-capped block into the opening prompt, which travels by **file** because tmux rejects a command over ~16 KB. Never blocks, never throws. | `api/src/atlas-candidates.mjs`, `prompt-file-launch.mjs` |
+| **Serial commit queue** | The one serialization point for every vault write — Kanban drags, worker ingests, the done-clear cron. One in-process mutex; merges run in an isolated detached worktree. | `api/src/atlas-commit-queue.mjs` |
+| **The vault** | A separate repo, created from the [llm-atlas](https://github.com/GregorKoehler/llm-atlas) template. `Wiki/` is the knowledge; `Tasks/` is the Kanban's backing store. Never bundled into this repo. | `VAULT_PATH` |
+| **Knowledge agents** | Chat over the vault. On the vault keyed `atlas` the chat becomes the **orchestrator** and can drive the fleet. Each dev agent also gets a **paired worker** that writes the run's insights back at close — the dev agent itself never writes the Atlas. | `api/src/agent-local.mjs`, `agent-routes.mjs` |
+| **agent-bridge** | A dependency-free host-native executor on another machine, reached over Tailscale with a bearer, driving dev containers via `docker exec`. Its agents get peer mail and read-only Atlas queries relayed over the same channel — no new listening socket. | `agent-bridge/` |
+| **Claude Code skills** | Four operator workflows shipped with the repo: `fleet-status`, `ship-protocol`, `deep-research`, `update-config`. | `.claude/skills/` |
+| **Optional addons** | Env-gated directories with an `api/register.mjs` manifest. Three ship today: `semantic-search`, `instagram-ingest`, `news-ingest`. Zero enabled = byte-identical to a kit without the framework. | `addons/` |
+| **scripts / infra / CI** | `serve.sh` runs three tmux windows (Express, Caddy, the MCP HTTP server) with a `--env-file` and no inherited API key; cron does a 15-min vault refresh, a daily done-clear and a 2-min health watchdog. CI globs every `*.test.mjs` under `api/test` and `addons/*/test` and subtracts an explicit opt-out list, so **adding a test file is enough to gate it**. | `scripts/`, `infra/`, `.github/workflows/ci.yml` |
+
+### The flows
+
+**Spawn → work → ship → merge.** A spawn retrieves Atlas evidence server-side, writes
+it to a prompt file, and launches `claude` in its own tmux session on a fresh worktree. The
+agent works; when it judges its branch mergeable it ends a reply with
+`ATLAS:READY-TO-SHIP`, which the runtime reads off the transcript rather than from any
+in-memory flag. Ready agents join a **serial ship train** and are shipped one at a time,
+so each re-syncs onto the previous merge instead of racing it. `READY-TO-SHIP` means
+*a PR is open and believed mergeable* — nothing more; `merged` is not a claim at all but
+a verdict the runtime gets by asking the repository. On close the dev agent writes a
+recap, its paired worker folds that into the vault on its own branch, and once that
+close turn finishes the branch is merged through the queue and the session is reaped.
+
+**Every vault write is serialized.** A Kanban drag, an approved task prospect, a worker
+ingest and the nightly done-clear all funnel through the same mutex, each doing
+`pull --rebase --autostash` → mutate → commit → push with retries. The vault is one
+checkout shared with a phone's Obsidian Git and a refresh cron — the queue is what keeps
+those from racing.
+
+**The UI reads two endpoints to know what exists.** `GET /api/agents` is the whole fleet
+in one poll — box-local sessions, each bridge's roster, and a stale bridge's last-known
+sessions kept *separate* from live ones. `GET /api/addons` answers what is enabled on
+this box, so one build of `web/dist` serves every install and a card appears because the
+addon is enabled here, never because someone compiled a different bundle.
+
+These are conventions with hazards attached; the full map is
+**[docs/PROTOCOLS.md](docs/PROTOCOLS.md)**, and the addon seams are
+**[docs/ADDONS.md](docs/ADDONS.md)**.
+
+---
+
 ## Dev agents vs. knowledge agents
 
 They share the same access primitives (both run `claude` in a `tmux` window on the box,
