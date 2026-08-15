@@ -23,7 +23,7 @@
  * THE HOOK API is deliberately DECLARATIVE and deliberately small. An addon
  * exports one function from `addons/<name>/api/register.mjs`:
  *
- *   export default async function register({ name, dir, repoRoot }) {
+ *   export default async function register({ name, dir, repoRoot, express, Router }) {
  *     return {
  *       description,     // one line, shown by GET /api/addons
  *       routes,          // an Express Router, mounted on the app
@@ -141,6 +141,25 @@ export const addonCron = () => loaded.flatMap((a) => (a.manifest.cron ?? []).map
  * The dashboard is the operator's control surface; losing it because an optional
  * feed poller has a typo is the wrong trade in every direction.
  */
+
+/* --- what register() is HANDED -------------------------------------------- *
+ * `express` is INJECTED, not imported by the addon. Node resolves a bare
+ * specifier from the IMPORTING file's directory, and `addons/<name>/api/` walks
+ * up to a repo root that has no `node_modules` — so `import 'express'` does not
+ * resolve from inside an addon at all. Core already holds the module; handing it
+ * over is one more property on a context object the addon is given anyway, and
+ * it removes the `createRequire` reach into core's dependency tree that addons
+ * written before this seam use instead.
+ *
+ * ⚠️ ADDITIVE ONLY. An addon that destructures `{ name, dir, repoRoot }` and
+ * ignores the rest — every addon shipped so far — behaves byte-identically, and
+ * with zero addons enabled this function is never called at all. `Router` is
+ * wrapped rather than passed by reference so a detached call can never depend on
+ * express's own `this`. */
+function registerContext(name, dir) {
+  return { name, dir, repoRoot: REPO_ROOT, express, Router: (opts) => express.Router(opts) }
+}
+
 export function loadAddons() {
   if (loading) return loading
   loading = (async () => {
@@ -157,7 +176,7 @@ export function loadAddons() {
           const mod = await import(pathToFileURL(entry).href)
           if (typeof mod.default !== 'function') throw new Error('api/register.mjs must default-export a register function')
           // `await` so register() may be async without every addon having to be.
-          manifest = (await mod.default({ name, dir, repoRoot: REPO_ROOT })) || {}
+          manifest = (await mod.default(registerContext(name, dir))) || {}
         }
         loaded.push({ name, dir, description: manifest.description || '', manifest })
       } catch (e) {

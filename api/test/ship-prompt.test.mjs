@@ -41,7 +41,9 @@ process.env.VAULTS_FILE = path.join(process.env.VAULT_DIR, 'no-vaults.json')
 
 const { deliveryMode, buildShipPrompt, shipProtocolSection, resolveDefaultBranch, FALLBACK_BRANCH } =
   await import('../src/ship-prompt.mjs')
-const { reconcilePreamble, shipPromptFor, ATLAS_CONTROL_PREAMBLE } = await import('../src/agent-routes.mjs')
+const { reconcilePreamble, shipPromptFor, ATLAS_CONTROL_PREAMBLE, CARD_PREAMBLE } = await import(
+  '../src/agent-routes.mjs',
+)
 
 const MODES = ['self-deploy', 'manual', 'merge']
 
@@ -156,6 +158,15 @@ test('the orchestrator preamble points at ship_agent, not at merge_pr, for landi
   assert.match(ship, /`ship_agent` is the way/)
   assert.match(ship, /`queue_agent`\/`prompt_agent` is the fallback, not the default/)
   assert.match(ship, /refuses a stale\/conflicted\/blocked\/red\/pending one/)
+})
+
+test('the project-card preamble emits the exact marker the scanner looks for', () => {
+  // Producer half of the OTHER marker pair — NOW_MARKER in subagent-scan.mjs is
+  // the consumer (api/test/project-card-now.test.mjs). Change the prefix in one
+  // without the other and the card silently stops updating.
+  assert.match(CARD_PREAMBLE, /^ATLAS:NOW <one concise present-tense line/m)
+  // `goal:` is operator-owned; the agent is told so explicitly.
+  assert.match(CARD_PREAMBLE, /never emit a goal line/)
 })
 
 /* --- default-branch resolution ----------------------------------------- */

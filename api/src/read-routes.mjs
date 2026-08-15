@@ -28,6 +28,13 @@ const VAULT = process.env.VAULT_PATH || process.env.VAULT_DIR || '/vault'
 const DATA_DIR = process.env.DATA_DIR || path.join(VAULT, 'data')
 const WORKSPACE = process.env.WORKSPACE_DIR || '/workspace'
 
+/** The vault `listProjects()` reads the project cards out of. Exported so the
+ *  WRITE half (project-card.mjs, the `ATLAS:NOW` signal) can pin itself to the
+ *  exact same path: a card read from one file and written to another loses every
+ *  update in silence — the dashboard keeps rendering the stale `now:` while the
+ *  agent's line lands in a file nobody renders. One constant, both halves. */
+export const projectsVaultPath = () => VAULT
+
 // Machine-written scorecard/heatmap JSON (optional; e.g. scripts/refresh-github.mjs).
 const DATA_ALLOWLIST = new Set(['scorecard', 'heatmap'])
 const NOTE_FOLDERS = new Set(['Wiki', 'Tasks'])

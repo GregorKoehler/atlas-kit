@@ -135,8 +135,15 @@ function lastShipMarker(text) {
   }
   return found
 }
-// The newest ship marker in a transcript tail (assistant text only), or null.
-export function scanShipMarker(lines) {
+/* Walk a transcript tail newest-first and return what `pick` finds in the first
+ * ASSISTANT event that yields anything. `pick(text)` is applied to every text
+ * block of that event, latest-block-wins — so "the latest marker of the latest
+ * reply" holds within an event as well as across events.
+ *
+ * Shared by both end-of-run markers (ship state and the project-card NOW line)
+ * so the ONE thing they must agree on — assistant text only, never the user-side
+ * events the preamble itself rides in — cannot drift between two copies. */
+function scanAssistantText(lines, pick) {
   for (let i = lines.length - 1; i >= 0; i--) {
     const line = lines[i].trim()
     if (line[0] !== '{') continue
@@ -152,12 +159,44 @@ export function scanShipMarker(lines) {
     let found = null
     for (const b of content) {
       if (b && b.type === 'text' && typeof b.text === 'string') {
-        found = lastShipMarker(b.text) || found
+        found = pick(b.text) || found
       }
     }
     if (found) return found
   }
   return null
+}
+
+// The newest ship marker in a transcript tail (assistant text only), or null.
+export function scanShipMarker(lines) {
+  return scanAssistantText(lines, lastShipMarker)
+}
+
+/* ------------------------------------------------------------------ *
+ * The project-card "NOW" signal — the other end-of-run marker. CARD_PREAMBLE
+ * (agent-routes.mjs) asks a BOX-LOCAL dev agent to print `ATLAS:NOW <one line>`
+ * describing what the PROJECT is now about; the executor rewrites the matching
+ * project card's `now:` from the LATEST such line (project-card.mjs).
+ *
+ * It lives here beside SHIP_MARKER so the two marker regexes cannot drift apart.
+ * Unlike the ship markers it is NOT used by the bridge: a workstation agent's
+ * card write would have no vault to land in, so agent-bridge/server.mjs imports
+ * `scanShipMarker` only.
+ * ------------------------------------------------------------------ */
+const NOW_MARKER = /^[ \t]*ATLAS:NOW\b[ \t]*([^\n]*)$/gm
+function lastNowMarker(text) {
+  let found = null
+  NOW_MARKER.lastIndex = 0
+  let m
+  while ((m = NOW_MARKER.exec(text))) {
+    const v = (m[1] || '').trim()
+    if (v) found = v // a bare marker with no line carries no state — ignored
+  }
+  return found
+}
+// The newest `ATLAS:NOW` line in a transcript tail (assistant text only), or null.
+export function scanNowMarker(lines) {
+  return scanAssistantText(lines, lastNowMarker)
 }
 
 /* ------------------------------------------------------------------ *
