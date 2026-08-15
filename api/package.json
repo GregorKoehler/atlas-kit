@@ -3,9 +3,10 @@
   "private": true,
   "version": "0.1.0",
   "type": "module",
-  "description": "Atlas Kit backend — Express API: dev/knowledge agent runtime, vault read API, typed query, Kanban commit queue, MCP control surface.",
+  "description": "Atlas Kit backend \u2014 Express API: dev/knowledge agent runtime, vault read API, typed query, Kanban commit queue, MCP control surface.",
   "scripts": {
-    "start": "node --env-file=../.env src/server.mjs"
+    "start": "node --env-file=../.env src/server.mjs",
+    "test": "node --test --test-reporter=spec"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",

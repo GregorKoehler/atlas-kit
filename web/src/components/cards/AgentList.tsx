@@ -584,7 +584,7 @@ export function AgentList({
   const [task, setTask] = useDraft(`agent-task:${repo ?? 'global'}`)
   const [repoInput, setRepoInput] = useDraft('agent-repo')
   // Model/effort survive across spawns (a per-card preference, unlike the task).
-  const [model, setModel] = useState('opus')
+  const [model, setModel] = useState('sonnet')
   const [effort, setEffort] = useState('xhigh')
   // Files attached to the spawn prompt (mirrors a running agent's prompt box) —
   // folded into the agent's opening task so it can Read them on the first turn.
