@@ -1,0 +1,26 @@
+{
+  "data": {
+    "user": {
+      "contributionsCollection": {
+        "restrictedContributionsCount": 5,
+        "contributionCalendar": {
+          "totalContributions": 20,
+          "weeks": [
+            {
+              "contributionDays": [
+                { "date": "2026-01-01", "contributionCount": 3 },
+                { "date": "2026-01-02", "contributionCount": 0 }
+              ]
+            },
+            {
+              "contributionDays": [
+                { "date": "2026-01-03", "contributionCount": 7 },
+                { "date": "2026-01-04", "contributionCount": 10 }
+              ]
+            }
+          ]
+        }
+      }
+    }
+  }
+}

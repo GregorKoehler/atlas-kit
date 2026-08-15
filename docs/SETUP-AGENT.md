@@ -108,7 +108,17 @@ The checks below are SETUP.md's "Verifying it works" list, distributed per step.
   later?").
 - **Step 9 — cron.** `install -m 644 infra/atlas-kit.cron /etc/cron.d/atlas-kit`.
   **Verify:** the file exists and lists the watchdog + `refresh-atlas.mjs` +
-  `clear-done.mjs` lines.
+  `clear-done.mjs` + `refresh-github.mjs` lines.
+  **Then offer the GitHub Scorecard stat** (optional, one line of config): read the login
+  `gh` is already authenticated as with `gh api user --jq .login`, **show it and ask** —
+  it goes into a config file and onto their dashboard, so never write it unasked, and take
+  a no (the script is a clean no-op while `ATLAS_GITHUB_USER` is blank: no tile, no error).
+  On a yes, set `ATLAS_GITHUB_USER=<login>` in `.env`, `scripts/serve.sh restart`, and run
+  `node --env-file=.env scripts/refresh-github.mjs` once for the first fill. Auth is their
+  own `gh` login — never ask for or write a token. **Verify:** `curl -s
+  http://127.0.0.1:8080/api/data/scorecard` includes a `GitHub Contributions (1y)` stat,
+  and the Scorecard shows a **GitHub** group. ⚠️ Cron runs as **root**: if `gh auth status`
+  fails for root, say so — the cron will no-op until they `gh auth login` there.
 - **Step 10 — workstation bridge** (only if chosen). Guide the operator through
   `scripts/install-agent-bridge.sh` on the **workstation** (it's a separate machine —
   you can't run it from here), then set `AGENT_BRIDGE_URL` (the workstation tailnet IP)

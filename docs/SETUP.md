@@ -191,7 +191,23 @@ this) to `/etc/cron.d/atlas-kit`:
 - **`refresh-atlas.mjs`** — git-pulls the vault checkout so the Kanban + graph auto-update
   as your phone/agents commit (every 15 min),
 - **`clear-done.mjs`** — archives completed tasks off the board into `Tasks/.archive/`
-  (daily; kept in git history).
+  (daily; kept in git history),
+- **`refresh-github.mjs`** — your GitHub contribution counts → the Scorecard's **GitHub**
+  group + its one-year sparkline (twice an hour).
+
+The last one is opt-in and needs one line of config — your GitHub login:
+
+```bash
+gh api user --jq .login                       # the login gh is authenticated as
+echo 'ATLAS_GITHUB_USER=<that-login>' >> .env # then: scripts/serve.sh restart
+node --env-file=.env scripts/refresh-github.mjs   # first fill, ~1s
+```
+
+Auth is the **`gh` CLI on your own login** — no token in `.env` — which is also why
+private-repo contributions are counted. Run `gh auth login` as the user the cron runs as
+(root in the reference setup). Leave `ATLAS_GITHUB_USER` blank and the script is a clean
+no-op: no GitHub tile on the Scorecard, no error. The files land in `DATA_DIR`
+(`<VAULT_PATH>/data` by default).
 
 ## 10. (Optional) workstation bridge for remote dev agents
 

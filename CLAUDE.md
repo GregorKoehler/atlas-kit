@@ -23,7 +23,7 @@ api/      Express API: the agent runtime (agent-local.mjs), routes, the MCP serv
 addons/   OPTIONAL, env-gated features (see docs/ADDONS.md). Core must run
           byte-identical with zero addons enabled.
 scripts/  serve.sh (tmux service manager), refresh-atlas, clear-done, seed-self-card,
-          provisioning
+          refresh-github, provisioning
 infra/    Caddyfile.example, cloudflared-config.example.yml, atlas-kit.cron
 agent-bridge/  optional host-native bridge to run agents in remote dev containers
 ```

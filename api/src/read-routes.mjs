@@ -1022,27 +1022,32 @@ export function readRouter() {
     ),
   )
 
-  // Optional: refresh the GitHub-contributions scorecard/heatmap JSON. A fixed,
-  // parameterless action (NOT arbitrary exec). Cooldown-guarded; only runs with a
-  // real token from env/.env. No-op unless you keep scripts/refresh-github.mjs.
+  // Optional: refresh the GitHub-contributions scorecard/heatmap JSON on open. A
+  // fixed, parameterless action (NOT arbitrary exec), cooldown-guarded. Gated on
+  // the same one setting the script itself reads — ATLAS_GITHUB_USER, from env or
+  // .env (node's --env-file doesn't reliably reach process.env here, same as
+  // githubToken() above). Unconfigured ⇒ skipped, never an error: the script's own
+  // no-op would be silent, and this way the dashboard can say which it was.
   r.post('/api/refresh/github', async (_req, res) => {
     const COOLDOWN_MS = 3 * 60 * 1000
     if (Date.now() - lastGithubRefreshAt < COOLDOWN_MS) return res.json({ ok: true, skipped: 'cooldown' })
     lastGithubRefreshAt = Date.now()
-    let token = process.env.GITHUB_TOKEN
-    if (!token) {
+    let login = process.env.ATLAS_GITHUB_USER
+    if (!login) {
       try {
-        const m = fs.readFileSync(path.join(WORKSPACE, '.env'), 'utf-8').match(/^GITHUB_TOKEN=(.+)$/m)
-        if (m) token = m[1].trim().replace(/^["']|["']$/g, '')
+        const m = fs.readFileSync(path.join(WORKSPACE, '.env'), 'utf-8').match(/^ATLAS_GITHUB_USER=(.+)$/m)
+        if (m) login = m[1].trim().replace(/^["']|["']$/g, '')
       } catch {
         /* ignore */
       }
     }
-    if (!token) return res.json({ ok: false, skipped: 'no token' })
+    if (!login) return res.json({ ok: false, skipped: 'no ATLAS_GITHUB_USER' })
     try {
+      // Auth is the `gh` CLI on the operator's own login (see the script) — no
+      // token is passed in, so nothing secret crosses this boundary.
       await execFileAsync('node', ['scripts/refresh-github.mjs'], {
         cwd: WORKSPACE,
-        env: { ...process.env, GITHUB_TOKEN: token },
+        env: { ...process.env, ATLAS_GITHUB_USER: login },
         timeout: 20000,
       })
       res.json({ ok: true })
