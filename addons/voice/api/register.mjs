@@ -23,17 +23,9 @@
  * rather than failing silently.
  * ------------------------------------------------------------------ */
 import crypto from 'node:crypto'
-import { createRequire } from 'node:module'
 import { model, limits, ttsCmd, sttCmd } from './config.mjs'
 import { EVENTS, recap, budgetState } from './summarize.mjs'
 import { ttsStatus, sttStatus, speak, transcribe } from './engine.mjs'
-
-/* `express` lives in api/node_modules, and node resolves a bare specifier from
- * the IMPORTING file's directory — which for an addon walks up to a repo root
- * that has no node_modules. So it is required from core's own tree: an addon may
- * use what core already installed, and still must not add a dependency of its
- * own (docs/ADDONS.md). */
-const express = createRequire(new URL('../../../api/src/', import.meta.url))('express')
 
 function bearerAuth(req, res, next) {
   const token = process.env.DASHBOARD_BEARER_TOKEN || ''
@@ -46,8 +38,12 @@ function bearerAuth(req, res, next) {
   next()
 }
 
-export default function register() {
-  const routes = express.Router()
+/* `express` and `Router` are HANDED IN by the loader — a bare `import 'express'`
+ * does not resolve from inside an addon (docs/ADDONS.md), and taking the
+ * injected pair is the form that needs no knowledge of where core keeps its
+ * node_modules. `express` itself is needed here for the body parsers. */
+export default function register({ express, Router }) {
+  const routes = Router()
 
   /* The tail arrives from the dashboard rather than being read here: the client
    * already holds every session's `lastOutput` from GET /api/agents, so posting

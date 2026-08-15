@@ -27,8 +27,11 @@ import os from 'node:os'
 import path from 'node:path'
 import { createRequire } from 'node:module'
 
-// Same resolution the addon itself uses — express lives in core's node_modules.
+/* The addon takes `express`/`Router` from the loader (docs/ADDONS.md), so the
+ * test plays loader: it resolves express out of core's tree once and hands the
+ * same pair in. */
 const express = createRequire(new URL('../../../api/src/', import.meta.url))('express')
+const deps = { name: 'voice', dir: '', repoRoot: '', express, Router: (o) => express.Router(o) }
 
 const bin = fs.mkdtempSync(path.join(os.tmpdir(), 'atlas-kit-voice-reg-'))
 const stub = (name, body) => fs.writeFileSync(path.join(bin, name), `#!/bin/sh\n${body}\n`, { mode: 0o755 })
@@ -45,7 +48,7 @@ process.env.ATLAS_VOICE_MIN_INTERVAL_MS = '60000'
 process.env.ATLAS_VOICE_DAILY_BUDGET = '50'
 
 const registerAddon = (await import('../api/register.mjs')).default
-const manifest = registerAddon()
+const manifest = registerAddon(deps)
 
 const app = express()
 app.use(manifest.routes)
@@ -146,6 +149,6 @@ test('the manifest declares routes + status and NOTHING that touches a core answ
 
   // A status hook must never throw into GET /api/addons, whatever the env says.
   process.env.ATLAS_VOICE_TTS_CMD = 'not-installed-anywhere'
-  assert.equal(registerAddon().status().tts.available, false)
+  assert.equal(registerAddon(deps).status().tts.available, false)
   process.env.ATLAS_VOICE_TTS_CMD = ''
 })
