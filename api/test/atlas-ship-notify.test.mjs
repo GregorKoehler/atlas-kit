@@ -53,6 +53,21 @@ test('transition into ready fires one note for the parent', () => {
   assert.match(notes[0].text, /READY TO SHIP/)
 })
 
+test('every note is stamped with the OBSERVATION time, from the injected clock', () => {
+  // A note can sit in a busy chat's queue for hours (measured: ~7 h), and the
+  // reader is entitled to know when it was true. Taken here, at the diff, so it
+  // can never be an estimate made later at delivery.
+  const at = Date.parse('2027-01-15T09:00:00Z')
+  const sessions = [ORCH, { id: 'c1', kind: 'dev', repo: 'demo', task: 'fix bug', shipState: 'ready' }]
+  const { notes } = diffShipNotes(new Map([['c1', []]]), sessions, parentOf({ c1: 'orch' }), () => undefined, at)
+  assert.equal(notes[0].observedAt, at)
+  // Defaulted (nothing passes it today) rather than optional: an unstamped note
+  // cannot disclose its age, which is the whole point.
+  const now = diffShipNotes(new Map([['c1', []]]), sessions, parentOf({ c1: 'orch' })).notes[0].observedAt
+  assert.equal(typeof now, 'number')
+  assert.ok(Math.abs(Date.now() - now) < 5000)
+})
+
 test('ready → shipped fires the shipped note (with shipInfo)', () => {
   const sessions = [ORCH, { id: 'c1', kind: 'dev', repo: 'demo', task: 't', shipState: 'shipped', shipInfo: 'an earlier change abc123' }]
   const prev = new Map([['c1', ['ready']]])

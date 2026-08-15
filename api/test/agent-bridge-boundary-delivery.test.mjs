@@ -61,12 +61,15 @@ test('queuePrompt keeps `kind` and stamps the enqueue time', () => {
 /* --- 2. one decision, not two ---------------------------------------- */
 
 test('flushQueued uses the SHARED decision, not a bridge-local copy', () => {
-  assert.match(src, /import \{ decideDelivery[^}]*\} from '\.\.\/api\/src\/queue-delivery\.mjs'/, 'one gate source, not a copy')
-  assert.match(flushQueued, /const dec = decideDelivery\(\{/)
-  assert.match(flushQueued, /kind: q\.kind/)
+  assert.match(src, /import \{ selectDelivery[^}]*\} from '\.\.\/api\/src\/queue-delivery\.mjs'/, 'one gate source, not a copy')
+  // The scan (which entry may go out, given the pane) is the shared module's
+  // too — a bridge that kept picking `queued[0]` would keep the head-of-line
+  // block the box no longer has.
+  assert.match(flushQueued, /const sel = selectDelivery\(\{/)
+  assert.match(flushQueued, /queue: s\.queued/)
   assert.match(flushQueued, /busy: isBusy\(pane\)/)
   assert.match(flushQueued, /menu: !!menuKindOf\(pane\)/)
-  assert.match(flushQueued, /if \(!dec\.deliver\) continue/)
+  assert.match(flushQueued, /if \(!sel\.pick\) continue/)
   // A bridge-side taxonomy would be exactly the drift the shared module prevents.
   assert.doesNotMatch(srcCode, /BOUNDARY_KINDS/, 'the bridge must not classify kinds itself')
 })
@@ -111,13 +114,17 @@ test('the queue-flush audit line carries waitMs / via / kind, matching the box',
 
 /* --- 4. what must not regress ---------------------------------------- */
 
-test('flushQueued never interrupts, and stays FIFO one-per-tick', () => {
+test('flushQueued never interrupts, and stays one delivery per tick', () => {
   // ⚠️ Escape marks a session interrupted/lost . Delivery is a plain
   // send-keys; only the operator's explicit "send now" may interrupt.
   assert.doesNotMatch(flushQueued, /Escape|interrupt\(/)
-  assert.match(flushQueued, /const q = s\.queued\[0\]/, 'the FIFO head only')
+  assert.match(flushQueued, /const q = sel\.pick\.entries\[0\]/, 'the entry the shared scan picked')
   assert.equal((flushQueued.match(/await deliver\(/g) || []).length, 1, 'one delivery per session per tick')
-  assert.match(flushQueued, /s\.queued\.shift\(\)/)
+  // ⚠️ Removal is by IDENTITY, not `shift()`: the picked entry need not be the
+  // head any more (a boundary-eligible message may overtake an idle-only one),
+  // and shifting would drop somebody else's message unread.
+  assert.match(flushQueued, /s\.queued\.filter\(\(e\) => !picked\.has\(e\)\)/)
+  assert.doesNotMatch(code(flushQueued), /s\.queued\.shift\(\)/)
 })
 
 test('the menu guard still gates every bridge delivery', () => {

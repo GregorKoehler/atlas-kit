@@ -89,9 +89,13 @@ export const MAX_NOTES_PER_CHILD = 3
  * @param sessions  box-local + remote sessions (publicView shape: id, kind, vault, repo, task, shipState, shipInfo)
  * @param parentOf  (childId) => parentId | undefined     the spawn-lineage lookup
  * @param mergedBy  (childId) => orchestratorId | undefined  who merged that child's PR
- * @returns { notes: Array<{parentId, childId, state, text}>, next: Map, changed: boolean, capped: string[], suppressed: Array<{parentId, childId, state}> }
+ * @param now       ms — the OBSERVATION time stamped onto each note. A note can
+ *                  sit in a busy chat's queue for hours (measured: ~7 h), and
+ *                  the reader needs to be told; taken from the real clock here,
+ *                  at the moment the state was diffed, never estimated later.
+ * @returns { notes: Array<{parentId, childId, state, text, observedAt}>, next: Map, changed: boolean, capped: string[], suppressed: Array<{parentId, childId, state}> }
  */
-export function diffShipNotes(prev, sessions, parentOf, mergedBy = () => undefined) {
+export function diffShipNotes(prev, sessions, parentOf, mergedBy = () => undefined, now = Date.now()) {
   const byId = new Map(sessions.map((s) => [s.id, s]))
   const next = new Map(prev)
   const notes = []
@@ -133,7 +137,7 @@ export function diffShipNotes(prev, sessions, parentOf, mergedBy = () => undefin
       changed = true
       continue
     }
-    notes.push({ parentId, childId: s.id, state, text: noteText(s, state) })
+    notes.push({ parentId, childId: s.id, state, text: noteText(s, state), observedAt: now })
     next.set(s.id, [...seen, state])
     changed = true
   }
