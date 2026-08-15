@@ -95,6 +95,16 @@ export function pickTarget(projects, name) {
   }
 }
 
+/** Why this `repo_path` may not be run, or null. The value comes from a vault
+ *  page — operator-written, but the vault is a file tree several writers touch,
+ *  and the path is INTERPOLATED INTO A SHELL SCRIPT below. Reads are safe either
+ *  way (execFile, no shell), so only the launch checks this. */
+export function repoPathProblem(repoPath) {
+  if (!path.isAbsolute(repoPath)) return 'repo_path must be an absolute path on this box'
+  if (/["'`$\\\n\r]/.test(repoPath)) return 'repo_path contains characters that cannot be used in a shell command'
+  return null
+}
+
 /* --- deploy state --------------------------------------------------------- */
 
 /** The last known state of this project's deploy, or null (never deployed, or
@@ -303,6 +313,8 @@ export function deployRouter(bearerAuth) {
     const picked = pickTarget(listProjects(), req.body?.project || req.query.project)
     if (picked.error) return res.status(picked.status).json({ ok: false, error: picked.error })
     const { name, repoPath } = picked.target
+    const bad = repoPathProblem(repoPath)
+    if (bad) return res.status(400).json({ ok: false, error: `${name}: ${bad}` })
     if (isInFlight(readDeployState(name)))
       return res.status(409).json({ ok: false, error: 'a redeploy is already in progress' })
     const state = await repoState(repoPath)

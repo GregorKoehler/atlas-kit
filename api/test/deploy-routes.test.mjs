@@ -27,6 +27,7 @@ process.env.ATLAS_DEPLOY_STATE_DIR = STATE_DIR
 const {
   deployTargets,
   pickTarget,
+  repoPathProblem,
   isInFlight,
   readDeployState,
   deploySlug,
@@ -75,6 +76,15 @@ test('a named project resolves by name; an unknown/ineligible one is a 404', () 
   // Named but not opted in — refused with the same reason, never silently
   // falling back to the other card (that would restart the wrong app).
   assert.equal(pickTarget([KIT, project('Docs')], 'Docs').status, 404)
+})
+
+test('a repo_path that cannot go into a shell command is refused, not escaped', () => {
+  assert.equal(repoPathProblem('/srv/atlas-kit'), null)
+  assert.equal(repoPathProblem('/srv/my kit'), null, 'a space is fine — the script quotes the path')
+  assert.match(repoPathProblem('srv/atlas-kit'), /absolute/)
+  assert.match(repoPathProblem('/srv/kit"; rm -rf /'), /shell command/)
+  assert.match(repoPathProblem('/srv/kit$(id)'), /shell command/)
+  assert.match(repoPathProblem('/srv/kit\nrm -rf /'), /shell command/)
 })
 
 test('single-flight: a fresh `deploying` blocks, a stale one does not', () => {
