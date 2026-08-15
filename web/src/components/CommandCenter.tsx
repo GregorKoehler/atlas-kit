@@ -5,6 +5,7 @@ import { SearchBar } from './SearchBar'
 import { Scorecard } from './cards/Scorecard'
 import { KnowledgeAgents } from './cards/KnowledgeAgents'
 import { News } from './cards/News'
+import { Voice } from './cards/Voice'
 import { Projects } from './cards/Projects'
 import { NoteReader } from './NoteReader'
 import { useNoteReader } from '../lib/useNoteReader'
@@ -56,6 +57,9 @@ function CommandCenterInner() {
         {/* Renders only where the optional news-ingest addon is enabled — the
             card asks GET /api/addons and returns null otherwise. */}
         <News className="col-span-12" onOpenWiki={openPath} />
+        {/* Same runtime gate, for the optional voice addon: spoken recaps of
+            fleet events. Null wherever the addon is not enabled. */}
+        <Voice className="col-span-12" />
         <Projects />
       </motion.div>
 

@@ -168,7 +168,7 @@ flowchart TB
 | **Knowledge agents** | Chat over the vault. On the vault keyed `atlas` the chat becomes the **orchestrator** and can drive the fleet. Each dev agent also gets a **paired worker** that writes the run's insights back at close — the dev agent itself never writes the Atlas. | `api/src/agent-local.mjs`, `agent-routes.mjs` |
 | **agent-bridge** | A dependency-free host-native executor on another machine, reached over Tailscale with a bearer, driving dev containers via `docker exec`. Its agents get peer mail and read-only Atlas queries relayed over the same channel — no new listening socket. | `agent-bridge/` |
 | **Claude Code skills** | Four operator workflows shipped with the repo: `fleet-status`, `ship-protocol`, `deep-research`, `update-config`. | `.claude/skills/` |
-| **Optional addons** | Env-gated directories with an `api/register.mjs` manifest. Three ship today: `semantic-search`, `instagram-ingest`, `news-ingest`. Zero enabled = byte-identical to a kit without the framework. | `addons/` |
+| **Optional addons** | Env-gated directories with an `api/register.mjs` manifest. Four ship today: `semantic-search`, `instagram-ingest`, `news-ingest`, `voice`. Zero enabled = byte-identical to a kit without the framework. | `addons/` |
 | **scripts / infra / CI** | `serve.sh` runs three tmux windows (Express, Caddy, the MCP HTTP server) with a `--env-file` and no inherited API key; cron does a 15-min vault refresh, a daily done-clear and a 2-min health watchdog. CI globs every `*.test.mjs` under `api/test` and `addons/*/test` and subtracts an explicit opt-out list, so **adding a test file is enough to gate it**. | `scripts/`, `infra/`, `.github/workflows/ci.yml` |
 
 ### The flows
@@ -331,16 +331,24 @@ Shipped today:
   `Wiki/News-Digest.md`, all in one commit. Bounded by design — a per-run item cap is what
   keeps a busy feed list from becoming a busy bill — and it ships an example feed file, not
   a reading list.
+- **[`voice`](addons/voice/README.md)** — hear the fleet, and talk to it. A runtime-gated
+  *Voice* card turns fleet events (a turn ending, `ATLAS:READY-TO-SHIP`, a merge) into a
+  line it reads aloud, with an optional `claude -p` recap of the agent's terminal tail
+  behind bounded guards; `MicField` becomes a live mic in every text field it already
+  wraps. The **browser** speaks and listens by default — no download, no key, no server
+  call — and an on-box TTS/STT *command* (piper, espeak-ng, whisper.cpp) can take over.
+  Its README is blunt about what that trade costs and where the audio goes.
 
 See **[docs/ADDONS.md](docs/ADDONS.md)** for the model, the hook API and how to write one.
 
 ## What this kit is **not**
 
 Deliberately out of scope (stripped from the source): mail/calendar,
-recipes + shopping, capture/dictation/voice, Drive/Gmail tooling, daily briefings, and
+recipes + shopping, capture, Drive/Gmail tooling, daily briefings, and
 every card not named above. Smaller is better — this is a starter kit, not the whole
-command center. (RSS/Atom feeds are the one exception, and they are opt-in: nothing polls
-anything until you enable the `news-ingest` addon and write your own feed list.)
+command center. (RSS/Atom feeds and voice/dictation are the exceptions, and both are
+opt-in addons: nothing polls a feed until you enable `news-ingest` and write your own
+feed list, and nothing speaks or opens a mic until you enable `voice`.)
 
 ## License
 
