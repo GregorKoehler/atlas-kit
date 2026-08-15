@@ -27,7 +27,7 @@ import path from 'node:path'
 import { randomUUID, randomBytes } from 'node:crypto'
 import { execFile } from 'node:child_process'
 import {
-  projectKey, tailLines, scanContextTokens, scanShipMarker,
+  projectKey, tailLines, scanContextTokens, scanShipMarker, scanNowMarker,
   collectSubAgents, mergeSubAgentLog,
   collectBackgroundJobs, mergeBackgroundJobLog,
 } from './subagent-scan.mjs'
@@ -40,6 +40,7 @@ import { MSG_WRAPPER_SRC } from './agent-msg-wrapper.mjs'
 import { parseChoiceMenu, currentHighlight, driveSelect } from './menu.mjs'
 import { resolveVault, defaultVaultKey, isTypedVault } from './vaults.mjs'
 import { enqueueAtlasMerge } from './atlas-commit-queue.mjs'
+import { updateProjectNow } from './project-card.mjs'
 import { trackPhase, recordLifetime, revivePhase, aggregate, PHASE_HOLD_MS } from './agent-timings.mjs'
 import {
   S as LC, ACT, decide, applyTransition, migrateSession, mirrorState,
@@ -557,7 +558,10 @@ export function lastSpawnMap() {
 }
 // Exported so the REMOTE spawn path (agent-routes.mjs) writes to the same audit
 // log a box-local spawn does — a bridge agent's spawn and how much evidence it
-// left with must be reconstructable from one file, not two.
+// left with must be reconstructable from one file, not two. The routes layer
+// also appends the TEARDOWN-SCOPE trail here (who tore down whose child, and
+// whether they used the `scope:"any"` override), for the same reason: one
+// append-only file, not a second audit log beside it.
 export function audit(entry) {
   try {
     fs.mkdirSync(STATE_DIR, { recursive: true })
@@ -767,6 +771,7 @@ function readTranscript(s) {
       sub: collectSubAgents(lines),
       jobs: [collectBackgroundJobs(lines), ...subAgentJobSnaps(file)],
       ship: scanShipMarker(lines),
+      now: scanNowMarker(lines),
     }
   } catch {
     return null
@@ -856,6 +861,29 @@ function generateMicrosFor(s, pending) {
 // Ship-state markers (ATLAS:READY-TO-SHIP / ATLAS:SHIPPED) are scanned from the
 // on-disk transcript by scanShipMarker in subagent-scan.mjs — shared with the
 // bridge so workstation dev agents carry the same shipState (see readTranscript).
+
+// The OTHER end-of-run marker: CARD_PREAMBLE (box-local dev agents only) asks the
+// agent to print `ATLAS:NOW <one line>` saying what the PROJECT is now about;
+// scanNowMarker takes the LATEST one and we rewrite the matching card's `now:`
+// (goal stays operator-owned). Applied OFF the poll path — the write goes through
+// the serial vault commit queue (pull/rebase/commit/push takes about a second)
+// and the GET must stay fast. `applyingCardNow` keeps one apply in flight per
+// session; `s.cardNow` records the applied value so the same line is not
+// re-applied on every poll — recorded even when the apply was a NO-OP (no bound
+// project page, card already current), so a session can never loop on it.
+const applyingCardNow = new Set()
+async function applyCardNow(s, value) {
+  try {
+    const r = await updateProjectNow(s.repo, value)
+    if (r && r.warning) console.error(`[agent-local] card "now" (${s.repo}):`, r.warning)
+  } catch (e) {
+    console.error('[agent-local] card "now" update failed:', e.message)
+  } finally {
+    s.cardNow = value
+    applyingCardNow.delete(s.id)
+    persist()
+  }
+}
 
 /* Live stats — a small display the agent publishes ITSELF while it works (see
  * STATS_PREAMBLE in agent-routes.mjs): the agent (typically the long-running
@@ -1515,6 +1543,15 @@ export async function listSessions() {
       // so the old merged verdict no longer describes the branch — drop it and
       // let sampleMerged decide again.
       delete s.shipMerged
+    }
+    // End-of-run "Now" signal → rewrite the project card's `now:`. Fire-and-
+    // forget so the poll stays fast; guarded so each value applies once. DEV
+    // agents only: a knowledge chat's `repo` is the vault key and an Atlas
+    // worker's is the vault too — neither has a project card to speak for.
+    const cardNow = (s.kind || 'dev') === 'dev' && transcript && transcript.now
+    if (cardNow && cardNow !== s.cardNow && !applyingCardNow.has(s.id)) {
+      applyingCardNow.add(s.id)
+      applyCardNow(s, cardNow)
     }
     out.push(
       publicView(s, status, tail || s.lastSeen || '', menuKind, transcript, appUp, menuChoice, listDownloads(s.id)),

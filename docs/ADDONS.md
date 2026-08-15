@@ -76,7 +76,7 @@ Runtime, and why it does).
 manifest. Every key is optional; returning `{}` is a legal addon.
 
 ```js
-export default function register({ name, dir, repoRoot }) {
+export default function register({ name, dir, repoRoot, express, Router }) {
   return {
     description,     // one line, shown by GET /api/addons
     routes,          // an Express Router, mounted on the app AFTER core's
@@ -104,10 +104,17 @@ Mounted **after** every core router, so an addon can extend the API but never
 shadow a core route. It gets **no bearer gate**: core's write routes are behind
 `DASHBOARD_BEARER_TOKEN` and an addon that adds a write must gate it itself.
 Prefer read-only routes. (`instagram-ingest/api/register.mjs` is the worked
-example of both halves: the constant-time bearer check on its one write route,
-and how to get `express` at all — a bare `import 'express'` resolves from the
-importing file's directory, which for an addon walks up to a repo root with no
-`node_modules`, so it is `createRequire`'d out of core's tree.)
+example of the constant-time bearer check on its one write route.)
+
+**`express` is handed to you, not imported.** A bare `import 'express'` resolves
+from the importing file's directory, and `addons/<name>/api/` walks up to a repo
+root with no `node_modules` — so it does not resolve from inside an addon at
+all. Core already has express loaded and passes it in: `const routes = Router()`
+is the whole of it, and take `express` itself when you also need
+`express.json()`. Addons written before this seam `createRequire` express out of
+core's tree instead; that still works and none of them has to change, but a new
+addon should take the injected one — it is the only form that needs no knowledge
+of where core keeps its `node_modules`.
 
 ### `mcpTools` — read-only tools
 
@@ -231,4 +238,5 @@ done-clear. Two separate files so they can never clobber each other.
 |---|---|---|
 | [`semantic-search`](../addons/semantic-search/README.md) | Dense/vector retrieval as a second search leg (EmbeddingGemma-300M ONNX, section-chunk index, 5-min sweep), plus an off-by-default dense leg on the spawn-evidence block | ~1.4 GB disk out of tree, ~660 MB resident while warm, ~35 MB of vectors per ~11k chunks |
 | [`instagram-ingest`](../addons/instagram-ingest/README.md) | `POST /api/ingest/instagram` + a CLI + a Claude Code skill: one post or reel → a `Wiki/Sources/` page (caption verbatim, stills, a `claude -p` read), through the commit queue, with a persistent ingest log | `yt-dlp` (~30 MB out of tree) and **your own** Instagram cookies; the stills it commits are permanent git blobs. Nothing runs unless you call it |
+| [`voice`](../addons/voice/README.md) | Spoken recaps of fleet events (a runtime-gated Voice card) and dictation in every `MicField` — the browser speaks and listens by default; an on-box TTS/STT **command** can take over | Nothing for the default path (no download, no key, no server call). A recap is one `claude -p` call, guarded to 1/agent/minute and 100/day fleet-wide; an optional on-box engine is ~5 MB (espeak-ng) to ~310 MB (piper + a voice) out of tree |
 | [`news-ingest`](../addons/news-ingest/README.md) | An hourly RSS/Atom sweep: every unseen item → a `Wiki/Sources/` page (feed text verbatim + a `claude -p` summary) and a rolling digest page, in one commit. `GET /api/news` + a runtime-gated News card, a bearer-gated manual sweep, a CLI and a skill | Your own feed list (`feeds.json`, gitignored) and one `claude -p` call per NEW item — capped per run (12) and per feed (5), so the cost is bounded by the caps, not by how loud your feeds are |

@@ -204,27 +204,50 @@ test('every agent kind is told where to drop a download', () => {
   assert.ok(uses.length >= 3, `DOWNLOADS_PREAMBLE must reach all three preamble stacks (found ${uses.length})`)
 })
 
-test('the shared chip component never hands the PWA a bare navigating anchor', () => {
+test('THE INVARIANT: no tap in the shared chip component can navigate the app away', () => {
   const s = src('web/src/components/AgentDownloads.tsx')
   // ONE hand-off for every presentation — the strip AND the full-screen sheet.
-  // The previewable/non-previewable split is the whole mobile rescue, so a
-  // second render site adding its own copy is the regression to catch.
-  assert.equal(
-    (s.match(/isPreviewable\(/g) ?? []).length,
-    1,
-    'exactly one previewability decision (DownloadItem) — a presentation must not fork it',
-  )
+  // The overlay/anchor split IS the mobile rescue, so a second render site
+  // adding its own copy is the regression to catch.
   assert.equal(
     (s.match(/<DownloadItem/g) ?? []).length,
     2,
     'the strip and the sheet both render their files through that one component',
   )
-  // An image opens the in-app overlay from a <button>, not a link.
-  assert.match(s, /isPreviewable\(file\.name\) \? \(\s*<button/, 'the previewable item is a button, not an href')
-  // Everything else keeps the app: `download` (honoured → real download) with a
-  // _blank fallback (standalone webview → browser overlay, which has a Done button).
-  assert.match(s, /target="_blank"/)
-  assert.match(s, /rel="noopener"/)
+  assert.match(s, /downloadRoute\(file, env\)/, 'and it takes the route from the ONE pure decision (lib/downloads.ts)')
+  assert.match(s, /plan\.tap === 'overlay' \? \(\s*<button/, 'the in-app item is a button, not an href')
+
+  // ⚠️ THE assertion this file exists for now. The first cut of the rescue left
+  // every non-image type on `download` + `target="_blank"`, betting that `_blank`
+  // opens a dismissible browser overlay; on a real installed PWA an .html and a
+  // .txt each replaced the whole app instead. A new browsing context IS a
+  // top-level navigation of the standalone webview, so no `target` may come back.
+  // (Comments stripped first — the file EXPLAINS `target="_blank"` at length,
+  // which is the point; what must not come back is the attribute itself.)
+  const code = s.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '')
+  assert.ok(!/target=/.test(code), 'no anchor in this file may open a new browsing context')
+  // …and every anchor that survives is a real download, reached only where the
+  // attribute is honoured (downloadRoute: `downloadHonoured && !standalone`).
+  for (const m of code.matchAll(/<a\b/g)) {
+    assert.match(
+      code.slice(m.index, m.index + 400),
+      /download=/,
+      `a bare navigating <a> at index ${m.index} — every anchor here must carry \`download\``,
+    )
+  }
+
+  // The HTML preview renders agent-authored (i.e. untrusted) markup. Scripts may
+  // run; reaching the dashboard's own origin and storage may not, and the absent
+  // allow-top-navigation is what keeps the invariant above structural.
+  assert.match(code, /sandbox="allow-scripts"/, 'the HTML preview is sandboxed')
+  assert.ok(!code.includes('allow-same-origin'), 'NEVER together with allow-same-origin')
+  assert.ok(!code.includes('allow-top-navigation') && !code.includes('allow-popups'))
+
+  // The save route: the share sheet needs the tap's transient activation, so the
+  // blob is prefetched when the overlay OPENS and the handler calls share() with
+  // no await in front of it.
+  assert.match(s, /navigator\s*\.share\(\{ files: \[shareFile\] \}\)/, 'share() takes an already-fetched File')
+  assert.match(s, /name === 'AbortError'\) return/, 'a dismissed share sheet is normal, never an error')
 })
 
 test('the preview overlay AND the sheet close on all FOUR routes, on ONE history entry', () => {
@@ -246,7 +269,10 @@ test('the preview overlay AND the sheet close on all FOUR routes, on ONE history
   assert.match(s, /className="dlsheet-backdrop" onClick=/, 'backdrop tap (sheet)')
   assert.match(s, /aria-label="close preview"/, 'the ✕ control (preview)')
   assert.match(s, /className="dlsheet__close"/, 'the ✕ control (sheet)')
-  assert.match(s, /download=\{preview\.name\}/, 'and an explicit Save that performs the real download')
+  // …and an explicit Save, whichever route this browser has: the share sheet
+  // where it exists, the plain download where `download` is honoured.
+  assert.match(s, /plan\.save === 'share' \? \(/, 'the share-sheet Save')
+  assert.match(s, /href=\{url\} download=\{file\.name\}/, 'the real-download Save')
 })
 
 test('the sheet flag is reset with the files — a NEW download must not re-open it unprompted', () => {

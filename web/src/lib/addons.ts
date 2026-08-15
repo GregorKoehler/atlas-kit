@@ -15,8 +15,21 @@ import { fetchAddons, type AddonInfo, type AddonsView } from './api'
 
 const POLL_MS = 5 * 60 * 1000
 
+/* One answer serves every caller in the window. This started as one call per
+ * card; MicField made it one per TEXT FIELD, and a Kanban with its new-task
+ * fields open would otherwise fire half a dozen identical requests through the
+ * tunnel on mount. Each subscriber keeps its own timer (they drift apart), so
+ * the cache is a TTL rather than a shared loop — half the poll interval, which
+ * collapses the mount storm without ever serving an answer older than one cycle. */
+let cached: { at: number; view: Promise<AddonsView | null> } | null = null
+function fetchAddonsShared(): Promise<AddonsView | null> {
+  const now = Date.now()
+  if (!cached || now - cached.at > POLL_MS / 2) cached = { at: now, view: fetchAddons() }
+  return cached.view
+}
+
 export function useAddons() {
-  const { data } = useData<AddonsView>(fetchAddons, POLL_MS)
+  const { data } = useData<AddonsView>(fetchAddonsShared, POLL_MS)
   const list = data?.addons ?? []
   return {
     /** False until the first answer — callers must not read "not yet loaded"

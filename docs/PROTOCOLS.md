@@ -214,7 +214,28 @@ re-checked, aged and (for the observational ones) batched at delivery —
 once its graceful close finishes. This is **irreversible** from inside the runtime —
 there is no undo once the branch is gone.
 
-Run it only when **all four** hold:
+**Gate 0 — is it even yours?** Checked *before* ship state, and the only one the
+runtime enforces itself. `POST /api/agents/{kill,cleanup}` accept an optional `by` (the
+calling chat's session id, stamped by the MCP `kill_agent`/`cleanup_agent` tools from
+`ATLAS_SESSION`) and refuse with **403** when `by` is not the id that spawned the target —
+`ownsChild()` in `agent-routes.mjs`, deliberately *narrower* than the message bus's
+`messageAllowed()`: **own child only**, no parent and no siblings. A message is data the
+recipient can weigh and ignore; a teardown is unilateral and irreversible.
+
+- The refusal **names the owning chat**, because "not allowed" is useless to an
+  orchestrator that has to explain itself to the operator.
+- A session with **no** spawn parent is the **operator's** (started from the dashboard) —
+  refused to a chat by default.
+- **`by` absent means allowed.** The dashboard's ✕/⌦ send only `{id}`: that is the operator
+  acting directly, and this scoping binds *agents*, never them.
+- `scope: "any"` is the override for an explicit "clean up all of them", and every
+  agent-initiated teardown — allowed, refused or overridden — appends a `teardown-scope`
+  line to the same `audit.log`.
+
+Pinned by `api/test/agent-teardown-scope.test.mjs`; the roster side (`spawnedBy` +
+`yours: true` on `list_agents`) is what makes it visible before the call.
+
+Beyond that, run it only when **all four** hold:
 
 1. **Merged** — now checked for you: `shipState: 'merged'` in `list_agents` / on the card
    is the *repository's* verdict (the merge commit that landed the branch, or GitHub's
@@ -224,9 +245,9 @@ Run it only when **all four** hold:
    `gh pr view <n> --json state,mergedAt` before tearing down.
 2. **Deployed/verified**, if the change needed a deploy.
 3. **The operator/orchestrator explicitly confirms.** `ATLAS_CONTROL_PREAMBLE`
-   (`agent-routes.mjs`, `ATLAS_CONTROL_PREAMBLE`) tells the Atlas orchestrator exactly this: check
-   `shipState` in `list_agents` first, and ask before tearing down anything not
-   shipped.
+   (`agent-routes.mjs`, `ATLAS_CONTROL_PREAMBLE`) tells the Atlas orchestrator exactly this:
+   own it first (gate 0), then check `shipState` in `list_agents`, and ask before tearing
+   down anything not shipped.
 4. **The originating `Tasks/` note (if any) is closed.** The teardown path can now do
    this itself: `ATLAS_KNOWLEDGE_CLOSE_PROMPT`, both `atlasIngestPrompt*` variants and
    `ATLAS_WORKER_PREAMBLE` all carry a **CLOSE BEFORE YOU FILE** instruction — search
@@ -553,23 +574,39 @@ home screen it runs in a **chrome-less webview — no URL bar, no back button**.
 `<a href download>` pointing at a `Content-Disposition: attachment` response *navigates*
 that single webview, and mobile WebKit then replaces the whole app with its
 non-renderable-content shim. There is no way back except killing and relaunching the app,
-and the operator never even sees the file. So `web/src/lib/downloads.ts` splits the chips:
+and the operator never even sees the file.
 
-- **Images** (`isPreviewable`) open an **in-app overlay** with a real `<img>`. An `<img>`
-  is a *subresource* load, so the attachment disposition is ignored and no server change is
-  needed. On a phone this overlay is the only way a chip ever shows the operator their
-  file. The overlay pushes a history entry so the system back gesture closes it instead of
+⚠️ **`target="_blank"` is not the escape it looks like.** The first cut of this rescue kept
+images in an in-app overlay and left every other type on `download` + `_blank`, betting
+that `_blank` would open a dismissible browser overlay. On a real installed PWA it does
+not: an `.html` and a `.txt` each navigated the app's one webview and stranded it. A new
+browsing context *is* a top-level navigation there.
+
+So the rule is now an invariant, not a split, and it lives in one pure function —
+`downloadRoute(file, env)` in `web/src/lib/downloads.ts`:
+
+- **An anchor is allowed only where it is PROVEN safe** — `downloadHonoured && !standalone`.
+  Desktop keeps the real download it always had; everything else opens **in-app**, whatever
+  the file type. No UA sniff, no `target`, no escape hatch. `api/test/agent-downloads.test.mjs`
+  asserts the attribute cannot come back.
+- **The overlay renders every type** (`previewKind`): a real `<img>` for images, a
+  **sandboxed `srcdoc` iframe** for HTML (`allow-scripts` *without* `allow-same-origin` —
+  an agent-authored report is untrusted; omitting `allow-top-navigation`/`allow-popups` is
+  what makes the invariant structural), decoded text in a `<pre>`, and a name/size panel
+  for anything else. All three are *subresource* renders, so the attachment disposition is
+  ignored and no server change is needed. Over `INLINE_MAX_BYTES` (4 MB) text and HTML fall
+  back to the panel; an image renders from its URL at any size.
+- **Save** (`plan.save`): the plain `<a download>` wherever it is honoured — an anchor
+  outranks the share sheet, since a share dialog on desktop would be a regression — else
+  `navigator.share({files})`, else (an image) long-press, else a stated dead end. The blob
+  is prefetched when the overlay **opens**, never in the Save handler: `share()` needs the
+  tap's transient activation and an `await` inside the handler spends it.
+- The overlay pushes a history entry so the system back gesture closes it instead of
   exiting the PWA, and it is dismissible four ways (back, Escape, ✕, backdrop).
-- **Everything else** — PDFs included, since rendering one needs a real navigation that the
-  same disposition turns straight back into a download — takes a **non-navigating
-  hand-off**: `download` *and* `target="_blank" rel="noopener"` together. Where `download`
-  is honoured (desktop) it wins and `target` is ignored; where it is not (an installed
-  PWA), `_blank` opens a browser overlay that *has* a Done button. Dropping either
-  attribute breaks one of the two platforms.
 
 ⚠️ Do **not** add `-webkit-touch-callout: none` or `user-select: none` to `.dlprev__img` —
 a real `<img>` keeps long-press → "Save Image", the one save route that needs neither
-`download` nor `_blank`.
+`download` nor the share sheet.
 
 ### Spawn attachments
 
@@ -579,6 +616,37 @@ any file type, not just images. They are validated once, above the kind branch, 
 resolved and **before** anything is registered or launched (so a bad attachment fails fast
 leaving nothing behind), and folds their absolute paths into the opening prompt as a
 single-line tail telling the agent to `Read` them first.
+
+---
+
+## 9a. The project-card NOW signal
+
+A **box-local** dev agent can refresh its project card's "Now" line by ending a reply with
+`ATLAS:NOW <one line>`. `CARD_PREAMBLE` (`api/src/agent-routes.mjs`, overridable via
+`AGENT_CARD_PREAMBLE`) is the producer; `NOW_MARKER` / `scanNowMarker`
+(`api/src/subagent-scan.mjs`) is the consumer — **assistant text only, own line only,
+latest wins**, the same discipline as the ship markers ([§2](#2-the-ship-protocol)), and
+both walks now share one `scanAssistantText` so they cannot drift. `agent-local.mjs`'s poll
+fires `applyCardNow` *off* the poll path once per new value, and `project-card.mjs` resolves
+the page by `agent_repo` and rewrites `now:` inside the serial commit queue
+([§5](#5-the-serial-vault-commit-queue)).
+
+**Box-local only**, twice over: `CARD_PREAMBLE` is absent from `remotePreamble`, and the
+bridge imports `scanShipMarker` but not `scanNowMarker`. The box owns the vault; a
+workstation agent's write would have nowhere to land.
+
+**Only `now` is agent-writable.** `goal:` is operator-owned — it is also the card's
+membership opt-in (`listProjects`), so an agent able to write it could invent cards.
+
+**⚠️ The rewrite is IDEMPOTENT by construction.** The vault uses `*.md merge=union`, which
+does not understand YAML: two sides each carrying a *different* `now:` line for the same
+page (a paired-worker branch merged by `enqueueAtlasMerge`, a phone sync racing the queue's
+rebase) leave **both** — and a page with two `now:` keys stops round-tripping through
+js-yaml, so the card untypes and disappears off the dashboard. `rewriteNow` therefore
+replaces the first `now:` in place and **drops every later one**, and never appends. Because
+a doubled page is invisible to `listProjects` (it no longer parses), `findProjectPage` falls
+back to a raw-frontmatter scan for exactly that case — otherwise the repair would be
+unreachable precisely when it is needed. `api/test/project-card-now.test.mjs` is the pin.
 
 ---
 

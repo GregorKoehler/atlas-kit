@@ -1104,10 +1104,72 @@ button.agent__dlchip {
   object-fit: contain;
   border-radius: 6px;
 }
+/* The non-image bodies. Every one of these is a SUBRESOURCE render — decoded
+   text, a sandboxed srcdoc, or no body at all — so `Content-Disposition:
+   attachment` never gets the chance to turn a tap into a navigation. */
+.dlprev__text,
+.dlprev__frame,
+.dlprev__panel {
+  width: min(60rem, 100%);
+  border: 1px solid var(--hairline);
+  border-radius: 6px;
+  background: var(--bg-900);
+}
+.dlprev__text,
+.dlprev__frame {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+.dlprev__text {
+  margin: 0;
+  overflow: auto;
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
+  padding: 0.6rem 0.7rem;
+  font-family: var(--font-mono);
+  font-size: 0.68rem;
+  line-height: 1.5;
+  color: var(--text-dim);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+/* An agent's HTML report brings its own colours and assumes a light page. */
+.dlprev__frame {
+  border: none;
+  background: #fff;
+}
+.dlprev__panel {
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 1.4rem 1rem;
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+  color: var(--text-dim);
+}
+.dlprev__panel-name {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* Which save route the app actually chose (or what the share sheet said). The
+   share sheet and the standalone webview exist only on a phone, so this line is
+   how a branch gets reported back. */
+.dlprev__route {
+  font-family: var(--font-mono);
+  font-size: 0.6rem;
+  color: var(--text-faint);
+  text-align: center;
+}
 .dlprev__bar {
   flex: none;
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
+  justify-content: center;
   gap: 0.6rem;
   max-width: 100%;
 }
@@ -1118,6 +1180,14 @@ button.agent__dlchip {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+/* On a phone the bar wraps; give the filename the whole first row so the route
+   line and the two controls stay together on the second one. */
+@media (max-width: 640px) {
+  .dlprev__name {
+    flex: 1 1 100%;
+    text-align: center;
+  }
 }
 .dlprev__save,
 .dlprev__close {
