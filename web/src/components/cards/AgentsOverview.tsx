@@ -391,10 +391,21 @@ function buildFanRows(
   worker?: AgentNode['worker'],
 ): FanRow[] {
   const rows: FanRow[] = []
-  const spawnShown = spawned.slice(-FAN_SHOW)
-  const spawnHidden = spawned.length - spawnShown.length
+  // Spawned dev agents (the gold lineage children). When an Atlas chat drives
+  // more than fit, keep every ACTIVE (running) one pinned and fold only the
+  // INACTIVE (idle/parked) overflow into "+N more" — the working fleet stays
+  // visible; the parked agents are what compress. (Original spawn order is
+  // preserved among the shown rows, so recency still reads bottom-up.)
+  const spawnActive = spawned.filter((sp) => !sp.needs)
+  const spawnIdle = spawned.filter((sp) => sp.needs)
+  const idleSlots = Math.max(0, FAN_SHOW - spawnActive.length)
+  const idleShown = idleSlots > 0 ? spawnIdle.slice(-idleSlots) : []
+  const spawnHidden = spawnIdle.length - idleShown.length
   if (spawnHidden > 0) rows.push({ t: 'more', n: spawnHidden, kind: 'spawn' })
-  for (const sp of spawnShown) rows.push({ t: 'spawn', label: sp.label, repo: sp.repo, needs: sp.needs, open: sp.open })
+  const spawnShownKeys = new Set([...spawnActive, ...idleShown].map((sp) => sp.key))
+  for (const sp of spawned)
+    if (spawnShownKeys.has(sp.key))
+      rows.push({ t: 'spawn', label: sp.label, repo: sp.repo, needs: sp.needs, open: sp.open })
   const subShown = subAgents.slice(-FAN_SHOW)
   const subHidden = subAgents.length - subShown.length
   if (subHidden > 0) rows.push({ t: 'more', n: subHidden, kind: 'sub' })
@@ -687,7 +698,7 @@ function fanRowClass(r: FanRow): string {
 
 function fanRowTitle(r: FanRow): string {
   if (r.t === 'more')
-    return `${r.n} more ${r.kind === 'spawn' ? 'spawned agents' : r.kind === 'sub' ? 'sub-agents' : 'background jobs'} — full list in the node tooltip`
+    return `${r.n} more ${r.kind === 'spawn' ? 'idle spawned agents' : r.kind === 'sub' ? 'sub-agents' : 'background jobs'} — full list in the node tooltip`
   // The fan shows the short micro tag; the full agent-authored label rides the tooltip.
   if (r.t === 'spawn') return `${r.label} — agent spawned by this Atlas chat${r.needs ? ' · awaiting your input' : ''}`
   if (r.t === 'sub') return `${r.label} — sub-agent ${r.active ? 'running' : 'finished'}`

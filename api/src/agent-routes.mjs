@@ -19,6 +19,7 @@
  * output) are routed by repo (spawn) or by which executor owns the id.
  * ------------------------------------------------------------------ */
 import fs from 'node:fs'
+import http from 'node:http'
 import os from 'node:os'
 import path from 'node:path'
 import { execFile } from 'node:child_process'
@@ -208,6 +209,17 @@ Rewrite that file (overwrite the whole thing) with a flat JSON object whenever t
 - "label": [done, total] → a completion bar.
 Up to 6 entries; keys are the labels shown (keep them short). The natural writer is the long-running job itself — make the script you launch in the background rewrite the file each batch, e.g.: printf '{"pages": %d, "batch": [%d, %d]}' "$pages" "$i" "$total" > '{statsFile}'. Delete the file when the work is done to clear the display. Skip all of this for short or single-step tasks.`
 
+// Appended to EVERY agent's preamble (dev + knowledge, box-local AND
+// workstation). Mirrors STATS_PREAMBLE: the `{downloadsDir}` token is this
+// session's download dir, substituted per-location by each EXECUTOR at spawn
+// (a dir on the box, or a path inside the container) — the same split as
+// {statsFile}/{appAddress}. No history to publish here, just files.
+const DOWNLOADS_PREAMBLE =
+  process.env.AGENT_DOWNLOADS_PREAMBLE ||
+  `Downloads — if you produce a file the operator would want on their device (a report, an export, a generated image/PDF/HTML page, anything), offer it to them by copying or writing it into:
+{downloadsDir}
+The dashboard shows a small download chip per file there. Overwrite the same filename to publish an updated version — the chip flags it as updated; a new filename adds a new chip. Skip this entirely if your task produces nothing worth downloading.`
+
 // Appended to EVERY dev agent's preamble (box-local AND workstation). A standing
 // capability note: the agent may run a web app (Streamlit etc.) on its slot, which
 // the dashboard embeds beside the transcript in full-screen. The slot's bind
@@ -261,7 +273,7 @@ Chat style: keep replies short and conversational — durable knowledge belongs 
 // discipline (the "structured way using edge types" the operator asked for). It
 // pushes to the live Atlas (pull-rebase) — unlike the paired ATLAS_WORKER which
 // stays on a branch for the ship queue. Box-local only.
-const ATLAS_KNOWLEDGE_PREAMBLE =
+export const ATLAS_KNOWLEDGE_PREAMBLE =
   process.env.AGENT_ATLAS_KNOWLEDGE_PREAMBLE ||
   `You are the ATLAS AGENT: an interactive chat over the operator's Knowledge Atlas — a typed, queryable LLM-wiki. Your working directory is the Atlas vault root. Read its \`CLAUDE.md\` ("the Guide") and \`Wiki/Legend.md\` ("the Legend" — the node/edge/property registry) before your first write: they are the schema and the write discipline. Synthesis pages live in \`Wiki/\` (start at \`Wiki/index.md\`); to-dos in \`Tasks/\` (\`type: task\`, status lifecycle inbox→next→doing→waiting→done); \`Wiki/log.md\` is the append-only timeline.
 
@@ -280,6 +292,7 @@ Atlas writes — you are the sole writer in this chat, and you write the TYPED w
 - Think QUERY-FIRST: wherever you link pages, also add the TYPED EDGE that names the relationship — the frontmatter key IS the edge type (\`for_project\`, \`depends_on\`, \`stakeholders\`, …) — plus the state/date fields the operator would later filter or traverse for (\`status\`, \`due\`, milestone dates, \`last_contact\`/\`cadence_days\`). A bare \`[[link]]\` where a typed edge fits is a missed query.
 - Consult \`Wiki/Legend.md\` FIRST: reuse the registered key that fits; coin a new snake_case key only when none does and the edge is worth querying — and append it to the matching Legend table in the SAME edit, following its format, so the registry stays the source of truth.
 - Overwrite live state in place; keep history in an append-only \`## Log\` section in the page body, never in frontmatter lists (per the Guide). Append a \`Wiki/log.md\` entry for each batch — newest at the bottom, format \`## [YYYY-MM-DD] <op> | <title>\`.
+- CONTRIBUTION LOG: when the project page you log finished work against carries a \`contribution_log:\` field, append ONE high-level line (date, what, PR number) to the page it links, in the SAME write batch. Append-only at the end of the section it belongs to — never blindly at end-of-file, never rewriting existing lines.
 - Never write outside \`Wiki/\`/\`Tasks/\`; never touch \`data/\` (machine-owned) or \`.obsidian/\`. Other writers exist (phone sync, capture/research ingest) — keep edits additive; ask before any sweeping reorganization.
 - Don't file a \`Tasks/\` note yourself for follow-up work you thought of (not what the operator asked for, just worth doing) — at the end of the chat, propose it instead: \`POST /api/prospects/new\` (bearer \`$DASHBOARD_BEARER_TOKEN\`) with \`{title, body, producer:"atlas-agent"}\`, so the operator signs it off before it becomes a real task. Search \`Tasks/\` first and prefer appending to an existing task over proposing a new one. A genuine blocking question to the operator is still fine, unchanged — this is only about unrequested bookkeeping.
 - Commit after each batch: \`git pull --rebase --autostash\`, then commit ONLY the files you added or edited with a clear message, then push. If the rebase conflicts, STOP and report it in chat instead of resolving destructively.
@@ -325,6 +338,7 @@ You have one job, driven by the dashboard (this is NOT an operator chat), plus a
 1) STAND BY (at the start). You do NOT brief the dev agent: the dashboard retrieves the Atlas evidence itself — server-side, in-process, in well under a second — and pastes it straight into the dev agent's opening prompt. So there is nothing to research now and nothing to synthesize. Acknowledge in one line and stop; do not read, search or write. (An LLM brief on top of that retrieval reached only a small fraction of sessions before it was removed, and the ones that arrived late arrived after the work.)
 
 2) INGEST (at the end). When handed the dev agent's session recap, fold it into the Atlas: update the most fitting existing page (or add one focused page) — and think QUERY-FIRST: add the typed edges and dates the operator would later *filter or traverse for* (\`for_project\`, \`depends_on\`, \`stakeholders\`, \`status\`, \`due\`, etc.), first consulting \`Wiki/Legend.md\` for the current node/edge/property types — reuse the key that fits, or coin + register a new snake_case key in the same edit when none does and the edge is worth querying; a bare \`[[link]]\` where a typed edge fits is a missed query. ALWAYS append at least one \`Wiki/log.md\` entry — newest at the bottom, format \`## [YYYY-MM-DD] <op> | <title>\` with \`op\` = \`ingest\`. Note any CONTRADICTION between the dev work and what a page previously claimed.
+   CONTRIBUTION LOG: when the project page you log this work against carries a \`contribution_log:\` field, append ONE high-level line (date, what, PR number) to the page it links, in the SAME write batch as the \`Wiki/log.md\` entry. Append-only at the end of the section it belongs to — never blindly at end-of-file, never rewriting existing lines.
    TASKS (Kanban): if the recap names a concrete follow-up / next-step, or the dev agent's task was an explicit "add a task / Kanban item" request, file it as a focused \`Tasks/<slug>.md\` so it lands on the operator's Kanban — \`type: task\`, \`status: inbox\`, \`created\`/\`updated\` = today (YYYY-MM-DD). **Tag it to its project the typed way — \`for_project: "[[<Project>]]"\` — or it will NOT show under that project on the board.** Resolve \`<Project>\` by matching the named project against the ACTUAL \`Wiki/Projects/\` pages by title / filename / tag (partial or informal match is fine, e.g. "the payments project" → \`[[Payments-Service]]\`); if no project genuinely fits, use \`area: "[[<Area>]]"\` or \`for_project_idea: "[[<Idea>]]"\` per the Legend, or omit rather than guess. Add \`due\`/\`priority\`/\`tags\` only when the recap states them. Keep tasks FOCUSED — roadmap-level or a single named next-step with engineering consolidated, never one task per checkbox.
    CLOSE BEFORE YOU FILE: the same recap may RETIRE a card. Search \`Tasks/\` for open notes (\`status\` not \`done\`) matching this work by \`for_project\` / PR number / subject and prefer closing one over filing another — but on EVIDENCE only, never on age or plausibility: the PR is merged AND the task is genuinely what this work did ⇒ \`status: done\` + \`done: <YYYY-MM-DD>\`, bump \`updated\`, and one dated \`## Log\` line naming the PR and merged SHA. If completion still needs a deploy that has not happened, or the match is a judgement call, LEAVE IT OPEN and say so in your reply — a wrongly-closed task is invisible, a wrongly-open one is merely noise.
    Skip the page update (and the task) only if the session was a genuine no-op — but still log it.
@@ -986,9 +1000,10 @@ async function performSpawn(raw) {
     return { status: 400, body: { ok: false, error: `unknown "model" (expected ${Object.keys(AGENT_MODELS).join('/')})` } }
   if (effort !== undefined && !AGENT_EFFORTS.has(effort))
     return { status: 400, body: { ok: false, error: `unknown "effort" (expected ${[...AGENT_EFFORTS].join('/')})` } }
-  // Image attachments fold into the opening prompt (dev agents only — the
-  // executor saves them to disk and references their paths). Same shape/cap as
-  // a prompt's; knowledge chats ignore them. (Scheduled spawns carry no images.)
+  // File attachments fold into the opening prompt — the executor saves them to
+  // disk and references their paths. Same shape/cap as a prompt's, for BOTH
+  // kinds: dev spawns and knowledge/Atlas chats. Validated HERE, above the kind
+  // branch, so one cap covers both. (Scheduled spawns carry no attachments.)
   const imgs = Array.isArray(images) ? images : []
   if (imgs.length > MAX_IMAGES)
     return { status: 400, body: { ok: false, error: `too many files (max ${MAX_IMAGES})` } }
@@ -1003,13 +1018,16 @@ async function performSpawn(raw) {
   // ORCHESTRATION layer (the control MCP tools) is atlas-only — only the main
   // Atlas chat also gets ATLAS_CONTROL_PREAMBLE.
   if (kind === 'knowledge') {
-    const preamble =
+    const basePreamble =
       vault === 'atlas'
         ? `${ATLAS_KNOWLEDGE_PREAMBLE}\n\n${ATLAS_CONTROL_PREAMBLE}`
         : isTypedVault(vault)
           ? ATLAS_KNOWLEDGE_PREAMBLE
           : KNOWLEDGE_PREAMBLE
-    const r = await local.spawnKnowledge({ question: task, preamble, model: modelId, effort: effortLevel, vault })
+    const preamble = `${basePreamble}\n\n${DOWNLOADS_PREAMBLE}`
+    const r = await local.spawnKnowledge({
+      question: task, preamble, model: modelId, effort: effortLevel, vault, images: imgs,
+    })
     if (r.ok && r.id) {
       if (parent) setSpawnParent(r.id, parent)
       generateTitle(r.id, task).then((m) => m?.size && local.setSize(r.id, m.size))
@@ -1031,7 +1049,7 @@ async function performSpawn(raw) {
     // limit applies only to the launch line.
     // ATLAS_SEARCH_PREAMBLE is box-local only: these agents launch with
     // dev.mcp.json, so they are the ones that actually hold the read tools.
-    const preamble = `${reconcile}\n\n${ATLAS_DEV_PREAMBLE}\n\n${ATLAS_SEARCH_PREAMBLE}\n\n${STATS_PREAMBLE}\n\n${MESSAGE_PREAMBLE}\n\n${APP_PREAMBLE}`
+    const preamble = `${reconcile}\n\n${ATLAS_DEV_PREAMBLE}\n\n${ATLAS_SEARCH_PREAMBLE}\n\n${STATS_PREAMBLE}\n\n${DOWNLOADS_PREAMBLE}\n\n${MESSAGE_PREAMBLE}\n\n${APP_PREAMBLE}`
     // '' on any failure (no atlas / no project / retrieval throw) — then the prompt
     // is byte-identical to an unbriefed spawn. The spawn NEVER waits on the Atlas.
     const context = await local.atlasEvidence({ task, repo })
@@ -1068,10 +1086,11 @@ async function performSpawn(raw) {
   // seconds (up to a 45 s timeout) before the agent even started. Retrieval is
   // in-process and sub-second. The recap ingest at close is unaffected
   // (ingestToAtlas spins up its own short-lived worker — it never used this one).
-  // STATS_PREAMBLE carries the `{statsFile}` token; the bridge substitutes it with
-  // a container-side path at spawn (mirroring how it fills APP_PREAMBLE's bind
-  // addr/port/base-path), so workstation agents publish live stats too.
-  const remotePreamble = `${reconcile}\n\n${ATLAS_DEV_PREAMBLE}\n\n${ATLAS_REMOTE_SEARCH_PREAMBLE}\n\n${STATS_PREAMBLE}\n\n${MESSAGE_PREAMBLE}\n\n${APP_PREAMBLE}`
+  // STATS_PREAMBLE/DOWNLOADS_PREAMBLE carry the `{statsFile}`/`{downloadsDir}`
+  // tokens; the bridge substitutes both with container-side paths at spawn
+  // (mirroring how it fills APP_PREAMBLE's bind addr/port/base-path), so
+  // workstation agents publish live stats and offer downloads too.
+  const remotePreamble = `${reconcile}\n\n${ATLAS_DEV_PREAMBLE}\n\n${ATLAS_REMOTE_SEARCH_PREAMBLE}\n\n${STATS_PREAMBLE}\n\n${DOWNLOADS_PREAMBLE}\n\n${MESSAGE_PREAMBLE}\n\n${APP_PREAMBLE}`
   const bridge = bridgeForRepo(repo)
   const label = bridge?.label || defaultLabel()
   // ONE /health call answers both questions this spawn asks of the bridge: which
@@ -2308,6 +2327,47 @@ export function agentRouter(bearerAuth) {
     const r = await callBridge('GET', `/history?id=${encodeURIComponent(id)}${rev ? `&rev=${encodeURIComponent(rev)}` : ''}`, undefined, BRIDGE_TIMEOUT_MS, bridgeForId(id))
     if (!r.ok) return res.status(r.status).json({ ok: false, error: r.body?.error || 'bridge unreachable' })
     res.json(r.body)
+  })
+
+  // Stream a file the agent dropped in its downloads dir (DOWNLOADS_PREAMBLE) —
+  // the card's download chip. Read-only, like /output and /history. Box-local
+  // sessions are validated + streamed straight off disk (local.downloadFile,
+  // whose "must equal its own basename" check is the traversal guard). A bridge
+  // session has no on-box file to stream, so this proxies raw bytes to the
+  // bridge's own /download route — NOT callBridge, which JSON-parses every
+  // response and would corrupt binary content.
+  router.get('/api/agents/download', async (req, res) => {
+    const id = String(req.query.id || '')
+    const name = String(req.query.name || '')
+    if (!id || !name) return res.status(400).json({ ok: false, error: 'missing "id" or "name"' })
+    if (local.hasSession(id)) {
+      const r = local.downloadFile({ id, name })
+      if (!r.ok) return res.status(r.status).json({ ok: false, error: r.error })
+      return res.download(r.path, r.name, (err) => {
+        if (err && !res.headersSent) res.status(500).json({ ok: false, error: 'download failed' })
+      })
+    }
+    const bridge = bridgeForId(id)
+    if (!bridge || !bridge.url || !bridge.token)
+      return res.status(503).json({ ok: false, error: 'bridge not configured' })
+    const u = new URL(bridge.url)
+    const up = http.request(
+      {
+        host: u.hostname,
+        port: Number(u.port) || (u.protocol === 'https:' ? 443 : 80),
+        path: `/download?id=${encodeURIComponent(id)}&name=${encodeURIComponent(name)}`,
+        headers: { authorization: `Bearer ${bridge.token}` },
+      },
+      (ur) => {
+        res.writeHead(ur.statusCode || 502, ur.headers)
+        ur.pipe(res)
+      },
+    )
+    up.on('error', () => {
+      if (!res.headersSent) res.status(502).json({ ok: false, error: 'bridge unreachable' })
+      else res.end()
+    })
+    up.end()
   })
 
   return router

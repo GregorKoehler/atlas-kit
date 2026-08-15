@@ -111,9 +111,10 @@ The checks below are SETUP.md's "Verifying it works" list, distributed per step.
 - **Final — spawn readiness.** To make box-local dev agents spawnable, `cp
   api/src/agent-local-repos.example.json api/src/agent-local-repos.json` and add a repo
   the operator has checked out here. Offer a smoke test: add a `Wiki/Projects/*.md` page
-  with an `agent_repo:` key and spawn one agent from its project card — its `tmux`
-  transcript should stream into the card. (Ask before spawning; it consumes their
-  subscription.)
+  with `type: project`, a non-empty `goal:` (that pair is what makes it a card — without
+  it nothing renders) and an `agent_repo:` key, then spawn one agent from its project
+  card — its `tmux` transcript should stream into the card. (Ask before spawning; it
+  consumes their subscription.)
 
 ## Phase 2 — Safety rules (apply throughout)
 

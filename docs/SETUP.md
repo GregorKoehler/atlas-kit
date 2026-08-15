@@ -202,6 +202,7 @@ and security checklist.
 - `curl http://127.0.0.1:8080/api/health` → `{"ok":true,...}`.
 - Open `dashboard.<your-domain>` on your phone → you should hit the Access login, then
   the dashboard.
-- Add a repo to `agent-local-repos.json`, give a `Wiki/Projects/*.md` page an
+- Add a repo to `agent-local-repos.json`, then give a `Wiki/Projects/*.md` page
+  `type: project`, a non-empty `goal:` (that pair is what makes it a card) and an
   `agent_repo:` key, and spawn an agent from its project card — its `tmux` transcript
   should stream into the card.

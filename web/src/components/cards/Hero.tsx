@@ -2,8 +2,9 @@ import { useEffect, useState } from 'preact/hooks'
 import { motion } from 'framer-motion'
 import { cardRise, cardReveal } from '../Card'
 import { AgentsOverview } from './AgentsOverview'
-import { useData } from '../../lib/useData'
-import { fetchUsage, fetchHost, type UsageWindow, type HostGauge } from '../../lib/api'
+import { useUsage, fmtReset } from '../../lib/useUsage'
+import { useHost, gb } from '../../lib/useHost'
+import { type UsageWindow, type HostGauge } from '../../lib/api'
 
 // Your name in the hero greeting. Set VITE_OPERATOR_NAME in .env, or edit here.
 const OPERATOR = import.meta.env.VITE_OPERATOR_NAME || 'Operator'
@@ -63,17 +64,11 @@ function level(u: number): 'green' | 'amber' | 'red' {
   return u >= 90 ? 'red' : u >= 70 ? 'amber' : 'green'
 }
 
-// "14:29" if the reset is within a day, else "Thu 18:00" — enough to know when
-// the budget comes back without a full date.
-function fmtReset(iso: string): string {
-  const d = new Date(iso)
-  const hhmm = `${two(d.getHours())}:${two(d.getMinutes())}`
-  const soon = d.getTime() - Date.now() < 24 * 60 * 60 * 1000
-  return soon ? hhmm : `${d.toLocaleDateString(undefined, { weekday: 'short' })} ${hhmm}`
-}
-
 function UsageMeters() {
-  const { data } = useData(fetchUsage, 60000)
+  // Shared poll (useUsage): the full-screen agent viewers read the very same
+  // numbers off it, so the budget can't disagree between surfaces and the
+  // endpoint is still hit once a minute, total.
+  const { usage: data } = useUsage()
   if (!data) return null
   const rows: Array<{ key: string; w: UsageWindow }> = []
   if (data.fiveHour) rows.push({ key: '5H', w: data.fiveHour })
@@ -103,10 +98,11 @@ function UsageMeters() {
 // box has started spilling into it (the early-warning that memory pressure is
 // building). Same green/amber/red thresholds as the Claude meters: red at 90%
 // is the danger zone the 2026-06-25 freeze hit. Reuses the usage-meter styles.
-const gb = (m: number) => (m / 1024).toFixed(1)
-
 function HostMeters() {
-  const { data } = useData(fetchHost, 10000)
+  // Shared poll (useHost), like the budget above: the full-screen viewer's RAM
+  // chip reads the very same numbers off it, so the endpoint is still hit once
+  // per 10s no matter how many surfaces are open.
+  const { host: data } = useHost()
   if (!data?.mem) return null
   const rows: Array<{ key: string; g: HostGauge }> = [{ key: 'RAM', g: data.mem }]
   if (data.swap && data.swap.usedMb > 0) rows.push({ key: 'SWAP', g: data.swap })

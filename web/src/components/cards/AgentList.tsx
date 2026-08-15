@@ -35,7 +35,11 @@ import {
   type ScheduledAction,
 } from '../../lib/api'
 import { AgentsOverview } from './AgentsOverview'
+import { AgentDownloads } from '../AgentDownloads'
 import { Markdown } from '../../lib/markdown'
+import { defaultSwitcherOpen, persistSwitcherOpen } from '../../lib/switcherPref'
+import { useUsage, fmtReset } from '../../lib/useUsage'
+import { useHost, gb } from '../../lib/useHost'
 import { useDraft } from '../../lib/useDraft'
 import { lockBodyScroll } from '../../lib/scrollLock'
 import { MicField } from '../MicField'
@@ -468,6 +472,80 @@ function ContextMeter({ tokens, window }: { tokens: number; window: number }) {
       </span>
       <span className="agent__ctx-label tnum">
         {fmtK(tokens)}/{fmtK(window)}
+      </span>
+    </span>
+  )
+}
+
+/**
+ * The operator's Claude budget, shrunk to one line for the full-screen viewer
+ * (head + app-only overlay) — checking the 5-hour window used to cost an exit
+ * from full screen and a trip back to the hero.
+ *
+ * The 5-hour window is the one that actually gates a working session, so it's
+ * the only bar here; the weekly cap rides along in the tooltip rather than
+ * doubling the chip's width in a head that is capped at half the viewport.
+ * Reuses the context meter's bar/label sizing so the two gauges in the head
+ * read as one family. Renders nothing until the usage endpoint answers, so a
+ * missing budget never shows as a misleading 0%.
+ */
+function Budget5h() {
+  const { usage, stale } = useUsage()
+  const w = usage?.fiveHour
+  if (!w) return null
+  const pct = Math.max(0, Math.min(100, w.utilization))
+  const level = pct >= 90 ? 'full' : pct >= 70 ? 'warn' : 'ok'
+  const weekly = usage.sevenDay
+  return (
+    <span
+      className={`agent__budget${stale ? ' agent__budget--stale' : ''}`}
+      title={
+        `Claude budget — 5-hour window: ${Math.round(w.utilization)}% used, resets ${fmtReset(w.resetsAt)}` +
+        (weekly ? ` · weekly: ${Math.round(weekly.utilization)}% used, resets ${fmtReset(weekly.resetsAt)}` : '') +
+        (stale ? ' · stale (the last polls failed)' : '')
+      }
+    >
+      <span className="agent__ctx-label">5H</span>
+      <span className="agent__ctx-bar">
+        <span className={`agent__ctx-fill agent__ctx-fill--${level}`} style={{ width: `${pct}%` }} />
+      </span>
+      <span className="agent__ctx-label tnum">{Math.round(w.utilization)}%</span>
+      <span className="agent__budget-reset agent__ctx-label tnum">↺ {fmtReset(w.resetsAt)}</span>
+    </span>
+  )
+}
+
+/**
+ * Box memory, the same gauge the hero carries under the operator's name — the
+ * agents themselves are what fills it, so the number belongs where you watch
+ * them work (the hero is hidden in full screen).
+ *
+ * RAM only: swap is the hero's early-warning row, while here the operator wants
+ * the one number at a glance. Same thresholds as the hero (amber ≥70, red ≥90),
+ * expressed in the viewer's ok/warn/full fill family so it reads as one gauge
+ * stack with the context meter and 5H.
+ */
+function HostRam() {
+  const { host, stale } = useHost()
+  const g = host?.mem
+  if (!g) return null
+  const pct = Math.max(0, Math.min(100, g.pct))
+  const level = pct >= 90 ? 'full' : pct >= 70 ? 'warn' : 'ok'
+  return (
+    <span
+      className={`agent__budget agent__ram${stale ? ' agent__budget--stale' : ''}`}
+      title={
+        `box memory — ${gb(g.usedMb)} / ${gb(g.totalMb)} GB used (${Math.round(g.pct)}%)` +
+        (stale ? ' · stale (the last polls failed)' : '')
+      }
+    >
+      <span className="agent__ctx-label">RAM</span>
+      <span className="agent__ctx-bar">
+        <span className={`agent__ctx-fill agent__ctx-fill--${level}`} style={{ width: `${pct}%` }} />
+      </span>
+      <span className="agent__ctx-label tnum">{Math.round(g.pct)}%</span>
+      <span className="agent__ram-detail agent__ctx-label tnum">
+        {gb(g.usedMb)}/{gb(g.totalMb)}G
       </span>
     </span>
   )
@@ -972,6 +1050,9 @@ export function AgentRow({
   // focus mode on desktop. Independent of `fullscreen` (they're swapped, not
   // stacked — see openAppFull).
   const [appFull, setAppFull] = useState(false)
+  // Full-screen switcher: graph, or just the slim strip? Phone-only (the toggle
+  // that flips it is hidden above the breakpoint), sticky — see switcherPref.ts.
+  const [switcherOpen, setSwitcherOpen] = useState(defaultSwitcherOpen)
   // External "open this agent" signal — from the Atlas constellation, the hero
   // agents overview, or the full-screen switcher strip: clicking an agent node
   // jumps to its tab (AppShell) and opens that row's full-screen split view.
@@ -1767,22 +1848,6 @@ export function AgentRow({
         {s.branch ? <span className="agent__branch tnum">{s.branch}</span> : null}
         {/* Repo is redundant when the card is already scoped to one repo. */}
         {!scoped ? <span className="agent__repo">{s.repo}</span> : null}
-        {s.model || (s.contextTokens != null && s.contextWindow) ? (
-          <span className="agent__run">
-            {s.model ? (
-              <span
-                className="agent__meta"
-                title={`model ${s.model} · effort ${s.effort ?? '—'}`}
-              >
-                {modelLabel(s.model)}
-                {s.effort ? ` · ${EFFORT_LABEL[s.effort] ?? s.effort}` : ''}
-              </span>
-            ) : null}
-            {s.contextTokens != null && s.contextWindow ? (
-              <ContextMeter tokens={s.contextTokens} window={s.contextWindow} />
-            ) : null}
-          </span>
-        ) : null}
         <span className="agent__status hud-label">
           {s.closing
             ? s.closePhase === 'ingest'
@@ -1796,6 +1861,40 @@ export function AgentRow({
                 ? 'needs decision'
                 : (knowledge ? KNOWLEDGE_STATUS_LABEL : STATUS_LABEL)[s.status]}
         </span>
+        {/* Gauges + action buttons as ONE unit. `display: contents` off the phone,
+            so the collapsed row and desktop lay them out as plain head children
+            exactly as before (the CSS `order` on .agent__status / .agent__actions
+            restores the reading order — gauges, status, buttons — that the source
+            order no longer has: the status label is authored AHEAD of them so the
+            phone's full-screen head can float it up onto the branch line). On the
+            phone's full-screen head this div becomes the head's own last row, and
+            the buttons move into the empty half beside the gauge stack. */}
+        <div className="agent__headside">
+        {/* In full screen the run block becomes one vertical stack — model,
+            context, 5H budget, RAM — so the operator-global gauges read as a
+            column under the model line. The budget/RAM chips are NOT per-session,
+            so full screen renders the stack even when this agent reports neither
+            model nor context. Collapsed rows are unchanged: model + context only,
+            gated on the state flag rather than a CSS-only assumption, so the
+            hero's meters stay the list's readout. */}
+        {fullscreen || s.model || (s.contextTokens != null && s.contextWindow) ? (
+          <span className={`agent__run${fullscreen ? ' agent__run--stack' : ''}`}>
+            {s.model ? (
+              <span
+                className="agent__meta"
+                title={`model ${s.model} · effort ${s.effort ?? '—'}`}
+              >
+                {modelLabel(s.model)}
+                {s.effort ? ` · ${EFFORT_LABEL[s.effort] ?? s.effort}` : ''}
+              </span>
+            ) : null}
+            {s.contextTokens != null && s.contextWindow ? (
+              <ContextMeter tokens={s.contextTokens} window={s.contextWindow} />
+            ) : null}
+            {fullscreen ? <Budget5h /> : null}
+            {fullscreen ? <HostRam /> : null}
+          </span>
+        ) : null}
         <div className="agent__actions">
           {dormant ? (
             <button
@@ -2017,6 +2116,8 @@ export function AgentRow({
             ✕
           </button>
         </div>
+        </div>{/* /.agent__headside — kept flush so wrapping the cluster stays a
+                   two-line diff instead of re-indenting 200 lines of buttons */}
       </div>
       {!dormant ? <AgentTimer s={s} knowledge={knowledge} /> : null}
       {s.subAgents && s.subAgents.length ? (
@@ -2057,6 +2158,7 @@ export function AgentRow({
           ))}
         </div>
       ) : null}
+      <AgentDownloads id={s.id} files={s.downloads ?? []} />
       {expanded ? (
         showAppPane ? (
           // Full-screen split: transcript pinned left, the agent's live app
@@ -2338,6 +2440,12 @@ export function AgentRow({
                 {headText}
               </span>
               <span className="agent-app-full__tag">live app</span>
+              {/* App-only full screen hides the hero too — same readouts, same
+                  shared polls. Inline here, not stacked: this bar is one slim
+                  non-wrapping row, and it sheds the chips' detail (then RAM
+                  itself) on a narrow phone rather than squeezing the title. */}
+              <Budget5h />
+              <HostRam />
               <a
                 className="agent-app-full__btn"
                 href={s.appPath}
@@ -2372,8 +2480,31 @@ export function AgentRow({
           <div className={cls} role="dialog" aria-modal="true" ref={fullscreenRef}>
             {/* The same clickable agents overview as the hero, agents only —
                 clicking another node swaps straight to THAT agent's full screen
-                (this row yields via the focus signal above). */}
-            <div className="agent__switch">
+                (this row yields via the focus signal above). On a phone the graph
+                shows by default — switching is what it's FOR — and the strip below
+                collapses it away for reading, one tap, sticky. Above the breakpoint
+                the strip is hidden and the graph always shows, as before. */}
+            <div className={`agent__switch${switcherOpen ? ' agent__switch--open' : ''}`}>
+              <button
+                type="button"
+                className="agent__switch-toggle"
+                aria-expanded={switcherOpen}
+                onClick={() =>
+                  setSwitcherOpen((v) => {
+                    persistSwitcherOpen(!v) // sticky: becomes the default for every full screen
+                    return !v
+                  })
+                }
+                title={
+                  switcherOpen
+                    ? 'hide the agent switcher — more room for the transcript'
+                    : 'show the agent switcher — jump straight to another agent'
+                }
+              >
+                <span className="hud-label agent__switch-label">agents</span>
+                <span className="agent__switch-current">{headText}</span>
+                <span className="agent__switch-caret">{switcherOpen ? '▾' : '▸'}</span>
+              </button>
               <AgentsOverview switcher currentId={s.id} />
             </div>
             {body}

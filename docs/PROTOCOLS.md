@@ -259,7 +259,12 @@ just a recap). The lifecycle driver's `INGESTING`/`recap` case
 delivers `atlasIngestPrompt()` (line 2676) to the paired worker — its INGEST
 instructions (`ATLAS_WORKER_PREAMBLE` point 2, `ATLAS_WORKER_PREAMBLE` point 2): fold the
 recap into the most fitting `Wiki/` page, always append a `Wiki/log.md` entry, and
-optionally file a `Tasks/` item. Once the worker prints `ATLAS:INGESTED`, the
+optionally file a `Tasks/` item. One more convention rides along: when the project page
+the work is logged against carries a typed `contribution_log:` edge, the worker appends
+ONE high-level line (date, what, PR number) to the page that edge links — into the
+section it belongs to, append-only, in the SAME write batch as the `Wiki/log.md` entry.
+The operator-chatted Atlas orchestrator carries the same rule
+(`ATLAS_KNOWLEDGE_PREAMBLE`) as the manual path. Once the worker prints `ATLAS:INGESTED`, the
 `INGESTING`/`ingest` case (`agent-lifecycle.mjs:196–202`) fires `ACT.MERGE_ATLAS`
 (`agent-local.mjs:2528`), which merges the worker's branch into the live Atlas via
 `enqueueAtlasMerge()` ([§5](#5-the-serial-vault-commit-queue)) before reaping.
@@ -445,3 +450,75 @@ never touches the vault, not even transiently.
 `KNOWLEDGE_TOOLS`, because `knowledgeOnly` is the same flag the remote HTTP connector runs
 under — and a connector has no business proposing work into the operator's inbox. The dev and
 worker MCP configs set it; `mcp/http.mjs` passes `propose: false` outright.
+
+---
+
+## 9. Agent downloads — offering the operator a file
+
+Any agent (dev or knowledge, box-local or on a bridge) can hand the operator a file: it
+writes or copies it into a **per-session downloads directory**, and a chip appears on its
+card. `DOWNLOADS_PREAMBLE` (`api/src/agent-routes.mjs`, overridable via
+`AGENT_DOWNLOADS_PREAMBLE`) is appended to *every* agent's standing instructions and
+carries a `{downloadsDir}` token that each **executor** substitutes at spawn — the same
+per-location split as `{statsFile}` and `{appAddress}`:
+
+| Executor | Directory | Pre-created at |
+|---|---|---|
+| box-local (`agent-local.mjs`) | `$AGENT_LOCAL_DIR/downloads/<id>` (default `~/.atlas-kit/downloads/<id>`) | `spawn()` / `spawnKnowledge()` |
+| bridge (`agent-bridge/server.mjs`) | `/tmp/agent-downloads/<id>` inside the container | `spawn()` |
+
+The listing is re-read fresh on every poll (there is no history to accumulate, unlike live
+stats): files only, **dotfiles and subdirectories skipped**, newest first, capped at
+`AGENT_DOWNLOADS_MAX_FILES` (20). It rides out on each session's `downloads` field and is
+simply absent when empty. Overwriting a filename republishes it; a new filename adds a
+chip. Cleanup removes the directory with the worktree and the stats file.
+
+**`GET /api/agents/download?id=&name=`** serves one file. Two safety rules, both enforced
+on each executor:
+
+1. `name` must **equal its own basename** — that single check rejects `../` traversal,
+   absolute paths and any embedded separator. It is *not* decoded again: Express's query
+   parser (and the bridge's `URLSearchParams`) already decoded once, and a second decode
+   would mangle a filename containing a literal `%`.
+2. `name` must appear in the **current capped listing** — so a dotfile, which the listing
+   skips, is never resolvable — and be under `AGENT_DOWNLOAD_MAX_BYTES` (100 MB, else 413).
+
+A **bridge** session has no on-box file, so the route pipes raw bytes from the bridge's own
+`GET /download`. That proxy is deliberately a bare `node:http` request, **not** `callBridge`
+— `callBridge` JSON-parses every response and would corrupt any binary. For the same reason
+the bridge streams the file with a direct `docker exec … cat` piped to the socket rather
+than through `dockerExec`, whose `execFile` stdout is utf8-decoded.
+
+### The chip must never strand the operator
+
+The dashboard ships as a PWA with `"display": "standalone"`, so once it is installed to a
+home screen it runs in a **chrome-less webview — no URL bar, no back button**. A plain
+`<a href download>` pointing at a `Content-Disposition: attachment` response *navigates*
+that single webview, and mobile WebKit then replaces the whole app with its
+non-renderable-content shim. There is no way back except killing and relaunching the app,
+and the operator never even sees the file. So `web/src/lib/downloads.ts` splits the chips:
+
+- **Images** (`isPreviewable`) open an **in-app overlay** with a real `<img>`. An `<img>`
+  is a *subresource* load, so the attachment disposition is ignored and no server change is
+  needed. On a phone this overlay is the only way a chip ever shows the operator their
+  file. The overlay pushes a history entry so the system back gesture closes it instead of
+  exiting the PWA, and it is dismissible four ways (back, Escape, ✕, backdrop).
+- **Everything else** — PDFs included, since rendering one needs a real navigation that the
+  same disposition turns straight back into a download — takes a **non-navigating
+  hand-off**: `download` *and* `target="_blank" rel="noopener"` together. Where `download`
+  is honoured (desktop) it wins and `target` is ignored; where it is not (an installed
+  PWA), `_blank` opens a browser overlay that *has* a Done button. Dropping either
+  attribute breaks one of the two platforms.
+
+⚠️ Do **not** add `-webkit-touch-callout: none` or `user-select: none` to `.dlprev__img` —
+a real `<img>` keeps long-press → "Save Image", the one save route that needs neither
+`download` nor `_blank`.
+
+### Spawn attachments
+
+The reverse direction: a spawn (dev **and** knowledge/Atlas) may carry base64 `images` —
+any file type, not just images. They are validated once, above the kind branch, against
+`AGENT_MAX_IMAGES`; the executor saves them under `uploads/<id>` **after** the session id is
+resolved and **before** anything is registered or launched (so a bad attachment fails fast
+leaving nothing behind), and folds their absolute paths into the opening prompt as a
+single-line tail telling the agent to `Read` them first.

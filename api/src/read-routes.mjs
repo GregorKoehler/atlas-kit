@@ -148,8 +148,20 @@ function noteTags(md) {
   return Array.isArray(t) ? t.map((x) => String(x)) : []
 }
 
-// Each Wiki/Projects/<name>.md is a project (type: project). Frontmatter carries
-// tag / optional repo / now / goal; the H1 is the display name.
+// The project cards, read from the vault's Wiki/Projects/*.md.
+//
+// MEMBERSHIP: `type: project` AND a non-empty `goal:`. Wiki/Projects/ is a
+// normal Atlas folder and is bigger than the card set — it also holds project
+// pages that carry no card schema yet, and pages that are not projects at all
+// (a `type: topic` hub, a `type: log`). `goal` is what the card renders and the
+// one field only the operator writes, so it is the opt-in that keeps card
+// membership deliberate rather than "every file in the folder".
+//
+// Everything else on the page is optional: `tag` (the KB-footprint count),
+// `repo` (a local checkout path), `github`, `now`, `agent_repo` (the
+// spawnable-repo binding and the opt-in for the card's dev-agent surface) and
+// the delivery flags. The H1 is the display name; every caller looks a project
+// up by `agent_repo`, never by filename.
 export function listProjects() {
   const dir = path.join(VAULT, 'Wiki', 'Projects')
   let files = []
@@ -164,6 +176,9 @@ export function listProjects() {
     const md = readMd(abs)
     if (md == null) continue
     const fm = frontmatter(md)
+    if (fm.type !== 'project') continue
+    const goal = String(fm.goal || '').trim()
+    if (!goal) continue
     out.push({
       name: firstHeading(md, path.basename(f, '.md')),
       tag: String(fm.tag || ''),
@@ -179,7 +194,7 @@ export function listProjects() {
       selfDeploy: fm.self_deploy === true,
       deployManual: String(fm.deploy_manual || ''),
       now: String(fm.now || ''),
-      goal: String(fm.goal || ''),
+      goal,
       path: path.relative(VAULT, abs),
     })
   }
@@ -858,8 +873,9 @@ export function readRouter() {
     }),
   )
 
-  // Project cards: each Wiki/Projects/<name>.md (goal/now/repo/tag) + last commit
-  // when a repo is set + a tag-based count of related notes (the KB footprint).
+  // Project cards: each QUALIFYING Wiki/Projects/<name>.md (see listProjects for
+  // the `type: project` + non-empty `goal:` membership rule) + last commit when a
+  // repo is set + a tag-based count of related notes (the KB footprint).
   r.get('/api/projects', async (_req, res) => {
     const parsed = listProjects()
     const counts = relatedCounts(new Set(parsed.map((p) => p.tag).filter(Boolean)))
