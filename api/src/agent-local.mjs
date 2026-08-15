@@ -84,14 +84,17 @@ const CONTROL_MCP_CONFIG = `${WORKSPACE}/api/src/mcp/control.mcp.json`
 const ATLAS_CONTROL_LAUNCH_CMD =
   process.env.AGENT_ATLAS_LAUNCH_CMD ||
   `IS_SANDBOX=1 ATLAS_SESSION={atlasSession} env -u ANTHROPIC_API_KEY claude --model {model} --effort {effort} --session-id {sid} --mcp-config ${CONTROL_MCP_CONFIG} --strict-mcp-config --dangerously-skip-permissions {task}`
-// Extended (1M) context is the DEFAULT — the subscription serves the 1M window
-// without usage credits for Opus/Fable, so the fallback model + the meter's
-// window default to it. AGENT_EXTENDED_CONTEXT=0 (or false/no/off) is the global
-// kill-switch back to the standard window. Kept in sync with the proxy's
-// resolution in agent-routes.mjs (which also keeps Sonnet on the standard
-// window — its 1M variant needs usage credits the subscription lacks).
+// Extended (1M) context is the DEFAULT and applies to EVERY model — the
+// subscription serves the 1M window without usage credits — so the fallback model
+// + the meter's window default to it. AGENT_EXTENDED_CONTEXT=0 (or false/no/off)
+// is the global kill-switch back to the standard window. Kept in sync with the
+// proxy's resolution in agent-routes.mjs.
 const EXTENDED_CONTEXT = !/^(0|false|no|off)$/i.test(process.env.AGENT_EXTENDED_CONTEXT || '')
-const DEFAULT_MODEL = EXTENDED_CONTEXT ? 'claude-opus-4-8[1m]' : 'claude-opus-4-8'
+// Only a fallback for a DIRECT call that omits a model; the proxy normally passes
+// one. Mirrors the proxy's dev default (spawnPicks in agent-routes.mjs) so the two
+// paths agree — Sonnet: fast, capable, a fraction of Opus's limit weight. Pick
+// Opus/Fable explicitly for hard tasks.
+const DEFAULT_MODEL = `claude-sonnet-5${EXTENDED_CONTEXT ? '[1m]' : ''}`
 const DEFAULT_EFFORT = 'xhigh'
 const EXEC_TIMEOUT_MS = Number(process.env.AGENT_LOCAL_EXEC_TIMEOUT_MS || 15000)
 // Detector window: the bottom rows of the pane the busy/menu scans look at

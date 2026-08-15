@@ -61,8 +61,43 @@ const tool = (fn) => async (args) => {
   }
 }
 
-export function buildServer() {
-  const server = new McpServer({ name: 'atlas-kit', version: '0.1.0' })
+// The knowledge-base READ tools — the only ones a knowledge-only session gets.
+// Exported so a narrowed tool surface is assertable (mcp-http-fail-closed.test.mjs).
+export const KNOWLEDGE_TOOLS = new Set([
+  'query_atlas',
+  'query_vault',
+  'get_note',
+  'wiki_index',
+  'wiki_pages',
+  'wiki_graph',
+  'recent_activity',
+])
+
+/**
+ * Build the MCP server.
+ *
+ * `knowledgeOnly` narrows registration to KNOWLEDGE_TOOLS — reads over the vault,
+ * nothing else. `agentControl` gates the spawn/steer/kill tools; it defaults to the
+ * ATLAS_AGENT_CONTROL env flag (set only by control.mcp.json, i.e. the Atlas
+ * orchestrator's own MCP child) but the HTTP entry passes `false` outright, so a
+ * remote connector can never reach them however the env is configured.
+ *
+ * Filtering at registration (rather than at each call site) keeps the tool
+ * definitions below untouched and means agent-control could not register even if
+ * both flags were somehow set.
+ */
+export function buildServer({
+  knowledgeOnly = !!process.env.ATLAS_MCP_KNOWLEDGE_ONLY,
+  agentControl = !!process.env.ATLAS_AGENT_CONTROL,
+} = {}) {
+  const full = new McpServer({ name: 'atlas-kit', version: '0.1.0' })
+  const server = knowledgeOnly
+    ? {
+        registerTool: (name, def, handler) => {
+          if (KNOWLEDGE_TOOLS.has(name)) full.registerTool(name, def, handler)
+        },
+      }
+    : full
 
   // Optional `vault` on the write tools — route ingest/research/amend to a
   // specific knowledge base. Only added when more than one vault is configured;
@@ -180,10 +215,36 @@ export function buildServer() {
 
   // Opt-in: only the Atlas ORCHESTRATOR launches the MCP server with this flag
   // set (its control.mcp.json sets ATLAS_AGENT_CONTROL=1), so a normal vault
-  // chat / dev-agent session never sees the agent-control tools.
-  if (process.env.ATLAS_AGENT_CONTROL) registerAgentControl(server)
+  // chat / dev-agent session never sees the agent-control tools. `knowledgeOnly`
+  // is belt-and-braces on top: the filter above would drop them anyway.
+  if (agentControl && !knowledgeOnly) registerAgentControl(server)
 
-  return server
+  return full
+}
+
+/**
+ * The POST body for a spawn_agent call. A DEV agent spawned by an Atlas
+ * orchestrator defaults to Opus at `high` effort — passed EXPLICITLY, because the
+ * /api/agents/spawn route's dev default (Sonnet) belongs to the dashboard's own
+ * spawn dropdown and must stay there; the route cannot tell its two dev callers
+ * apart. A knowledge agent sends neither key, so it picks up the route's knowledge
+ * default (Opus at xhigh). Pure + exported so the defaults are testable
+ * (api/test/agent-model-default.test.mjs).
+ */
+export function spawnBody({ task, repo, kind, vault, model, effort, parent }) {
+  const body = { task }
+  if (parent) body.parent = parent
+  if (kind === 'knowledge') {
+    body.kind = 'knowledge'
+    if (vault) body.vault = vault
+    if (model) body.model = model
+    if (effort) body.effort = effort
+  } else {
+    body.repo = repo
+    body.model = model || 'opus'
+    body.effort = effort || 'high'
+  }
+  return body
 }
 
 /* ---- AGENT-CONTROL tools (opt-in: ATLAS_AGENT_CONTROL) -------------
@@ -276,26 +337,14 @@ function registerAgentControl(server) {
         repo: z.string().optional().describe('repo key for a DEV agent (a localRepos key or a bridges[].repos entry from list_agents); omit for a knowledge agent'),
         kind: z.enum(['dev', 'knowledge']).optional().describe('default "dev"'),
         vault: z.string().optional().describe('for a knowledge agent: which vault (e.g. "atlas")'),
-        model: z.enum(['opus', 'fable', 'sonnet']).optional().describe('default opus'),
-        effort: z.enum(['high', 'xhigh', 'max']).optional().describe('default xhigh'),
+        model: z.enum(['opus', 'fable', 'sonnet']).optional().describe('default opus for a dev agent you spawn; opus for a knowledge agent'),
+        effort: z.enum(['high', 'xhigh', 'max']).optional().describe('default high (dev) / xhigh (knowledge)'),
       },
     },
-    tool(({ task, repo, kind, vault, model, effort }) => {
-      const body = { task }
-      if (model) body.model = model
-      if (effort) body.effort = effort
-      // Stamp this orchestrator as the parent so the dashboard can draw the spawn
-      // lineage (ATLAS_SESSION is injected into the MCP child's env by the
-      // Atlas launch — agent-local.mjs's ATLAS_CONTROL_LAUNCH_CMD).
-      if (process.env.ATLAS_SESSION) body.parent = process.env.ATLAS_SESSION
-      if (kind === 'knowledge') {
-        body.kind = 'knowledge'
-        if (vault) body.vault = vault
-      } else {
-        body.repo = repo
-      }
-      return apiPost('/api/agents/spawn', body)
-    }),
+    // Stamp this orchestrator as the parent so the dashboard can draw the spawn
+    // lineage (ATLAS_SESSION is injected into the MCP child's env by the Atlas
+    // launch — agent-local.mjs's ATLAS_CONTROL_LAUNCH_CMD).
+    tool((args) => apiPost('/api/agents/spawn', spawnBody({ ...args, parent: process.env.ATLAS_SESSION }))),
   )
 
   server.registerTool(

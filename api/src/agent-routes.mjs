@@ -222,26 +222,36 @@ Keep replies short — durable knowledge belongs in Atlas pages, not in the tran
 // Spawn-time model/effort selection. The client sends a short key; the proxy
 // resolves it to the full Claude Code model ID and validates effort against the
 // CLI's accepted levels (the dashboard exposes high / "very high" (xhigh) / max).
-// Defaults: Opus on xhigh.
+// Defaults live in spawnPicks() below.
 //
-// The 1M extended-context variant (`[1m]` suffix) is the DEFAULT — the
-// subscription serves the 1M window without usage credits for Opus/Fable, so
-// every spawn of those gets it. Set AGENT_EXTENDED_CONTEXT=0 (or false/no/off)
-// to fall back to the standard context window as a global kill-switch. The
-// meter's window default in agent-local.mjs tracks the same flag.
-//
-// EXCEPTION — Sonnet stays on the standard window: its 1M variant DOES require
-// usage credits, which the subscription-auth path (blank ANTHROPIC_API_KEY)
-// doesn't have, so `claude-sonnet-4-6[1m]` errors out with "Usage credits
-// required for 1M context". So Sonnet never gets the `[1m]` suffix.
+// The 1M extended-context variant (`[1m]` suffix) is the DEFAULT for EVERY
+// model — Sonnet included — since the subscription serves the 1M window without
+// usage credits. Set AGENT_EXTENDED_CONTEXT=0 (or false/no/off) to fall back to
+// the standard context window as a global kill-switch. The meter's window
+// default in agent-local.mjs tracks the same flag.
 const EXTENDED_CONTEXT = !/^(0|false|no|off)$/i.test(process.env.AGENT_EXTENDED_CONTEXT || '')
 const CTX = EXTENDED_CONTEXT ? '[1m]' : ''
 const AGENT_MODELS = {
   fable: `claude-fable-5${CTX}`,
-  opus: `claude-opus-4-8${CTX}`,
-  sonnet: 'claude-sonnet-4-6',
+  opus: `claude-opus-5${CTX}`,
+  sonnet: `claude-sonnet-5${CTX}`,
 }
 const AGENT_EFFORTS = new Set(['high', 'xhigh', 'max'])
+
+// Default model/effort, by KIND. Knowledge/Atlas chats default to Opus at xhigh —
+// they traverse and synthesize the typed graph, where the stronger model pays for
+// itself. DEV agents default to Sonnet at xhigh: that default belongs to the
+// dashboard's own spawn dropdown, which stays on the cheaper, faster model. A dev
+// agent spawned BY an Atlas orchestrator gets Opus at `high` instead — applied by
+// the MCP spawn_agent tool (spawnBody in mcp/tools.mjs), which passes model/effort
+// explicitly, because the route can't tell its two dev callers apart. Pure +
+// exported so the defaults are testable (api/test/agent-model-default.test.mjs).
+export function spawnPicks({ model, effort, kind } = {}) {
+  return {
+    modelId: AGENT_MODELS[model || (kind === 'knowledge' ? 'opus' : 'sonnet')],
+    effortLevel: effort || 'xhigh',
+  }
+}
 
 // Call a bridge; returns { ok, status, body } and never throws — a down bridge /
 // timeout comes back as ok:false so callers can degrade. `bridge` is a resolved
@@ -588,8 +598,7 @@ async function performSpawn(raw) {
     return { status: 400, body: { ok: false, error: `too many files (max ${MAX_IMAGES})` } }
   if (imgs.some((im) => !im || typeof im.dataUrl !== 'string'))
     return { status: 400, body: { ok: false, error: 'each attachment needs a "dataUrl"' } }
-  const modelId = AGENT_MODELS[model || 'opus']
-  const effortLevel = effort || 'xhigh'
+  const { modelId, effortLevel } = spawnPicks({ model, effort, kind })
   // Knowledge agents are always box-local (the box owns the vault); `task` is
   // the operator's opening question. An optional `vault` key points the chat at
   // a non-default vault. Any TYPED vault (one carrying a Wiki/Legend.md — atlas,

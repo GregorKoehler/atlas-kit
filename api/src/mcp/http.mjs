@@ -11,8 +11,17 @@
  * The remote exposure (Cloudflare Tunnel → mcp.<domain>) and the OAuth /
  * Access layer go IN FRONT of this; see docs/SETUP.md.
  *
+ * FAILS CLOSED (http-policy.mjs): being REACHABLE without Access configured
+ * EXITS NON-ZERO instead of serving — reachable meaning a non-loopback
+ * MCP_BIND *or* a cloudflared ingress rule for this port (cloudflared dials
+ * loopback, so the bind alone proves nothing). Present-but-empty CF_ACCESS_*
+ * counts as unset, and an inactive gate is always logged — it can never be
+ * silently off. The tool surface here is KNOWLEDGE-ONLY by default (the 7 read
+ * tools) and NEVER carries the agent-control tools, whatever the env says.
+ *
  * Run: node --env-file=../../.env api/src/mcp/http.mjs
- * Config: MCP_PORT (default 3002), MCP_BIND (default 127.0.0.1).
+ * Config: MCP_PORT (default 3002), MCP_BIND (default 127.0.0.1),
+ *         CF_ACCESS_TEAM_DOMAIN + CF_ACCESS_AUD, ATLAS_MCP_HTTP_SURFACE.
  * ------------------------------------------------------------------ */
 import express from 'express'
 import { randomUUID } from 'node:crypto'
@@ -20,27 +29,47 @@ import { createRemoteJWKSet, jwtVerify } from 'jose'
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js'
 import { isInitializeRequest } from '@modelcontextprotocol/sdk/types.js'
 import { buildServer } from './tools.mjs'
+import { accessPolicy, accessPrincipal, cleanEnv, readTunnelIngress, toolSurface } from './http-policy.mjs'
 
 const PORT = Number(process.env.MCP_PORT || 3002)
-const BIND = process.env.MCP_BIND || '127.0.0.1'
+const BIND = cleanEnv(process.env.MCP_BIND) || '127.0.0.1'
 
-// Cloudflare Access (Managed OAuth) fronts mcp.<domain> and runs the OAuth flow;
-// every request it proxies carries a signed Cf-Access-Jwt-Assertion. Verify it
-// here (signature vs the team JWKS, issuer, audience) as defense-in-depth — the
-// origin then can't be reached by anything that didn't pass through Access.
-// No-op when unconfigured (local dev / before the Access app exists).
-const CF_TEAM = process.env.CF_ACCESS_TEAM_DOMAIN || '' // e.g. yourteam.cloudflareaccess.com
-const CF_AUD = process.env.CF_ACCESS_AUD || '' // the Access application's AUD tag
+// Cloudflare Access (Managed OAuth, or a Service Auth policy for machine callers)
+// fronts mcp.<domain>; every request it proxies carries a signed
+// Cf-Access-Jwt-Assertion. Verify it here (signature vs the team JWKS, issuer,
+// audience) — and refuse to run at all if we are reachable without that gate.
+const CF_TEAM = cleanEnv(process.env.CF_ACCESS_TEAM_DOMAIN) // e.g. yourteam.cloudflareaccess.com
+const CF_AUD = cleanEnv(process.env.CF_ACCESS_AUD) // the Access application's AUD tag
+// Loopback is not the same as unreachable: cloudflared dials localhost, so an ingress
+// rule for this port publishes it while the bind still looks safe — and that is exactly
+// what infra/cloudflared-config.example.yml sets up. Read the tunnel's own config so
+// that case fails closed too.
+const TUNNEL = readTunnelIngress(PORT)
+const POLICY = accessPolicy({ bind: BIND, team: CF_TEAM, aud: CF_AUD, tunnel: TUNNEL })
+if (!POLICY.ok) {
+  console.error(POLICY.message)
+  process.exit(1)
+}
+const SURFACE = toolSurface(process.env)
+
 let _jwks
 const jwks = () => (_jwks ??= createRemoteJWKSet(new URL(`https://${CF_TEAM}/cdn-cgi/access/certs`)))
 
 async function cfAccess(req, res, next) {
-  if (!CF_TEAM || !CF_AUD) return next() // unconfigured → open (localhost-only anyway)
+  // Unenforced is now only ever the loopback-dev case — accessPolicy() exits
+  // rather than let this branch be reached on a reachable bind.
+  if (!POLICY.enforced) return next()
   const token = req.headers['cf-access-jwt-assertion']
   if (!token) return res.status(401).json({ error: 'missing Cf-Access-Jwt-Assertion' })
   try {
     const { payload } = await jwtVerify(token, jwks(), { issuer: `https://${CF_TEAM}`, audience: CF_AUD })
-    req.accessEmail = payload.email
+    // A service-token JWT has no `email` (and `sub: ""`) — it identifies itself by
+    // `common_name`. Accept that WITHOUT loosening verification above, but a token
+    // that names nobody at all is rejected rather than served anonymously.
+    const principal = accessPrincipal(payload)
+    if (!principal) return res.status(403).json({ error: 'Access JWT names no principal (no email, no common_name)' })
+    req.accessPrincipal = principal.id
+    req.accessEmail = principal.email
     next()
   } catch (e) {
     res.status(403).json({ error: 'invalid Access JWT', detail: e?.message || String(e) })
@@ -48,14 +77,16 @@ async function cfAccess(req, res, next) {
 }
 
 const app = express()
-app.use(express.json({ limit: '256kb' }))
+// Body parsing is per-route and BEHIND cfAccess: an unauthenticated caller should
+// not get us to parse its JSON at all.
+const body = express.json({ limit: '256kb' })
 
 app.get('/health', (_req, res) => res.json({ ok: true, service: 'atlas-kit-mcp' }))
 
 // sessionId → transport
 const transports = {}
 
-app.post('/mcp', cfAccess, async (req, res) => {
+app.post('/mcp', cfAccess, body, async (req, res) => {
   const sid = req.headers['mcp-session-id']
   let transport = sid ? transports[sid] : undefined
 
@@ -71,7 +102,10 @@ app.post('/mcp', cfAccess, async (req, res) => {
     transport.onclose = () => {
       if (transport.sessionId) delete transports[transport.sessionId]
     }
-    await buildServer().connect(transport)
+    // KNOWLEDGE-ONLY unless explicitly widened, and NEVER agent-control: this is
+    // the surface a remote connector (or a remote dev-agent container) reaches, so
+    // it gets reads over the vault and nothing that spawns, steers or kills an agent.
+    await buildServer({ knowledgeOnly: SURFACE === 'knowledge', agentControl: false }).connect(transport)
   } else if (!transport && sid) {
     // Stale session id: the session is gone (server restart wiped this in-memory
     // map, or it was reaped) but the client still holds the old id. Spec says
@@ -107,8 +141,19 @@ const bySession = async (req, res) => {
 app.get('/mcp', cfAccess, bySession)
 app.delete('/mcp', cfAccess, bySession)
 
-app.listen(PORT, BIND, () =>
+app.listen(PORT, BIND, () => {
   console.error(
-    `[atlas-kit-mcp] HTTP on http://${BIND}:${PORT}/mcp — Access JWT check: ${CF_TEAM && CF_AUD ? 'ENFORCED' : 'off (unconfigured)'}`,
-  ),
-)
+    `[atlas-kit-mcp] HTTP on http://${BIND}:${PORT}/mcp — Access JWT check: ${
+      POLICY.enforced ? 'ENFORCED' : 'INACTIVE (unconfigured)'
+    }, tools: ${SURFACE}-only`,
+  )
+  // Loud, every start: an unauthenticated /mcp or a reachable origin must never be
+  // something you have to read the env to notice.
+  for (const w of POLICY.warnings) console.error(`[atlas-kit-mcp] WARNING: ${w}`)
+  if (SURFACE === 'broad') {
+    console.error(
+      '[atlas-kit-mcp] WARNING: ATLAS_MCP_HTTP_SURFACE=broad — this endpoint serves the FULL non-control ' +
+        'tool set, not just the 7 knowledge reads. Only ever behind Access.',
+    )
+  }
+})

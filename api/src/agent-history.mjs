@@ -16,6 +16,34 @@
 //     `<sessionId>.jsonl` (the full ORIGINAL conversation; post-revive forks there
 //     can't be attributed, a documented limitation).
 // Aborted spawns leave tiny stub files with no assistant message — dropped.
+//
+// The OPENING turn is special-cased: it is not a chat message but the whole
+// prompt the agent was launched with (preamble + retrieved Atlas evidence + the
+// operator's question), and the 20 KB per-message cap was cutting nearly half
+// off it mid-evidence — silently, so a complete retrieval read as an empty one.
+// It keeps its text up to MAX_FIRST_TEXT; see capText / stitchParsed.
+//
+// A message delivered MID-TURN (boundary delivery) is special-cased too: the
+// harness records it as a `queued_command` attachment rather than a user turn,
+// so the chat view had NO record of it at all. See parseTranscript / placeQueued
+// — recognition there, re-ordering here.
+//
+// An OUTBOUND agent-control call (an Atlas orchestrator instructing a dev agent)
+// is special-cased for the same reason: its brief is kilobytes of structured
+// text in `input.text`/`input.task`, and NEITHER key is in toolSummary's pick
+// list — so the chip fell through to the first string value in the input, i.e.
+// the recipient's session id (or, for spawn_agent, the repo name), and the
+// instruction itself was DESTROYED here, in the API, before the browser ever saw
+// it. A structured `outbound` field carries the byte-exact argument through
+// instead. Read path only — nothing about what is SENT changes.
+//
+// AskUserQuestion is special-cased because the chat otherwise showed only a bare
+// "🔧 AskUserQuestion" chip: its tool_use carries a structured `askUserQuestion`
+// field (question/header/options+descriptions, per question) instead of the
+// generic tool summary, and its tool_result is kept as its own
+// `askUserQuestionAnswer` message (normally tool_result entries are dropped as
+// mere tool output) — the transcript's OWN record of what was actually
+// answered, so the chat never has to trust an unverified client-side echo.
 
 import crypto from 'node:crypto'
 import fs from 'node:fs'
@@ -26,6 +54,24 @@ import { projectKey } from './subagent-scan.mjs'
 const MAX_TOTAL_BYTES = Number(process.env.AGENT_HISTORY_MAX_BYTES || 24 * 1024 * 1024)
 const MAX_MESSAGES = Number(process.env.AGENT_HISTORY_MAX_MESSAGES || 4000)
 const MAX_TEXT = Number(process.env.AGENT_HISTORY_MAX_TEXT || 20000) // per-message text cap
+// …except the OPENING turn, which is the agent's whole brief: standing preamble +
+// retrieved Atlas evidence + the operator's question. Those routinely run past
+// MAX_TEXT (the executor's own AGENT_PROMPT_MAX_CHARS ceiling is 50,000 chars),
+// and a silently-cut prompt loses its whole evidence section — which reads as
+// "retrieval returned nothing" when retrieval was fine. So the first turn gets
+// its own, generous cap (4× that ceiling): a real bound, not "no bound", since
+// the parse is held in the incremental cache.
+const MAX_FIRST_TEXT = Number(process.env.AGENT_HISTORY_MAX_FIRST_TEXT || 200000)
+
+// Cap a message body, marking the cut so a truncated message can never read as a
+// complete one. Applied TWICE, deliberately: parseTranscript can only apply the
+// outer MAX_FIRST_TEXT bound (it sees one chunk of one file, so it cannot know
+// which message is the session's first — see the incremental cache and the
+// resume-fork stitch below), and stitchParsed, which does see the whole ordered
+// history, clamps everything but the opening turn back down to MAX_TEXT.
+function capText(s, max) {
+  return s.length > max ? s.slice(0, max) + '\n… [truncated]' : s
+}
 
 // Fingerprint of a prompt's text, used to match an Atlas-injected steer back to
 // the user turn it produced in the transcript. Whitespace-normalized so a
@@ -39,15 +85,40 @@ export function steerKey(text) {
     .slice(0, 16)
 }
 
-// Mark user turns an Atlas orchestrator injected (not the operator) — the
-// injected prompt lands as an ordinary user turn, so we match it back by the
-// fingerprint set recorded at steer time. Mutates `messages` in place (they're
-// fresh stitchParsed objects, cached under a rev that includes the steer set).
-// Exported so the workstation bridge tags its container-transcript history the
-// same way the box tags its own.
+// One entry of a session's recorded steer set. Historically (and on the bridge)
+// an entry is the bare fingerprint of an ATLAS steer; a message from another
+// AGENT records `<source>:<fingerprint>` instead, so the same set carries WHO
+// injected the turn and not just that someone did. Bare entries keep meaning
+// 'atlas', which is what makes old persisted state and the bridge's own
+// recordSteer keep working unchanged.
+export function steerEntry(key, source) {
+  return source && source !== 'atlas' ? `${source}:${key}` : key
+}
+
+// fingerprint → source, parsed off the recorded entries above.
+function steerSources(steerSet) {
+  const out = new Map()
+  for (const e of steerSet) {
+    const s = String(e)
+    const i = s.indexOf(':')
+    if (i > 0) out.set(s.slice(i + 1), s.slice(0, i))
+    else out.set(s, 'atlas')
+  }
+  return out
+}
+
+// Mark user turns an Atlas orchestrator or a peer agent injected (not the
+// operator) — the injected prompt lands as an ordinary user turn, so we match it
+// back by the fingerprint set recorded at steer time. Mutates `messages` in place
+// (they're fresh stitchParsed objects, cached under a rev that includes the steer
+// set). Exported so the workstation bridge tags its container-transcript history
+// the same way the box tags its own.
 export function tagSteered(messages, steerSet) {
+  const sources = steerSources(steerSet)
   for (const m of messages) {
-    if (m.role === 'user' && steerSet.has(steerKey(m.text))) m.source = 'atlas'
+    if (m.role !== 'user') continue
+    const source = sources.get(steerKey(m.text))
+    if (source) m.source = source
   }
 }
 
@@ -61,6 +132,68 @@ function toolSummary(input) {
   return typeof first === 'string' ? clean(first) : ''
 }
 
+// The agent-control MCP tools that put WORDS into another agent's session, and
+// which input key holds them. Two groups, deliberately:
+//   • an authored brief — the orchestrator's OWN instruction, passed as a tool
+//     argument (`text`/`task`), which is what the operator is accountable for
+//     and what must become readable;
+//   • no `field` — the words are composed SERVER-SIDE from a fixed template
+//     (ship prompt, recap prompt), so there is no argument to render; these
+//     still get an outbound entry, without text, so the chat says what was sent
+//     instead of showing a bare id.
+// Keyed by the bare tool name: the MCP prefix (`mcp__<server>__`) is a
+// deployment detail, so recognition is by suffix (see outboundOf).
+const OUTBOUND_TOOLS = new Map([
+  ['prompt_agent', { kind: 'prompt', field: 'text' }],
+  ['queue_agent', { kind: 'queue', field: 'text' }],
+  ['interrupt_agent', { kind: 'interrupt', field: 'text' }], // text is optional — observed absent
+  ['spawn_agent', { kind: 'spawn', field: 'task' }],
+  ['ship_agent', { kind: 'ship', field: null }],
+  ['kill_agent', { kind: 'kill', field: null }],
+  ['cleanup_agent', { kind: 'cleanup', field: null }],
+])
+
+// The structured outbound record of one such call, or null for any other tool.
+// `text` is the argument BYTE-EXACT — never reflowed, never trimmed: a brief is
+// headings and bullets, and normalizing its whitespace is exactly the damage
+// this fixes. Capped at MAX_TEXT like a message body, with the cut marked so a
+// truncated brief can never read as a complete one.
+function outboundOf(name, input) {
+  const spec = OUTBOUND_TOOLS.get(String(name).split('__').pop())
+  if (!spec) return null
+  const inp = input && typeof input === 'object' ? input : {}
+  const out = { kind: spec.kind }
+  if (typeof inp.id === 'string' && inp.id) out.target = inp.id
+  if (typeof inp.repo === 'string' && inp.repo) out.repo = inp.repo
+  let text = spec.field && typeof inp[spec.field] === 'string' ? inp[spec.field] : ''
+  if (text.length > MAX_TEXT) {
+    text = text.slice(0, MAX_TEXT)
+    out.truncated = true
+  }
+  if (text) out.text = text
+  return out
+}
+
+// AskUserQuestion's input is `{ questions: [...] }` — an array, so toolSummary
+// above finds no string field and the chip renders as a bare "🔧
+// AskUserQuestion" with no hint of what was asked: the operator scrolling the
+// chat never sees the question, the options, or the answer, even though the
+// transcript holds all of it. Pass the real question/header/options/descriptions
+// through structured instead, so the client can render an actual question block.
+function askUserQuestionOf(input) {
+  const questions = input && Array.isArray(input.questions) ? input.questions : []
+  return {
+    questions: questions.map((q) => ({
+      question: String(q?.question || ''),
+      ...(q?.header ? { header: String(q.header) } : {}),
+      ...(q?.multiSelect ? { multiSelect: true } : {}),
+      options: Array.isArray(q?.options)
+        ? q.options.map((o) => ({ label: String(o?.label || ''), ...(o?.description ? { description: String(o.description) } : {}) }))
+        : [],
+    })),
+  }
+}
+
 // Parse one `.jsonl` file's TEXT into ordered chat messages. Pure (no fs). Returns
 // { sessionId, firstTs, messages:[{role,ts,text,tools,uuid}], assistantCount }.
 export function parseTranscript(text) {
@@ -68,6 +201,10 @@ export function parseTranscript(text) {
   let sessionId = null
   let firstTs = null
   let assistantCount = 0
+  // AskUserQuestion tool_use ids seen so far in THIS file, so that when its
+  // tool_result later shows up (normally dropped below as mere tool output) we
+  // recognize it as the authoritative resolved answer and keep it.
+  const askToolIds = new Set()
   for (const line of String(text).split('\n')) {
     if (!line) continue
     let e
@@ -78,6 +215,27 @@ export function parseTranscript(text) {
     }
     if (e.sessionId && !sessionId) sessionId = e.sessionId
     if (e.isSidechain) continue // sub-agent lines aren't the operator conversation
+    // A message delivered MID-TURN (boundary delivery) is NEVER recorded as a
+    // `user` turn: Claude Code writes it as a `queued_command` attachment when
+    // the running turn CONSUMES it. Emit it as the ordinary user turn it is — it
+    // has a real uuid, so stitchParsed's dedup still holds — and flag it `queued`
+    // so stitchParsed can put it back in send order (the line is appended at
+    // consumption time, hence out of ascending-ts order in the file).
+    // Two neighbours deliberately stay dropped by the guard below:
+    //   • the `queue-operation` enqueue/remove pair — same text (a second bubble)
+    //     and NO uuid, so it could never be deduped against this one;
+    //   • `commandMode:'task-notification'` — the harness telling the agent a
+    //     background task finished, not operator speech.
+    const att = e.type === 'attachment' ? e.attachment : null
+    if (att && att.type === 'queued_command' && att.commandMode === 'prompt') {
+      let queuedText = String(att.prompt || '').trim()
+      if (!queuedText) continue
+      queuedText = capText(queuedText, MAX_FIRST_TEXT) // clamped to MAX_TEXT in stitchParsed
+      const qts = att.timestamp || e.timestamp || null
+      if (qts && !firstTs) firstTs = qts
+      messages.push({ role: 'user', ts: qts, text: queuedText, tools: [], uuid: e.uuid || null, queued: true })
+      continue
+    }
     if (e.type !== 'user' && e.type !== 'assistant') continue // drop metadata entries
     const m = e.message
     if (!m) continue
@@ -85,27 +243,80 @@ export function parseTranscript(text) {
     let out = ''
     const tools = []
     let isToolResult = false
+    let askAnswer = null // this user entry's tool_result resolves a pending AskUserQuestion
     if (typeof c === 'string') {
       out = c
     } else if (Array.isArray(c)) {
       for (const b of c) {
         if (b.type === 'text' && typeof b.text === 'string') out += (out ? '\n' : '') + b.text
-        else if (b.type === 'tool_use') tools.push({ name: String(b.name || 'tool'), summary: toolSummary(b.input) })
-        else if (b.type === 'tool_result') isToolResult = true
+        else if (b.type === 'tool_use' && b.name === 'AskUserQuestion') {
+          if (b.id) askToolIds.add(b.id)
+          tools.push({ name: b.name, summary: '', askUserQuestion: askUserQuestionOf(b.input) })
+        } else if (b.type === 'tool_use') {
+          const name = String(b.name || 'tool')
+          const outbound = outboundOf(name, b.input)
+          // Summary unchanged for every tool — the outbound block is additive,
+          // so nothing that already rendered can regress.
+          tools.push({ name, summary: toolSummary(b.input), ...(outbound ? { outbound } : {}) })
+        } else if (b.type === 'tool_result') {
+          isToolResult = true
+          if (b.tool_use_id && askToolIds.has(b.tool_use_id)) {
+            const tr = e.toolUseResult
+            askAnswer = {
+              toolUseId: b.tool_use_id,
+              outcome: tr && typeof tr === 'object' && tr.answers ? 'answered' : 'declined',
+              ...(tr && typeof tr === 'object' && tr.answers ? { answers: tr.answers } : {}),
+            }
+          }
+        }
       }
+    }
+    if (e.type === 'user' && askAnswer) {
+      // The permanent, authoritative record of what the operator actually
+      // answered (or declined) — kept even though it's a tool_result (normally
+      // dropped below), since it's the ONLY place the real resolution lives.
+      const ts = e.timestamp || null
+      if (ts && !firstTs) firstTs = ts
+      messages.push({ role: 'user', ts, text: '', tools: [], uuid: e.uuid || null, askUserQuestionAnswer: askAnswer })
+      continue
     }
     // A user-role entry that only carries a tool_result is tool OUTPUT, not a turn;
     // isMeta entries are system-injected. Neither belongs in the conversation.
     if (e.type === 'user' && (isToolResult || e.isMeta)) continue
     out = out.trim()
     if (!out && !tools.length) continue
-    if (out.length > MAX_TEXT) out = out.slice(0, MAX_TEXT) + '\n… [truncated]'
+    out = capText(out, MAX_FIRST_TEXT) // outer bound only — stitchParsed clamps non-opening turns to MAX_TEXT
     const ts = e.timestamp || null
     if (ts && !firstTs) firstTs = ts
     if (e.type === 'assistant') assistantCount++
     messages.push({ role: e.type, ts, text: out, tools, uuid: e.uuid || null })
   }
   return { sessionId, firstTs, messages, assistantCount }
+}
+
+// Put mid-turn `queued` messages (see parseTranscript) back where they were SENT.
+// Stable insertion by timestamp: the enqueue time is the moment the operator (or
+// an orchestrator) actually sent it, which is the position they scroll to looking
+// for it — and unlike splicing after the entry `parentUuid` names, it doesn't
+// depend on a parent the parser may itself have dropped (it points at a
+// tool_result). This lives here, not in parseTranscript, because parseTranscript
+// only ever sees ONE chunk: the incremental cache (parseAppended + mergeParsed)
+// can hand it the attachment in a later chunk than the turns it belongs among.
+// stitchParsed sees the whole accumulated session, so it is the only place the
+// placement is always correct.
+function placeQueued(messages) {
+  if (!messages.some((m) => m.queued)) return messages
+  const at = (m) => (m.ts ? Date.parse(m.ts) : NaN) // parse, so mixed ISO precision still orders right
+  const out = messages.filter((m) => !m.queued)
+  for (const q of messages.filter((m) => m.queued)) {
+    const t = at(q)
+    // Before the first message stamped strictly later; equal stamps keep file
+    // order, so several queued messages at one instant stay in send order.
+    let i = Number.isNaN(t) ? -1 : out.findIndex((m) => at(m) > t)
+    if (i < 0) i = out.length
+    out.splice(i, 0, q)
+  }
+  return out
 }
 
 // Stitch several parsed files into one ordered, deduped history. Pure.
@@ -119,12 +330,28 @@ export function stitchParsed(parsed) {
   const seen = new Set()
   let messages = []
   for (const p of real) {
-    for (const m of p.messages) {
+    for (const m of placeQueued(p.messages)) {
       if (m.uuid && seen.has(m.uuid)) continue // dedup any resume replay (rare)
       if (m.uuid) seen.add(m.uuid)
-      messages.push({ role: m.role, ts: m.ts, text: m.text, tools: m.tools })
+      messages.push({
+        role: m.role,
+        ts: m.ts,
+        text: m.text,
+        tools: m.tools,
+        ...(m.askUserQuestionAnswer ? { askUserQuestionAnswer: m.askUserQuestionAnswer } : {}),
+      })
     }
   }
+  // The OPENING turn keeps its full text (up to MAX_FIRST_TEXT, applied at parse);
+  // every other message is clamped to MAX_TEXT here. This is the only place that
+  // knows which message is first: parseTranscript sees one chunk of one file (the
+  // incremental cache hands it appended bytes), and a dev agent's history is
+  // stitched across resume-forked files — so "first message of this chunk" is
+  // wrong in both directions, while this list is the whole ordered conversation.
+  // Decided BEFORE the message-count slice below, so a very long chat that drops
+  // its opening turn doesn't promote some later message into the generous cap.
+  for (let i = 1; i < messages.length; i++) messages[i].text = capText(messages[i].text, MAX_TEXT)
+  if (messages.length && messages[0].role !== 'user') messages[0].text = capText(messages[0].text, MAX_TEXT)
   // Over the cap, keep the most RECENT messages (what the truncation note
   // promises): the chat view follows the tail — dropping the tail would freeze
   // a very long conversation at its start.
