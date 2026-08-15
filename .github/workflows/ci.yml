@@ -65,16 +65,25 @@ jobs:
       # Self-contained: a throwaway tmux socket, a stub command, no real ports.
       # A shell test, so it is not part of the api/test glob below.
       - run: bash scripts/serve-tmux.test.sh
+      # Guards the semantic-search addon's self-heal GUARD CHAIN (backoff,
+      # single-flight, failure bookkeeping) — the part that can turn a failing
+      # install into a 5-minutely 1.4 GB download. Hermetic: temp dirs and a
+      # file:// mirror, no network. Also a shell test, so also outside the glob.
+      - run: bash addons/semantic-search/test/install.test.sh
       - name: install api deps
         working-directory: api
         run: npm ci
-      - name: api tests — every *.test.mjs under api/test
+      - name: api tests — every *.test.mjs under api/test and addons/*/test
         working-directory: api
         run: |
           # Opt-out list: one `test/…` path per line, each with a reason on the
           # same line. EMPTY today — every file passes on a clean runner.
           cat > "$RUNNER_TEMP/ci-skip.txt" <<'SKIP'
           SKIP
-          files=$(find test -name '*.test.mjs' | sort | grep -vxFf "$RUNNER_TEMP/ci-skip.txt")
+          # `../addons` is in the glob so an ADDON's tests are gated by the same
+          # rule as core's: adding a file is enough. Addon code imports node
+          # built-ins and core modules only, so it runs on api/node_modules —
+          # an addon that needed its own dependency would need its own job.
+          files=$(find test ../addons -name '*.test.mjs' 2>/dev/null | sort | grep -vxFf "$RUNNER_TEMP/ci-skip.txt")
           echo "$files" | sed 's/^/  · /'
           node --test --test-reporter=spec $files

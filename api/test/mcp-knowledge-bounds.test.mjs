@@ -118,7 +118,7 @@ await new Promise((r) => api.listen(0, '127.0.0.1', r))
 process.env.ATLAS_API_BASE = `http://127.0.0.1:${api.address().port}`
 test.after(() => api.close())
 
-const { buildServer, KNOWLEDGE_TOOLS, recentLogEntries } = await import('../src/mcp/tools.mjs')
+const { buildServer, KNOWLEDGE_TOOLS, recentLogEntries, capLegs } = await import('../src/mcp/tools.mjs')
 const { Client } = await import('@modelcontextprotocol/sdk/client/index.js')
 const { InMemoryTransport } = await import('@modelcontextprotocol/sdk/inMemory.js')
 
@@ -306,4 +306,40 @@ test('the knowledge surface is still exactly the seven read tools', async () => 
   const ra = (await client.listTools()).tools.find((t) => t.name === 'recent_activity')
   assert.ok(ra.inputSchema.properties.limit, 'recent_activity has no limit parameter')
   assert.match(ra.description, /NEWEST/)
+})
+
+/* --- the ADDON legs are bounded on their own terms ------------------------ */
+
+test('capLegs bounds addon legs WITHOUT touching items or `truncated`', () => {
+  const row = (i) => ({ type: 'note', title: `row ${i}`, subtitle: 'x', path: `P${i}.md`, snippet: 'y'.repeat(400), similarity: 0.5 })
+  const payload = {
+    items: [{ type: 'wiki', title: 'lexical', subtitle: 'Wiki', path: 'Wiki/A.md', snippet: 'z', score: 9 }],
+    total: 1,
+    truncated: false, // ⚠️ means "the FULL-TEXT leg had more matches than limit"
+    limit: 24,
+    legs: [
+      { key: 'a', label: 'A', addon: 'demo', available: true, items: Array.from({ length: 60 }, (_, i) => row(i)) },
+      { key: 'b', label: 'B', addon: 'demo2', available: true, items: Array.from({ length: 60 }, (_, i) => row(i)) },
+    ],
+  }
+  const out = capLegs(payload, CAP)
+  const size = JSON.stringify(out, null, 2).length
+  assert.ok(size <= CAP, `bounded answer is ${size} chars, over the ${CAP} cap`)
+  assert.ok(out.legsTruncated)
+  assert.match(out.legsNote, /of 120 addon-leg rows dropped/)
+  // The full-text half is untouched, and `truncated` still means what it meant.
+  assert.deepEqual(out.items, payload.items)
+  assert.equal(out.truncated, false)
+  assert.equal(out.total, 1)
+  // An even cut: the legs are unioned, not ranked against each other, so there is
+  // no principled way to spend one leg's budget on the other.
+  assert.equal(out.legs[0].items.length, out.legs[1].items.length)
+  assert.ok(JSON.parse(JSON.stringify(out)), 'still parses — a byte-cut would not')
+})
+
+test('capLegs is a no-op when it fits, and when there are no addon legs at all', () => {
+  const small = { items: [], total: 0, truncated: false, limit: 24, legs: [{ key: 'a', label: 'A', addon: 'd', available: true, items: [] }] }
+  assert.equal(capLegs(small, CAP), small, 'same object back — nothing to bound')
+  const none = { items: [], total: 0, truncated: false, limit: 24 }
+  assert.equal(capLegs(none, CAP), none)
 })

@@ -7,6 +7,9 @@
  *   - agent-routes (dev + knowledge agent lifecycle; writes bearer-gated)
  *   - atlas-routes (Kanban task writes via the serial commit queue; bearer)
  *   - agent-app-proxy (dev-agent live-app preview: HTTP + WebSocket)
+ *   - addons        (GET /api/addons + every ENABLED addon's own routes; with
+ *                    no addons enabled this mounts one list endpoint and
+ *                    nothing else — see api/src/addons.mjs)
  *
  * Auth: every write/exec route is gated on a single shared bearer,
  * DASHBOARD_BEARER_TOKEN. In production Caddy injects it server-side so the
@@ -21,6 +24,7 @@ import { atlasRouter } from './atlas-routes.mjs'
 import { usageRouter } from './usage-routes.mjs'
 import { hostRouter } from './host-stats-routes.mjs'
 import { appProxyHttp, attachAppUpgrade, isAppPath } from './agent-app-proxy.mjs'
+import { loadAddons, addonRouter } from './addons.mjs'
 
 const PORT = Number(process.env.API_PORT || 3001)
 const HOST = process.env.API_HOST || '127.0.0.1'
@@ -66,6 +70,17 @@ app.use(agentRouter(bearerAuth))
 app.use(atlasRouter(bearerAuth))
 app.use(usageRouter()) // GET /api/usage — Claude 5h/weekly budget (Hero meters)
 app.use(hostRouter()) // GET /api/host — box RAM/swap (Hero meters)
+
+/* Addons LAST, and awaited before the port opens.
+ *
+ * Last, so an addon can never shadow a core route by registering the same path
+ * — an optional feature may extend the API, never redefine it. Awaited, so the
+ * first request cannot arrive at a half-registered search leg: the legs are read
+ * per request out of the registry, and "enabled but not loaded yet" would be a
+ * silently lexical-only answer with no reason attached. A failing addon is
+ * recorded and skipped inside loadAddons(); it never rejects. */
+await loadAddons()
+app.use(addonRouter())
 
 const server = app.listen(PORT, HOST, () => {
   console.error(`[atlas-kit-api] listening on http://${HOST}:${PORT}`)

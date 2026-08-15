@@ -1,0 +1,4 @@
+{
+  "_comment": "Copy to addons.json (gitignored) and list the addons this box runs. Each name is a directory under addons/. The ATLAS_ADDONS env var overrides this file whenever it is set — ATLAS_ADDONS= (empty) means no addons at all. See docs/ADDONS.md.",
+  "enabled": []
+}

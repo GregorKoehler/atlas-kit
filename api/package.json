@@ -6,7 +6,7 @@
   "description": "Atlas Kit backend \u2014 Express API: dev/knowledge agent runtime, vault read API, typed query, Kanban commit queue, MCP control surface.",
   "scripts": {
     "start": "node --env-file=../.env src/server.mjs",
-    "test": "node --test --test-reporter=spec"
+    "test": "node --test --test-reporter=spec $(find test ../addons -name '*.test.mjs' 2>/dev/null | sort)"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",

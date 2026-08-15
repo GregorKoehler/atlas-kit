@@ -3,6 +3,8 @@ node_modules
 web/dist/
 api/.state/
 # Operator-local config (see the *.example.json templates):
+#   which optional addons this box runs (ATLAS_ADDONS overrides it)
+addons.json
 #   which repos a box-local dev agent may spawn on (the spawn boundary)
 api/src/agent-local-repos.json
 #   extra remote agent bridges (multi-bridge routing)

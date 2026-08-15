@@ -150,6 +150,8 @@ api/          Express API + the agent runtime + the MCP server
   src/agent-messages.mjs  the agent↔agent mail bus log (+ its per-pair send budget)
   src/atlas-query-relay.mjs  read-only Atlas queries for REMOTE agents, over the bridge channel
 agent-bridge/ Host-native bridge to drive agents in remote dev containers (Tailscale)
+addons/       OPTIONAL, env-gated features (docs/ADDONS.md). Zero enabled = zero cost.
+  semantic-search/        dense/vector retrieval as a SECOND search leg
 scripts/      serve.sh (tmux service manager), refresh-atlas, clear-done, provisioning
 infra/        Caddyfile.example, cloudflared-config.example.yml, atlas-kit.cron
 ```
@@ -208,6 +210,22 @@ normal Atlas folder and may hold project pages that aren't cards yet, so `goal:`
 line the card renders) is what promotes one. Everything else is optional: `now:`,
 `tag:` (the related-notes count), `repo:` (a local checkout path), `github:`, and
 `agent_repo:` — the spawnable-repo key that binds the card to a dev-agent surface.
+
+## Optional addons
+
+Anything with a heavier class of dependency than "read markdown off disk" ships as an
+**addon**: a self-contained directory under `addons/<name>/`, loaded only when you
+enable it with `ATLAS_ADDONS` or `addons.json`. With none enabled the kit behaves
+exactly as if the framework were not there — and `GET /api/addons` is what lets the
+dashboard gate addon surfaces at runtime, so one build of `web/dist` serves every box.
+
+Shipped today: **[`semantic-search`](addons/semantic-search/README.md)** — a resident
+EmbeddingGemma-300M ONNX encoder and a section-chunk vector index, added as a **second
+retrieval leg** beside the built-in BM25F pass. The two legs are returned separately and
+never fused; its README states the measured RAM/disk/latency costs and what each leg
+structurally cannot find.
+
+See **[docs/ADDONS.md](docs/ADDONS.md)** for the model, the hook API and how to write one.
 
 ## What this kit is **not**
 

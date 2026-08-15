@@ -4236,6 +4236,38 @@ button.capture-job__title--link {
   color: var(--text-faint);
   font-size: 0.85rem;
 }
+/* One labelled block per retrieval leg — the legs are unioned, never fused, and
+   the heading is what tells the reader which instrument found a row. */
+.search__leg {
+  padding: 0.5rem 0.6rem 0.25rem;
+  color: var(--text-faint);
+  border-top: 1px solid var(--hairline);
+  margin-top: 0.2rem;
+}
+.search__leg:first-child {
+  border-top: none;
+  margin-top: 0;
+}
+.search__leg-age {
+  color: var(--text-faint);
+  opacity: 0.75;
+}
+.search__hit-section {
+  color: var(--text-dim);
+  font-weight: 400;
+}
+/* A leg that is enabled but not running says so — silence would read as "the
+   vault has nothing", which is the one wrong conclusion here. */
+.search__warn {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.5rem 0.6rem;
+  margin-bottom: 0.2rem;
+  border-bottom: 1px solid var(--hairline);
+  color: var(--status-amber);
+  font-size: 0.72rem;
+}
 .tag {
   flex: 0 0 auto;
   font-family: var(--font-display);

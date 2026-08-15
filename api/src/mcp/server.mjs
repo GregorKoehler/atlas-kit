@@ -10,7 +10,11 @@
  * ------------------------------------------------------------------ */
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { buildServer } from './tools.mjs'
+import { loadAddons } from '../addons.mjs'
 
+// Before buildServer(): an addon's tools and its extra search legs are baked
+// into the tool table and into query_vault's description at registration.
+await loadAddons()
 const server = buildServer()
 const transport = new StdioServerTransport()
 await server.connect(transport)
