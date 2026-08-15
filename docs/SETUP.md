@@ -195,6 +195,34 @@ To run dev agents in Docker containers on your workstation instead of on the box
 See [`agent-bridge/README.md`](../agent-bridge/README.md) for the full bridge contract
 and security checklist.
 
+## Optional addons (after the ten steps)
+
+Anything with a heavier class of dependency than "read markdown off disk" ships as an
+**addon** — a self-contained directory under `addons/<name>/`, loaded only when you
+enable it. With none enabled the kit is byte-identical to one that never had the
+framework, so the install above is complete on its own.
+
+```bash
+bash addons/<name>/install.sh            # idempotent; --check reports state
+echo 'ATLAS_ADDONS=semantic-search' >> .env   # …or: cp addons.example.json addons.json
+scripts/serve.sh restart                 # enabling is a restart, not a reload
+curl -s http://127.0.0.1:8080/api/addons # what is actually enabled on this box
+```
+
+`ATLAS_ADDONS` wins whenever it is **defined** (empty means *no addons*); `addons.json`
+is the gitignored file used when it isn't. Each addon's README states what it needs, what
+it costs and the config only you can supply — a cookie file, a feed list:
+
+- **[`semantic-search`](../addons/semantic-search/README.md)** — dense retrieval as a
+  second search leg beside the built-in full-text pass.
+- **[`instagram-ingest`](../addons/instagram-ingest/README.md)** — one post or reel → a
+  `Wiki/Sources/` page, using **your own** cookies (its README is also the guide to
+  exporting a browser session safely).
+- **[`news-ingest`](../addons/news-ingest/README.md)** — an hourly sweep of **your own**
+  RSS/Atom feeds → `Wiki/Sources/` pages plus a rolling digest.
+
+[docs/ADDONS.md](ADDONS.md) is the model, the hook API and the shipped catalog.
+
 ---
 
 ### Verifying it works
