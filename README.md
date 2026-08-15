@@ -231,15 +231,22 @@ Shipped today:
   `claude -p` read of both, committed through the vault's commit queue. It drives `yt-dlp`
   with **your own** cookies, one URL at a time — its README is also the guide to exporting
   a browser session safely, and to why you should treat that file like a password.
+- **[`news-ingest`](addons/news-ingest/README.md)** — poll **your own** RSS/Atom feeds on
+  an hourly cron: each item you have not seen becomes a `Wiki/Sources/` page (the feed's
+  text verbatim plus a short `claude -p` summary) and lands in a rolling
+  `Wiki/News-Digest.md`, all in one commit. Bounded by design — a per-run item cap is what
+  keeps a busy feed list from becoming a busy bill — and it ships an example feed file, not
+  a reading list.
 
 See **[docs/ADDONS.md](docs/ADDONS.md)** for the model, the hook API and how to write one.
 
 ## What this kit is **not**
 
-Deliberately out of scope (stripped from the source): mail/calendar/news feeds,
+Deliberately out of scope (stripped from the source): mail/calendar,
 recipes + shopping, capture/dictation/voice, Drive/Gmail tooling, daily briefings, and
 every card not named above. Smaller is better — this is a starter kit, not the whole
-command center.
+command center. (RSS/Atom feeds are the one exception, and they are opt-in: nothing polls
+anything until you enable the `news-ingest` addon and write your own feed list.)
 
 ## License
 

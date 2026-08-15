@@ -13,6 +13,10 @@ api/src/bridges.json
 api/src/vaults.json
 #   the instagram-ingest skill link, created by that addon's install.sh
 .claude/skills/instagram-ingest
+#   YOUR feed list for the news-ingest addon (feeds.example.json is what ships)
+addons/news-ingest/feeds.json
+#   the news-ingest skill link, created by that addon's install.sh
+.claude/skills/news-ingest
 # agent-bridge operator-local config
 agent-bridge/repos.json
 agent-bridge/bridge.env
