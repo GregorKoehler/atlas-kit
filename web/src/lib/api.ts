@@ -1447,9 +1447,9 @@ export function spawnAgent(body: {
   vault?: string
   model?: string
   effort?: string
-  /** Dev agents only: a model-BACKEND profile name from GET /api/providers —
-   * the same harness against an Anthropic-compatible endpoint. Omit for the
-   * default subscription backend. */
+  /** A model-BACKEND profile name from GET /api/providers — the same harness
+   * against an Anthropic-compatible endpoint, for a dev agent or a knowledge
+   * chat. Omit for the default subscription backend. */
   provider?: string
   /** File attachments folded into the spawn prompt (dev agents only) — the same
    * base64 `data:` URLs as a prompt's, capped at the API's AGENT_MAX_IMAGES. */

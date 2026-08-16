@@ -254,9 +254,9 @@ For each addon they say yes to, five moves in this order:
 
 ## Phase 1c — Mention model-provider profiles (one line, only if it fits)
 
-Separately optional, and **not** an addon: a dev agent can spawn against an
-Anthropic-compatible backend — DeepSeek via OpenRouter, DeepSeek direct — running the
-**unchanged** harness ([docs/PROVIDERS.md](PROVIDERS.md)). With no profiles configured
+Separately optional, and **not** an addon: a dev agent — or a knowledge/Atlas chat — can
+spawn against an Anthropic-compatible backend, DeepSeek via OpenRouter or DeepSeek direct,
+running the **unchanged** harness ([docs/PROVIDERS.md](PROVIDERS.md)). With no profiles configured
 nothing changes anywhere, so this is a mention, not an offer: name it once, in a line,
 and only if they asked about model cost or a non-Anthropic backend. Read PROVIDERS.md
 before saying anything about it — the caveats (no prompt caching or extended thinking on

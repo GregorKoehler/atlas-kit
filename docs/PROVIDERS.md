@@ -1,10 +1,12 @@
 # Model-provider profiles
 
-Atlas Kit's dev agents run on the `claude` CLI against Anthropic, on your
+Atlas Kit's agents run on the `claude` CLI against Anthropic, on your
 subscription. A **provider profile** points that same CLI at a **different,
 Anthropic-compatible backend** — DeepSeek through OpenRouter, DeepSeek direct,
 anything that speaks the Anthropic Messages API — for one spawn, chosen from the
-dashboard's spawn form.
+dashboard's spawn form. It applies to a **dev agent** and to a **knowledge /
+Atlas chat** alike (with a caveat for the latter — see
+[Knowledge and Atlas chats](#knowledge-and-atlas-chats)).
 
 Nothing else about the agent changes. Same tmux session, same `ATLAS:` ship
 markers, same lifecycle machine, same MCP read tools, same prompt-file evidence
@@ -142,17 +144,40 @@ curl -sX POST http://127.0.0.1:3001/api/agents/spawn \
   -d '{"task":"…","repo":"my-project","model":"opus","provider":"deepseek-openrouter"}'
 ```
 
-**MCP** — `spawn_agent` takes the same optional `provider`, so an Atlas
-orchestrator can put a dev agent on another backend.
+**MCP** — `spawn_agent` takes the same optional `provider` for either kind, so an
+Atlas orchestrator can put an agent it spawns on another backend. (A tool-schema
+change reaches only sessions started after it — a long-running orchestrator keeps
+the schema it launched with until it is restarted.)
 
 `GET /api/providers` lists what is configured — **names and labels only**.
 
 Every way a profile cannot be honoured is a **`400` with the reason**, never a
-silent fallback: an unknown profile name, a knowledge chat (profiles are a
-dev-agent feature — the Atlas orchestrator and the paired Atlas worker stay on
-the subscription backend), an unmappable tier, or a repo that routes to the
-remote agent bridge. Ignoring the field would run the agent on precisely the
-backend you were moving off, and say nothing.
+silent fallback: an unknown profile name, an unmappable tier, or a repo that
+routes to the remote agent bridge. Ignoring the field would run the agent on
+precisely the backend you were moving off, and say nothing.
+
+### Knowledge and Atlas chats
+
+A knowledge chat takes a profile exactly as a dev agent does, and **nothing else
+about it changes**: same opening prompt and retrieved evidence, same vault as the
+working directory (so the vault's own `CLAUDE.md` loads exactly as before), same
+MCP config, same `--session-id` pinning, same defaults. Only the endpoint in the
+environment differs. A chat spawns no companion session, so there is no pair that
+could end up half on one backend and half on another.
+
+> ⚠️ **The Atlas agent is the privileged writer of your vault.** It holds the
+> vault as its working directory, follows the Legend's typing discipline, and
+> commits back through the serial queue — so putting it on a third-party backend
+> is a deliberate operator choice, not a free swap. Vault discipline is the part
+> a weaker or differently-tuned model degrades first, and it degrades quietly:
+> the commits still land. **Prove a backend on dev agents first**, where a bad
+> turn shows up as a PR you can read, before pointing a chat that writes the
+> Atlas at it.
+
+The **paired Atlas worker** — the short-lived session that ingests a dev agent's
+recap at close — is not spawnable with a profile and stays on the subscription
+backend, whatever backend the agent it is paired to runs on. It is the one
+launch template with no backend slot at all.
 
 ### Resuming a profiled agent
 

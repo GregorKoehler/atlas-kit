@@ -108,9 +108,11 @@ export const LAUNCH_CMD =
 // Knowledge agents (vault chats) additionally pin `--session-id {sid}`: they all
 // share the vault as cwd, so without a pinned id the transcript reader's
 // newest-file heuristic would cross-read between concurrent chats.
-const KNOWLEDGE_LAUNCH_CMD =
+// Same `{claudeEnv}` slot as a dev agent's: a knowledge chat can take a PROVIDER
+// PROFILE too, and with none the slot is the same `-u ANTHROPIC_API_KEY ` literal.
+export const KNOWLEDGE_LAUNCH_CMD =
   process.env.AGENT_KNOWLEDGE_LAUNCH_CMD ||
-  `IS_SANDBOX=1 env -u ANTHROPIC_API_KEY ${CLAUDE} --model {model} --effort {effort} --session-id {sid} --dangerously-skip-permissions {task}`
+  `IS_SANDBOX=1 env {claudeEnv}${CLAUDE} --model {model} --effort {effort} --session-id {sid} --dangerously-skip-permissions {task}`
 // The Atlas ORCHESTRATOR (the vault:'atlas' chat) is a knowledge agent that can
 // ALSO spawn/monitor/steer other agents. It loads the Atlas Kit MCP server via
 // control.mcp.json, which sets ATLAS_AGENT_CONTROL=1 in the MCP child's env —
@@ -121,15 +123,19 @@ const CONTROL_MCP_CONFIG = `${WORKSPACE}/api/src/mcp/control.mcp.json`
 // `ATLAS_SESSION={atlasSession}` exports this chat's session id into the
 // claude process — and so into its MCP child, which reads it in spawn_agent to
 // stamp every agent it spawns with `parent`, drawing the lineage constellation.
-const ATLAS_CONTROL_LAUNCH_CMD =
+export const ATLAS_CONTROL_LAUNCH_CMD =
   process.env.AGENT_ATLAS_LAUNCH_CMD ||
-  `IS_SANDBOX=1 ATLAS_SESSION={atlasSession} env -u ANTHROPIC_API_KEY ${CLAUDE} --model {model} --effort {effort} --session-id {sid} --mcp-config ${CONTROL_MCP_CONFIG} --strict-mcp-config --dangerously-skip-permissions {task}`
+  `IS_SANDBOX=1 ATLAS_SESSION={atlasSession} env {claudeEnv}${CLAUDE} --model {model} --effort {effort} --session-id {sid} --mcp-config ${CONTROL_MCP_CONFIG} --strict-mcp-config --dangerously-skip-permissions {task}`
 // The PAIRED ATLAS WORKER is a restricted, dashboard-driven session — the same
 // knowledge-only READ profile a dev agent gets (worker.mcp.json), and never the
 // orchestrator's control tools. It writes the Atlas through its own worktree, not
 // through a tool.
+// ⚠️ The ONE launch template with no `{claudeEnv}` slot, deliberately: the worker
+// is the vault's WRITER, it is paired to a dev agent rather than spawned by an
+// operator, and it takes no `provider` from anywhere — so it stays on the
+// subscription backend whatever backend the agent it is paired to runs on.
 const WORKER_MCP_CONFIG = `${WORKSPACE}/api/src/mcp/worker.mcp.json`
-const ATLAS_WORKER_LAUNCH_CMD =
+export const ATLAS_WORKER_LAUNCH_CMD =
   process.env.AGENT_ATLAS_WORKER_LAUNCH_CMD ||
   `IS_SANDBOX=1 env -u ANTHROPIC_API_KEY ${CLAUDE} --model {model} --effort {effort} --session-id {sid} --mcp-config ${WORKER_MCP_CONFIG} --strict-mcp-config --dangerously-skip-permissions {task}`
 // Extended (1M) context is the DEFAULT and applies to EVERY model — the
@@ -261,9 +267,9 @@ export const RESUME_CMD =
 // orchestrator gets its spawn/prompt/kill tools back — a plain resume would bring the
 // chat back DE-FANGED. Mirrors ATLAS_CONTROL_LAUNCH_CMD with `--resume` in place of
 // `--session-id {sid} {task}` (the conversation is already in the transcript).
-const ATLAS_CONTROL_RESUME_CMD =
+export const ATLAS_CONTROL_RESUME_CMD =
   process.env.AGENT_ATLAS_RESUME_CMD ||
-  `IS_SANDBOX=1 ATLAS_SESSION={atlasSession} env -u ANTHROPIC_API_KEY ${CLAUDE} --model {model} --effort {effort} --mcp-config ${CONTROL_MCP_CONFIG} --strict-mcp-config --dangerously-skip-permissions --resume {sid}`
+  `IS_SANDBOX=1 ATLAS_SESSION={atlasSession} env {claudeEnv}${CLAUDE} --model {model} --effort {effort} --mcp-config ${CONTROL_MCP_CONFIG} --strict-mcp-config --dangerously-skip-permissions --resume {sid}`
 // Serial ship train backstop: a member that goes busy and never prints
 // ATLAS:SHIPPED is detected as stopped the moment it returns to idle (see
 // pumpShipTrain); this only bounds a member that stays wedged-busy forever, so
@@ -291,7 +297,9 @@ function shquote(s) {
 
 /* --- provider profiles: how a backend swap reaches the agent -------------- *
  * A profile (providers.mjs) changes only the ENVIRONMENT `claude` starts in, so
- * it lands in the two places a launch is assembled from — and nowhere else.
+ * it reaches a launch through exactly two halves — the sourced env file and the
+ * `{claudeEnv}` slot — and nowhere else. Every path that can carry a profile
+ * (dev spawn, dev/orchestrator resume, knowledge chat) uses both, unchanged.
  *
  * 🔴 THE VALUES ARE SECRETS AND NEVER TOUCH A COMMAND LINE. A profile's env
  * travels BY FILE, exactly like a launch prompt (promptFileLaunch) and for a
@@ -2226,18 +2234,25 @@ export function knowledgePrompt({ id, question, preamble, context, imagePaths = 
  * (api/test/atlas-chat-evidence.test.mjs). The prompt travels by FILE
  * (promptFileLaunch) and the command carries only its path — which is what keeps
  * a chat prompt that now runs tens of KB (evidence + preamble) under tmux's
- * ~16 KB command limit. The only side effect is writing the session's prompt
- * file. */
-export function knowledgeLaunch({ id, sid, vaultKey, model, effort, prompt }) {
+ * ~16 KB command limit. Side effects: this session's prompt file, and — only
+ * under a profile — its 0600 env file, both consumed and deleted by the
+ * session's own shell.
+ *
+ * `provider` is the same optional model-BACKEND profile a dev agent takes: the
+ * SAME harness (same template, same MCP config, same prompt, same CLAUDE.md
+ * pickup — the CLI does that from the vault it is launched in) pointed at an
+ * Anthropic-compatible endpoint. Without one, every byte of this line is what it
+ * was before profiles existed. */
+export function knowledgeLaunch({ id, sid, vaultKey, model, effort, prompt, provider }) {
   return promptFileLaunch(
-    // No `provider` here: profiles are a DEV-agent feature. A knowledge chat —
-    // the Atlas orchestrator especially — stays on the subscription backend.
-    launchCommand(vaultKey === 'atlas' ? ATLAS_CONTROL_LAUNCH_CMD : KNOWLEDGE_LAUNCH_CMD, {
-      atlasSession: id, // no-op token for the non-atlas template
-      model,
-      effort,
-      sid,
-    }),
+    providerEnvPrefix(id, provider) +
+      launchCommand(vaultKey === 'atlas' ? ATLAS_CONTROL_LAUNCH_CMD : KNOWLEDGE_LAUNCH_CMD, {
+        atlasSession: id, // no-op token for the non-atlas template
+        model,
+        effort,
+        sid,
+        provider,
+      }),
     id,
     prompt,
   )
@@ -2250,9 +2265,15 @@ export function knowledgeLaunch({ id, sid, vaultKey, model, effort, prompt }) {
  * preamble's add-and-link + pull-rebase-then-commit rules are the boundary.
  * Gated on the same opt-in as the rest of box-local execution (the repo
  * allowlist file): no allowlist → no execution on this box, of either kind. */
-export async function spawnKnowledge({ question, preamble, model, effort, vault, images }) {
+export async function spawnKnowledge({ question, preamble, model, effort, vault, images, provider }) {
   if (!question || typeof question !== 'string') return { status: 400, ok: false, error: 'question required' }
   if (!localRepoKeys().length) return { status: 503, ok: false, error: 'box-local executor disabled' }
+  // Re-checked here for the same reason spawn() re-checks it: this function is
+  // also reachable without the route (the scheduler replaying a job), and
+  // launching against a profile that no longer resolves would quietly run the
+  // chat on the default backend.
+  if (provider && !resolveProvider(provider))
+    return { status: 400, ok: false, error: `unknown provider profile "${provider}"` }
   // `vault` (a key) is optional → the default vault, so a plain Knowledge Base
   // chat is unchanged; the Atlas tab passes vault:'atlas' to chat over the Atlas.
   const vlt = resolveVault(vault)
@@ -2289,6 +2310,10 @@ export async function spawnKnowledge({ question, preamble, model, effort, vault,
     id, kind: 'knowledge', task: question, repo: 'vault', vault: vlt.key,
     path: vlt.path, worktree: vlt.path, tmux, claudeSessionId,
     model: model || DEFAULT_MODEL, effort: effort || DEFAULT_EFFORT,
+    // The profile NAME only — its env is resolved per launch and never persisted
+    // (state.json is a plain file). It is also what makes a Revive come back on
+    // the SAME backend, or refuse (launchResume).
+    ...(provider ? { provider } : {}),
     status: 'running', startedAt: nowIso(), lc: initLifecycle(LC.SPAWNED),
   }
 
@@ -2306,7 +2331,7 @@ export async function spawnKnowledge({ question, preamble, model, effort, vault,
   const prompt = knowledgePrompt({ id, question, preamble, context, imagePaths })
   const launch = knowledgeLaunch({
     id, sid: claudeSessionId, vaultKey: vlt.key,
-    model: model || DEFAULT_MODEL, effort: effort || DEFAULT_EFFORT, prompt,
+    model: model || DEFAULT_MODEL, effort: effort || DEFAULT_EFFORT, prompt, provider,
   })
   ensureRepoTrusted(vlt.path) // so the launch skips Claude Code's trust dialog
   const ns = await run([
@@ -2314,6 +2339,7 @@ export async function spawnKnowledge({ question, preamble, model, effort, vault,
   ])
   if (!ns.ok) {
     dropPromptFile(id) // the session's shell never ran, so it never removed it
+    dropProviderEnv(id) // …nor the env file beside it
     session.status = 'error'
     session.error = (ns.stderr || 'tmux new-session failed').slice(0, 500)
     registry.sessions[id] = session
@@ -2324,7 +2350,7 @@ export async function spawnKnowledge({ question, preamble, model, effort, vault,
 
   registry.sessions[id] = session
   persist()
-  audit({ action: 'spawn', kind: 'knowledge', id, vault: vlt.key, model: model || DEFAULT_MODEL, effort: effort || DEFAULT_EFFORT, images: imagePaths.length, ok: true })
+  audit({ action: 'spawn', kind: 'knowledge', id, vault: vlt.key, model: model || DEFAULT_MODEL, effort: effort || DEFAULT_EFFORT, ...(provider ? { provider } : {}), images: imagePaths.length, ok: true })
   return { status: 200, ok: true, id }
 }
 
