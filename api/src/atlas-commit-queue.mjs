@@ -30,6 +30,7 @@ import { promisify } from 'node:util'
 import path from 'node:path'
 import os from 'node:os'
 import { resolveVault, defaultVaultKey } from './vaults.mjs'
+import { healTouchedFrontmatter } from './frontmatter-heal.mjs'
 
 const execFileAsync = promisify(execFile)
 const BRANCH = process.env.ATLAS_BRANCH || 'main'
@@ -82,8 +83,30 @@ async function git(atlas, args, attempt = 0) {
   }
 }
 
+/* Pull, then REPAIR whatever the merge just doubled. `*.md merge=union` keeps
+ * BOTH sides of a changed frontmatter line, which is a duplicate YAML key, and
+ * js-yaml throws on those — the page silently untypes and its card drops off
+ * the dashboard (frontmatter-heal.mjs). No writer can prevent it: the MERGE
+ * creates it. So every pull/rebase/merge in this file validates the .md files
+ * it touched and commits the repair, inside the same lock. Returns true when a
+ * repair commit was made (the caller must then push even if its own edit was a
+ * no-op — an unpushed repair leaves every other checkout broken). */
 async function syncMain(atlas) {
+  let before = null
+  try {
+    before = (await git(atlas, ['rev-parse', 'HEAD'])).stdout.trim()
+  } catch {
+    /* no HEAD yet → nothing the pull can have doubled */
+  }
   await git(atlas, ['pull', '--rebase', '--autostash', 'origin', BRANCH])
+  const healed = await healTouchedFrontmatter({
+    dir: atlas,
+    run: (args) => git(atlas, args),
+    from: before,
+    author: { name: AUTHOR_NAME, email: AUTHOR_EMAIL },
+    label: 'atlas-pull',
+  })
+  return healed.committed
 }
 
 // Push, retrying on a non-fast-forward race (another writer/phone pushed between
@@ -120,13 +143,16 @@ export function enqueueAtlasCommit({ message, mutate, paths, vault }) {
     if (!atlas) return { ok: false, warning: `${vault} vault not configured` }
     const list = paths ? (Array.isArray(paths) ? paths : [paths]).filter(Boolean) : null
     try {
-      await syncMain(atlas)
+      const repaired = await syncMain(atlas)
       if (typeof mutate === 'function') await mutate(atlas)
       await git(atlas, list ? ['add', '--', ...list] : ['add', '-A'])
-      // Nothing staged (no-op edit / already identical)? Skip cleanly.
+      // Nothing staged (no-op edit / already identical)? Skip cleanly — but a
+      // frontmatter repair the pull made is a real commit and still has to go
+      // out, or the doubled page stays broken everywhere else.
       try {
         await git(atlas, list ? ['diff', '--cached', '--quiet', '--', ...list] : ['diff', '--cached', '--quiet'])
-        return { ok: true, committed: false, warning: 'nothing to commit' }
+        if (repaired) await pushMain(atlas)
+        return { ok: true, committed: false, repaired, warning: 'nothing to commit' }
       } catch {
         /* non-zero = there ARE staged changes → proceed */
       }
@@ -142,7 +168,7 @@ export function enqueueAtlasCommit({ message, mutate, paths, vault }) {
       if (list) commitArgs.push('--', ...list)
       await git(atlas, commitArgs)
       await pushMain(atlas)
-      return { ok: true, committed: true, pushed: true }
+      return { ok: true, committed: true, pushed: true, repaired }
     } catch (e) {
       return { ok: false, warning: `atlas commit failed: ${oneLine(e)}` }
     }
@@ -176,6 +202,19 @@ export function enqueueAtlasMerge({ branch, message }) {
       for (let attempt = 0; ; attempt++) {
         await git(MERGE_WT, ['reset', '--hard', `origin/${BRANCH}`])
         await git(MERGE_WT, ['-c', `user.name=${AUTHOR_NAME}`, '-c', `user.email=${AUTHOR_EMAIL}`, 'merge', '--no-ff', '-m', msg, branch])
+        // THE producer of the duplicate-key damage: `merge=union` auto-resolves
+        // a page both sides rewrote by keeping both `now:`/`related:` lines.
+        // Repair it here, on top of the merge, BEFORE it is pushed — so the
+        // broken state never reaches main at all. `HEAD^` is origin/BRANCH (the
+        // merge is always --no-ff), so this validates exactly what the merge
+        // changed. See frontmatter-heal.mjs.
+        await healTouchedFrontmatter({
+          dir: MERGE_WT,
+          run: (args) => git(MERGE_WT, args),
+          from: 'HEAD^',
+          author: { name: AUTHOR_NAME, email: AUTHOR_EMAIL },
+          label: 'atlas-merge',
+        })
         try {
           await git(MERGE_WT, ['push', 'origin', `HEAD:${BRANCH}`])
           break

@@ -79,10 +79,12 @@ type Lane = {
 }
 
 /** `switcher` is the full-screen strip variant: agents only (no research/
- * ingest lanes, no autonomous passes, no sub-agent/job/worker fans), every
- * node clickable, with `currentId` — the agent whose full screen you're in —
- * highlighted. The default (hero) shows everything and makes just the real
- * agent nodes clickable. */
+ * ingest lanes, no autonomous passes), with `currentId` — the agent whose full
+ * screen you're in — highlighted. It draws the same sub-agent/background-job/
+ * paired-worker fans as the hero — the fan is what an agent is DOING, so it
+ * belongs on the surface you pick an agent from — and, exactly as on the hero,
+ * those rows are not clickable: only the agent nodes and the spawned fan are
+ * switch targets. The default (hero) shows everything. */
 export function AgentsOverview({ switcher = false, currentId }: { switcher?: boolean; currentId?: string }) {
   const { view } = useAgents()
   if (!view) return null
@@ -229,17 +231,10 @@ export function AgentsOverview({ switcher = false, currentId }: { switcher?: boo
   // (working + awaiting input), active research/ingest runs, plus the running
   // sub-agents they've fanned out to. Queued capture jobs aren't counted (no
   // agent running yet); they still surface on their lane's chip.
+  // The switcher counts them the same way: it renders the same fans the hero
+  // does (they used to be stripped here, which also silently dropped them from
+  // this headline — the same fleet read a smaller number in full screen).
   const allLanes = [...atlasLanes, ...indepLanes]
-  // Switcher: keep only the agent nodes themselves — the sub-agent/background-
-  // job/paired-worker fans are background work, not switch targets. The spawned
-  // fan stays (those are full, clickable agents).
-  if (switcher)
-    for (const l of allLanes)
-      for (const n of l.nodes) {
-        n.subAgents = []
-        n.bgJobs = []
-        n.worker = undefined
-      }
   const subActive = allLanes.reduce(
     (sum, l) => sum + l.nodes.reduce((x, n) => x + n.subAgents.filter((a) => a.active).length, 0),
     0,

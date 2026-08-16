@@ -293,7 +293,11 @@ This is a headline feature, not an implementation detail:
   non-fast-forward pushes.
 - **`*.md merge=union` for logs.** Add a `.gitattributes` with `*.md merge=union` to
   your vault (the llm-atlas template already does) so append-only files like `log.md`
-  and `index.md` merge cleanly across your phone, agents, and the Kanban.
+  and `index.md` merge cleanly across your phone, agents, and the Kanban. Its one cost —
+  two writers rewriting the *same* frontmatter line leave a duplicate YAML key, which
+  silently untypes the whole page — is **self-healed** after every pull/rebase/merge in
+  the commit queue, and survived by the readers in between
+  ([PROTOCOLS §5a](docs/PROTOCOLS.md#5a-union-merge-doubles-a-frontmatter-key--and-that-silently-deletes-a-card)).
 
 ---
 
