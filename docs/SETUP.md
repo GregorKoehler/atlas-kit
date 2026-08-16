@@ -278,9 +278,11 @@ it costs and the config only you can supply — a cookie file, a feed list:
 [docs/ADDONS.md](ADDONS.md) is the model, the hook API and the shipped catalog.
 
 Separately optional, and not an addon: **[model-provider profiles](PROVIDERS.md)** let a
-dev agent spawn against an Anthropic-compatible backend (DeepSeek via OpenRouter, …) in
-the unchanged harness. Copy `api/src/providers.example.json` to `providers.json`
-(gitignored — it holds your keys) and a picker appears on the spawn form.
+dev agent or a knowledge chat spawn against an Anthropic-compatible backend (DeepSeek via
+OpenRouter, …) in the unchanged harness. Copy `api/src/providers.example.json` to
+`providers.json` (gitignored — it holds your keys) and a picker appears on the spawn
+forms. Read the caveat there before pointing an **Atlas** chat at one — it is the
+privileged writer of your vault.
 
 ---
 

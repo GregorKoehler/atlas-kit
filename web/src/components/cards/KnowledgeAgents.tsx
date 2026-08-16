@@ -8,6 +8,7 @@ import { useAgentFocus, agentFocusConsumed } from '../../lib/agentFocus'
 import { useAgents } from '../../lib/useAgents'
 import { spawnAgent, scheduleAgent, unscheduleAgent } from '../../lib/api'
 import { useDraft } from '../../lib/useDraft'
+import { useProviders } from '../../lib/providers'
 
 /**
  * Knowledge agents — vault-grounded chats, spawned from the Knowledge Base tab
@@ -46,6 +47,19 @@ export function KnowledgeAgents({
   // Effort defaults lower than dev agents — chat wants snappy first answers.
   const [model, setModel] = useState('opus')
   const [effort, setEffort] = useState('high')
+  // Optional model-BACKEND profiles this box offers (docs/PROVIDERS.md). Empty on
+  // a box with none configured — which is the default — and then no picker
+  // renders and no chat carries a `provider`, i.e. nothing here changes.
+  const providers = useProviders()
+  const [provider, setProvider] = useState('')
+  // A profile maps the opus/sonnet TIERS only (Claude Code has no `fable` tier to
+  // point at ANTHROPIC_DEFAULT_*_MODEL), so Fable and a profile are mutually
+  // exclusive — the server refuses the pair. Picking a profile moves a Fable
+  // selection to Opus rather than leaving the form on a combination that 400s.
+  const pickProvider = (name: string) => {
+    setProvider(name)
+    if (name && model === 'fable') setModel('opus')
+  }
   const [busy, setBusy] = useState(false)
   const [err, setErr] = useState('')
   const [selected, setSelected] = useState<string | null>(null)
@@ -92,7 +106,7 @@ export function KnowledgeAgents({
     if (!q || busy) return
     setBusy(true)
     setErr('')
-    const r = await spawnAgent({ task: q, kind: 'knowledge', vault, model, effort })
+    const r = await spawnAgent({ task: q, kind: 'knowledge', vault, model, effort, provider: provider || undefined })
     setBusy(false)
     if (r.ok) {
       setQuestion('')
@@ -110,7 +124,7 @@ export function KnowledgeAgents({
     const r = await scheduleAgent({
       action: 'spawn',
       at,
-      payload: { task: q, kind: 'knowledge', ...(vault ? { vault } : {}), model, effort },
+      payload: { task: q, kind: 'knowledge', ...(vault ? { vault } : {}), model, effort, ...(provider ? { provider } : {}) },
     })
     if (r.ok) {
       setQuestion('')
@@ -149,10 +163,31 @@ export function KnowledgeAgents({
             onChange={(e) => setModel(e.currentTarget.value)}
             title="Model for this chat (always the 1M-context variant)"
           >
-            <option value="fable">Fable</option>
+            {/* Hidden under a provider profile: the tier has to be one the profile
+                maps (opus/sonnet), and offering an option the spawn would refuse
+                is worse than not offering it. */}
+            {provider ? null : <option value="fable">Fable</option>}
             <option value="opus">Opus</option>
             <option value="sonnet">Sonnet</option>
           </select>
+          {/* Runtime-gated: renders only on a box that configured profiles
+              (docs/PROVIDERS.md). "Anthropic" is the empty value — the default
+              subscription backend, and the only choice on every other box. */}
+          {providers.length ? (
+            <select
+              className="capture__input capture__input--sm agents__select"
+              value={provider}
+              onChange={(e) => pickProvider(e.currentTarget.value)}
+              title="Model backend for this chat — the same harness against an Anthropic-compatible endpoint"
+            >
+              <option value="">Anthropic</option>
+              {providers.map((p) => (
+                <option value={p.name} key={p.name}>
+                  {p.label}
+                </option>
+              ))}
+            </select>
+          ) : null}
           <select
             className="capture__input capture__input--sm agents__select"
             value={effort}

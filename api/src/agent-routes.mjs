@@ -1053,11 +1053,12 @@ async function performSpawn(raw) {
   if (provider !== undefined) {
     if (typeof provider !== 'string' || !resolveProvider(provider))
       return { status: 400, body: { ok: false, error: `unknown "provider" profile (configured: ${listProviders().map((p) => p.name).join(', ') || 'none'})` } }
-    if (kind === 'knowledge')
-      return { status: 400, body: { ok: false, error: 'provider profiles are for DEV agents — a knowledge chat runs on the default backend' } }
     if (model !== undefined && !PROVIDER_TIERS.has(model))
       return { status: 400, body: { ok: false, error: `"model" with a provider profile must be a mappable tier (${[...PROVIDER_TIERS].join('/')}) — see docs/PROVIDERS.md` } }
-    if (!local.isLocalRepo(repo))
+    // Knowledge chats are always box-local (the box owns the vault), so only a
+    // DEV spawn can route to the remote bridge — the executor that does not carry
+    // profiles yet.
+    if (kind !== 'knowledge' && !local.isLocalRepo(repo))
       return { status: 400, body: { ok: false, error: 'provider profiles are box-local — the remote agent bridge does not carry them yet (docs/PROVIDERS.md)' } }
   }
   const { modelId, effortLevel } = spawnPicks({ model, effort, kind, provider })
@@ -1076,8 +1077,12 @@ async function performSpawn(raw) {
           ? ATLAS_KNOWLEDGE_PREAMBLE
           : KNOWLEDGE_PREAMBLE
     const preamble = `${basePreamble}\n\n${DOWNLOADS_PREAMBLE}`
+    // `provider` (optional) swaps the BACKEND and nothing else: same preamble,
+    // same vault as cwd (so the vault's own CLAUDE.md loads exactly as before),
+    // same MCP config, same evidence. A knowledge chat spawns no companion
+    // session, so there is no pair here to keep on one backend.
     const r = await local.spawnKnowledge({
-      question: task, preamble, model: modelId, effort: effortLevel, vault, images: imgs,
+      question: task, preamble, model: modelId, effort: effortLevel, vault, images: imgs, provider,
     })
     if (r.ok && r.id) {
       if (parent) setSpawnParent(r.id, parent)

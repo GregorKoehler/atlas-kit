@@ -323,7 +323,7 @@ installed-but-unannounced tools go unused. The paired worker gets the same profi
 `worker.mcp.json`; only the Atlas orchestrator chat gets `control.mcp.json`. Remote
 (bridge) agents have neither the config nor a vault checkout, so they get neither.
 
-**Model backend** — a dev spawn may carry an optional `provider`, naming a profile in
+**Model backend** — a spawn (dev agent or knowledge chat) may carry an optional `provider`, naming a profile in
 `providers.json` (`providers.mjs`) that points this agent's `claude` at an
 Anthropic-compatible endpoint. It reaches exactly two places, both in `launchCommand()` /
 `providerLaunch()` (`agent-local.mjs`): the profile's env is written to a `0600` file the
@@ -338,9 +338,12 @@ of starting the agent on the backend the operator was moving off. With no profil
 one from a kit without the feature. With a profile the model picker passes the TIER ALIAS
 (`opus`/`sonnet`) rather than the resolved Anthropic ID, so the profile's
 `ANTHROPIC_DEFAULT_<TIER>_MODEL` is what maps it — passing `claude-sonnet-5[1m]` would ask
-the gateway for Anthropic's Sonnet. Knowledge chats, the Atlas orchestrator and the paired
-worker never take one; a revive refuses rather than resume onto a different backend. See
-[PROVIDERS.md](PROVIDERS.md).
+the gateway for Anthropic's Sonnet. The five launch templates that a spawn or a revive can
+carry a profile into all hold the `{claudeEnv}` slot (dev launch/resume, knowledge, Atlas
+orchestrator launch/resume); the **paired Atlas worker** is the one that does not — it
+takes no `provider` from anywhere and stays on the subscription backend, because it is the
+vault's writer and nobody spawns it directly. A revive refuses rather than resume onto a
+different backend. See [PROVIDERS.md](PROVIDERS.md).
 
 **work** — the dev agent works normally; see [§1](#1-dev-agent-steering-semantics) for
 how it's steered mid-flight. The paired worker is spawned right **after** the dev

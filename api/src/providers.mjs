@@ -1,12 +1,13 @@
 /* ------------------------------------------------------------------ *
- * Provider profiles — named model-BACKEND presets for a dev-agent spawn.
+ * Provider profiles — named model-BACKEND presets for a spawn.
  *
- * A dev agent always runs the same Claude-Code harness: the same tmux session,
- * the same `ATLAS:` markers, the same lifecycle machine, the same MCP tools. A
- * PROFILE changes only WHICH BACKEND that harness talks to, by handing the
- * agent's process a block of environment variables — an Anthropic-compatible
- * base URL, a token, and the tier→model mapping. Nothing else about the spawn
- * differs, which is the whole point: no second agent CLI, no parallel runtime.
+ * An agent always runs the same Claude-Code harness — a dev agent and a
+ * knowledge/Atlas chat alike: the same tmux session, the same `ATLAS:` markers,
+ * the same lifecycle machine, the same MCP config, the same prompt. A PROFILE
+ * changes only WHICH BACKEND that harness talks to, by handing the agent's
+ * process a block of environment variables — an Anthropic-compatible base URL, a
+ * token, and the tier→model mapping. Nothing else about the spawn differs, which
+ * is the whole point: no second agent CLI, no parallel runtime.
  *
  * 🔴 THE ENV BLOCK IS OPAQUE. The kit hardcodes NO provider list and knows no
  * provider's variable names — it reads `env` and injects it verbatim. That is

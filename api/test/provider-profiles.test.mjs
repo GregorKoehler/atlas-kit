@@ -22,9 +22,14 @@
  *      the resolved `claude-sonnet-5[1m]` instead would ask the gateway for
  *      Anthropic's own Sonnet — served, and billed, as if nothing were wrong.
  *   4. REFUSAL, NOT SILENT FALLBACK. Every combination the kit cannot honour
- *      (unknown profile, knowledge chat, unmappable tier, a bridge repo) is a
- *      400 — because ignoring `provider` runs the agent on exactly the backend
- *      the operator was moving off, and says nothing.
+ *      (unknown profile, unmappable tier, a bridge repo) is a 400 — because
+ *      ignoring `provider` runs the agent on exactly the backend the operator was
+ *      moving off, and says nothing.
+ *
+ * A KNOWLEDGE / Atlas chat takes a profile on the same terms as a dev agent, and
+ * all four properties hold for it identically — asserted here against its own
+ * launch path (knowledgeLaunch), because a chat's line is assembled separately
+ * from a dev agent's and the two can drift without a diff saying so.
  *
  * Hermetic: ATLAS_PROVIDERS_FILE points at a temp profiles file, AGENT_LOCAL_DIR
  * / WORKSPACE_DIR at throwaway dirs, AGENT_LOCAL_RECONCILE=0 keeps the boot
@@ -95,11 +100,25 @@ fs.writeFileSync(
 process.env.CLAUDE_BIN = STUB
 
 const { listProviders, resolveProvider } = await import('../src/providers.mjs')
-const { LAUNCH_CMD, RESUME_CMD, launchCommand, providerLaunch, providerEnvPrefix } = await import('../src/agent-local.mjs')
+const {
+  LAUNCH_CMD, RESUME_CMD, KNOWLEDGE_LAUNCH_CMD, ATLAS_CONTROL_LAUNCH_CMD, ATLAS_CONTROL_RESUME_CMD,
+  ATLAS_WORKER_LAUNCH_CMD, launchCommand, providerLaunch, providerEnvPrefix, knowledgeLaunch, atlasWorkerLaunch,
+} = await import('../src/agent-local.mjs')
 const { spawnPicks } = await import('../src/agent-routes.mjs')
 const { spawnBody } = await import('../src/mcp/tools.mjs')
 
 const CTX = /^(0|false|no|off)$/i.test(process.env.AGENT_EXTENDED_CONTEXT || '') ? '' : '[1m]'
+
+/* Every launch template a spawn or a revive can carry a profile into: the dev
+ * pair, the knowledge chat, and the Atlas orchestrator's pair. The paired Atlas
+ * WORKER is deliberately not here — see its own test below. */
+const PROFILED_TEMPLATES = [
+  ['LAUNCH_CMD', LAUNCH_CMD],
+  ['RESUME_CMD', RESUME_CMD],
+  ['KNOWLEDGE_LAUNCH_CMD', KNOWLEDGE_LAUNCH_CMD],
+  ['ATLAS_CONTROL_LAUNCH_CMD', ATLAS_CONTROL_LAUNCH_CMD],
+  ['ATLAS_CONTROL_RESUME_CMD', ATLAS_CONTROL_RESUME_CMD],
+]
 
 /* --- the store ------------------------------------------------------------ */
 
@@ -137,20 +156,29 @@ test('ZERO-PROFILE INVARIANT: no provider ⇒ the launch line is what it always 
   const { exports, claudeEnv } = providerLaunch(undefined)
   assert.equal(exports, '') // nothing to write, so no env file exists at all
   assert.equal(claudeEnv, '-u ANTHROPIC_API_KEY ') // the literal the templates used to hardcode
-  for (const [name, tmpl] of [['LAUNCH_CMD', LAUNCH_CMD], ['RESUME_CMD', RESUME_CMD]]) {
-    const line = launchCommand(tmpl, { model: 'claude-sonnet-5[1m]', effort: 'xhigh', sid: 'abc' })
+  for (const [name, tmpl] of PROFILED_TEMPLATES) {
+    const line = launchCommand(tmpl, { model: 'claude-sonnet-5[1m]', effort: 'xhigh', sid: 'abc', atlasSession: 'kb-atlas-x' })
     // …then the claude binary (an absolute shell-quoted path, or the bare word
     // when it did not resolve — CI runners have no `claude` installed).
-    assert.match(line, /^IS_SANDBOX=1 env -u ANTHROPIC_API_KEY \S+ --model /, `${name} lost the subscription-auth guarantee`)
+    assert.match(line, /^IS_SANDBOX=1 (ATLAS_SESSION='[^']*' )?env -u ANTHROPIC_API_KEY \S+ --model /, `${name} lost the subscription-auth guarantee`)
     assert.match(line, /--model 'claude-sonnet-5\[1m\]' --effort 'xhigh'/, name)
   }
+})
+
+test('the paired Atlas WORKER has no backend slot at all — it writes the vault', () => {
+  // The one template with no `{claudeEnv}`: the worker is spawned by the kit
+  // (paired to a dev agent), never by an operator, and takes no `provider` from
+  // anywhere — so it stays on the subscription backend whatever backend the agent
+  // it is paired to, or any chat, runs on.
+  assert.ok(!ATLAS_WORKER_LAUNCH_CMD.includes('{claudeEnv}'))
+  assert.match(atlasWorkerLaunch({ id: 'atlas-w', sid: 'sid-w', head: 'stand by' }), /env -u ANTHROPIC_API_KEY /)
 })
 
 test('no launch template can leave a placeholder unfilled', () => {
   // An unfilled `{claudeEnv}` would make `env` try to run a file by that name;
   // an unfilled `{model}` would be passed to claude verbatim. `{task}` is the
   // one deliberate survivor — promptFileCommand fills it from a FILE.
-  for (const tmpl of [LAUNCH_CMD, RESUME_CMD]) {
+  for (const [, tmpl] of [...PROFILED_TEMPLATES, ['ATLAS_WORKER_LAUNCH_CMD', ATLAS_WORKER_LAUNCH_CMD]]) {
     for (const provider of [undefined, 'deepseek-openrouter']) {
       const line = launchCommand(tmpl, { model: 'm', effort: 'e', sid: 's', provider })
       assert.doesNotMatch(line, /\{(claudeEnv|model|effort|sid|atlasSession)\}/)
@@ -241,6 +269,71 @@ test('END TO END, through a real tmux: the backend env arrives, and appears in n
   }
 })
 
+/* --- 2b. the same swap, for a KNOWLEDGE / Atlas chat ---------------------- */
+
+test('a knowledge chat takes a profile — and nothing else about its launch moves', () => {
+  // The whole claim of this feature, asserted as a diff of two strings: the ONLY
+  // difference a profile makes to a chat's launch line is the env slot. Same
+  // template, same `--session-id` pinning, same MCP config, same prompt file —
+  // and the vault is still the cwd, so its CLAUDE.md loads exactly as before.
+  for (const vaultKey of ['atlas', 'work']) {
+    const args = { id: `kb-${vaultKey}-diff`, sid: 'sid-k', vaultKey, model: 'opus', effort: 'high', prompt: 'q' }
+    const plain = knowledgeLaunch(args)
+    const profiled = knowledgeLaunch({ ...args, provider: 'deepseek-openrouter' })
+    // Strip the env-file prefix the profile adds; what remains must be identical.
+    const stripped = profiled.replace(/\. '[^']+\.env' && rm -f '[^']+\.env' && /, '')
+    assert.equal(stripped, plain.replace('-u ANTHROPIC_API_KEY ', ''), vaultKey)
+    assert.match(profiled, /--session-id 'sid-k'/, vaultKey)
+    assert.ok(!profiled.includes(CANARY), 'a chat put the API key on the command line')
+    assert.ok(!profiled.includes('openrouter.ai'), 'a chat put the profile env on the command line')
+  }
+  // The Atlas orchestrator keeps its control MCP config and its session stamp.
+  assert.match(
+    knowledgeLaunch({ id: 'kb-atlas-x', sid: 's', vaultKey: 'atlas', model: 'opus', effort: 'high', prompt: 'q', provider: 'deepseek-openrouter' }),
+    /ATLAS_SESSION='kb-atlas-x' env .*control\.mcp\.json --strict-mcp-config/,
+  )
+})
+
+test('the knowledge model default is a MAPPABLE tier under a profile', () => {
+  // A chat defaults to Opus where a dev agent defaults to Sonnet; with a profile
+  // both must come out as the TIER ALIAS, or the gateway is asked for (and bills)
+  // Anthropic's own model.
+  assert.equal(spawnPicks({ kind: 'knowledge' }).modelId, `claude-opus-5${CTX}`)
+  assert.equal(spawnPicks({ kind: 'knowledge', provider: 'deepseek-openrouter' }).modelId, 'opus')
+  assert.equal(spawnPicks({ kind: 'knowledge', model: 'sonnet', provider: 'deepseek-openrouter' }).modelId, 'sonnet')
+})
+
+test('END TO END, through a real tmux: an ATLAS chat reaches the profiled backend', async () => {
+  // The dev e2e above proves the mechanism; this proves the KNOWLEDGE chain is
+  // wired to it — a chat's launch line is assembled by knowledgeLaunch, not by
+  // the dev path, so the two can drift apart without a diff saying so.
+  fs.rmSync(STUB_OUT, { force: true })
+  const socket = `atlas-kit-prov-kb-test-${process.pid}`
+  const tmux = (...args) => run('tmux', ['-L', socket, ...args])
+  const id = 'kb-atlas-e2e'
+  const launch = knowledgeLaunch({
+    id, sid: 'kb-sid-1', vaultKey: 'atlas', model: 'opus', effort: 'high',
+    prompt: 'what changed today?', provider: 'deepseek-openrouter',
+  })
+  assert.ok(!launch.includes(CANARY), 'the API key reached a chat command line')
+  try {
+    await tmux('new-session', '-d', '-s', 'kb-e2e', '-c', TMP, 'sh', '-lc', launch)
+    for (let i = 0; i < 100 && !fs.existsSync(STUB_OUT); i++) await new Promise((r) => setTimeout(r, 100))
+    assert.ok(fs.existsSync(STUB_OUT), 'the stub `claude` never ran — the chat launch chain broke before it')
+    const saw = fs.readFileSync(STUB_OUT, 'utf-8')
+    assert.match(saw, new RegExp(`^ANTHROPIC_AUTH_TOKEN=${CANARY}$`, 'm'))
+    assert.match(saw, /^ANTHROPIC_BASE_URL=https:\/\/openrouter\.ai\/api$/m)
+    assert.match(saw, /^ANTHROPIC_DEFAULT_OPUS_MODEL=deepseek\/deepseek-v4-pro$/m)
+    assert.match(saw, /^KEY=$/m) // set, and EMPTY — not `KEY=UNSET`
+    assert.match(saw, /^argv:--model opus --effort high --session-id kb-sid-1 /m) // the TIER, for the profile to map
+    assert.match(saw, /what changed today\?$/m) // …and the prompt still arrived by file
+    const ps = (await run('ps', ['-eo', 'args'])).stdout
+    assert.ok(!ps.includes(CANARY), 'the API key is visible in `ps` output')
+  } finally {
+    await tmux('kill-server').catch(() => {})
+  }
+})
+
 test('GET /api/providers cannot serve a profile env — the list shape has no room for one', () => {
   const serialized = JSON.stringify({ providers: listProviders() })
   assert.ok(!serialized.includes(CANARY), 'the dropdown source leaked the API key')
@@ -291,12 +384,16 @@ test('effort, MCP config and every other launch flag survive a profile untouched
   assert.match(profiled, /--strict-mcp-config --dangerously-skip-permissions \{task\}$/)
 })
 
-test('the MCP spawn_agent tool forwards a profile for dev agents only', () => {
+test('the MCP spawn_agent tool forwards a profile for either kind', () => {
   const dev = spawnBody({ task: 't', repo: 'demo', provider: 'deepseek-openrouter' })
   assert.equal(dev.provider, 'deepseek-openrouter')
   assert.equal(dev.model, 'opus') // the orchestrator's dev default, unchanged
+  const kb = spawnBody({ task: 't', kind: 'knowledge', provider: 'deepseek-openrouter' })
+  assert.equal(kb.provider, 'deepseek-openrouter')
+  assert.equal(kb.model, undefined) // still no model key — the route's knowledge default applies
+  // Omitted means omitted: no `provider` key at all, on either kind.
   assert.equal(spawnBody({ task: 't', repo: 'demo' }).provider, undefined)
-  assert.equal(spawnBody({ task: 't', kind: 'knowledge', provider: 'deepseek-openrouter' }).provider, undefined)
+  assert.equal(spawnBody({ task: 't', kind: 'knowledge' }).provider, undefined)
 })
 
 /* --- 4. refusal, not silent fallback -------------------------------------- */
@@ -317,9 +414,21 @@ test('every combination the kit cannot honour is a 400, with the reason', async 
   assert.match(unknown.body.error, /unknown "provider"/)
   assert.match(unknown.body.error, /deepseek-openrouter/) // names what IS configured
 
+  // A knowledge chat is no longer one of them: the SAME checks apply to it, and
+  // then it goes through. (Here it stops at the box-local executor gate — this
+  // hermetic run has no repo allowlist — which is already past every provider
+  // check, and is emphatically not the old "profiles are for DEV agents" 400.)
+  const knowledgeUnknown = await call({ task: 't', kind: 'knowledge', provider: 'nope' })
+  assert.equal(knowledgeUnknown.status, 400)
+  assert.match(knowledgeUnknown.body.error, /unknown "provider"/)
+
+  const knowledgeFable = await call({ task: 't', kind: 'knowledge', model: 'fable', provider: 'deepseek-openrouter' })
+  assert.equal(knowledgeFable.status, 400)
+  assert.match(knowledgeFable.body.error, /mappable tier/)
+
   const knowledge = await call({ task: 't', kind: 'knowledge', provider: 'deepseek-openrouter' })
-  assert.equal(knowledge.status, 400)
-  assert.match(knowledge.body.error, /DEV agents/)
+  assert.notEqual(knowledge.status, 400)
+  assert.doesNotMatch(String(knowledge.body.error), /provider/)
 
   const fable = await call({ task: 't', repo: 'demo', model: 'fable', provider: 'deepseek-openrouter' })
   assert.equal(fable.status, 400)
