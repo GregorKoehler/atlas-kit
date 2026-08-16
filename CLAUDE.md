@@ -44,7 +44,10 @@ agent-bridge/  optional host-native bridge to run agents in remote dev container
   (root, via `scripts/dev.sh`) runs both for local dev.
 - **The vault is a separate repo** — the dashboard reads `Wiki/` + `Tasks/` from
   `VAULT_PATH` and commits back through the serial queue (`atlas-commit-queue.mjs`).
-  Never bundle a vault into this repo.
+  Never bundle a vault into this repo. ⚠️ `*.md merge=union` means a merge can DOUBLE a
+  frontmatter key, which silently untypes the page and deletes its card — no writer can
+  prevent it, so the queue self-heals after every pull/merge and the shared reader
+  survives the window (`api/src/frontmatter-heal.mjs`, [docs/PROTOCOLS.md](docs/PROTOCOLS.md) §5a).
 - **LLM calls use the `claude` CLI on the subscription**, never an API key — leave
   `ANTHROPIC_API_KEY` blank.
 - **This is a public repo.** Keep it free of personal data: no real names, emails,

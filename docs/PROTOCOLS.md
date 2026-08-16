@@ -404,6 +404,66 @@ manual resolution" (see the comment at lines 152–159).
 
 ---
 
+## 5a. Union merge doubles a frontmatter key — and that silently deletes a card
+
+🔴 The vault carries `*.md merge=union` (`.gitattributes`) — the setting that makes
+`Wiki/log.md` and `Wiki/index.md` merge-safe, and it is **NOT** changed by any of this.
+Union merge does not understand YAML: when two writers rewrite the SAME frontmatter line
+— a worker recap's `related_prs:`, a dev agent's `ATLAS:NOW` line — git keeps **both**.
+That is a duplicate YAML mapping key; `js-yaml` **throws** on it (it does not last-wins),
+every frontmatter reader swallows the throw and returns `{}`, and the page goes **untyped
+to every consumer at once**, silently: off the project cards, out of `query_atlas`, the
+graph and every typed traversal — while rendering fine in Obsidian.
+
+⚠️ **Writer idempotency cannot prevent this.** The MERGE creates the duplicate, from two
+individually *correct* single-line writes — which is why [§9a](#9a-the-project-card-now-signal)'s
+one-key rule is a third layer, not the fix. Two layers do the work, both in
+**`api/src/frontmatter-heal.mjs`**, one policy module so they cannot drift:
+
+**1. Self-heal after every pull/rebase/merge in the write path.** `syncMain()` (after its
+`pull --rebase`) and `enqueueAtlasMerge()` — the latter repairing **before the merge is
+pushed**, so the broken state never reaches `main` at all. Because *every* vault writer in
+the kit funnels through this queue ([§5](#5-the-serial-vault-commit-queue)) — Kanban moves,
+the done-clear cron, prospects approve, the `ATLAS:NOW` card rewrite, `seed-self-card`,
+worker ingests — one hook covers all of them. The `.md` files that operation touched are
+validated, and a doubled key is auto-resolved **loudly** (console + a `frontmatter-heal`
+line in `audit.log`) and committed inside the same lock:
+
+- **Scalar** live state (`now`, `status`, `updated`, `due`, …) keeps the **newest**
+  occurrence — the max for date-shaped values (the only scalars with a real order), else
+  the last, since union merge appends the incoming side.
+- **Array** keys (`related`, `related_prs`, `tags`, `depends_on`, …) take the
+  **order-preserving set UNION**. Dropping either side loses a writer's work, which is the
+  failure the union-merge setting exists to prevent in the body. ⚠️ When one side already
+  IS the union — the common case, a writer appended — its line is kept **verbatim**, so a
+  repair is a minimal diff and never re-quotes a value it did not have to touch.
+- A repair is **pushed even when the caller's own edit was a no-op** (`enqueueAtlasCommit`
+  returns `repaired`): an unpushed repair leaves every other checkout broken.
+
+**2. Reader fallback.** `read-routes.mjs`'s one shared `frontmatter()` goes through
+`loadFrontmatter`, which resolves duplicates in memory with the same policy and re-parses
+— so a card stays rendered, reading exactly what the repair is about to write, through the
+window between the merge and the repair. Applied at the shared reader rather than in
+`listProjects` alone, since every caller there routes through it.
+
+⚠️ A healthy page is **byte-identical** on both layers: the fallback only runs once the
+strict parse has already failed, and `healFrontmatter` returns `null` when nothing is
+doubled. ⚠️ Damage that is **not** a duplicate key still degrades to `{}` exactly as
+before — but is now **logged**, not silent. ⚠️ A **block** list (`tags:` with `- item`
+lines) never needs repair: only the key's own line conflicts, so union merge already unions
+those correctly.
+
+⚠️ Skipped: `atlas-query.mjs` keeps its own frontmatter reader and its own `{}`-on-throw.
+The self-heal reaches it within one write-path op; adopt `loadFrontmatter` there if a typed
+query is ever seen missing a page in between.
+
+Guarded by `api/test/frontmatter-union-heal.test.mjs`, which **reproduces the union merge
+with real git** and drives the real `enqueueAtlasMerge` / `enqueueAtlasCommit` paths against
+throwaway bare-origin vaults carrying the vault's own `.gitattributes` — a hand-typed
+double would prove the parser throws, not that the thing we ship happens.
+
+---
+
 ## 6. Bridge resilience — reachable, stale, and how many slots are left
 
 A **bridge** (`agent-bridge/server.mjs`) is a copy of this repo running host-native on
@@ -666,6 +726,9 @@ replaces the first `now:` in place and **drops every later one**, and never appe
 a doubled page is invisible to `listProjects` (it no longer parses), `findProjectPage` falls
 back to a raw-frontmatter scan for exactly that case — otherwise the repair would be
 unreachable precisely when it is needed. `api/test/project-card-now.test.mjs` is the pin.
+
+This covers only the one key `rewriteNow` writes. The general fix — every key, every
+writer, plus a reader that survives the window — is [§5a](#5a-union-merge-doubles-a-frontmatter-key--and-that-silently-deletes-a-card).
 
 ---
 

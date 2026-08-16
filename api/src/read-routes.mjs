@@ -11,7 +11,6 @@
 import express from 'express'
 import fs from 'node:fs'
 import path from 'node:path'
-import yaml from 'js-yaml'
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 import { runInVault, currentVaultPath, currentVaultKey } from './vaults.mjs'
@@ -19,6 +18,7 @@ import { loadFlags, flagKey } from './atlas-type-flags.mjs'
 import { queryAtlas } from './atlas-query.mjs'
 import { createScorer, snippet } from './vault-search.mjs'
 import { addonSearchLegs, addonScorecardStats } from './addons.mjs'
+import { loadFrontmatter } from './frontmatter-heal.mjs'
 
 const execFileAsync = promisify(execFile)
 // The default vault path. DATA_DIR, /api/data, the dashboard bundle and projects
@@ -160,15 +160,20 @@ function dashboardBundle() {
 }
 
 // Parse a note's YAML frontmatter into an object ({} if none/invalid).
-function frontmatter(md) {
-  if (!md.startsWith('---')) return {}
-  const end = md.indexOf('\n---', 3)
-  if (end === -1) return {}
-  try {
-    return yaml.load(md.slice(3, end)) || {}
-  } catch {
-    return {}
-  }
+//
+// ⚠️ VIA loadFrontmatter, WHICH SURVIVES A UNION-MERGED DUPLICATE KEY. This
+// used to `yaml.load` and swallow the throw, and `js-yaml` THROWS on a
+// duplicate mapping key — so a page git's `*.md merge=union` had doubled (two
+// `now:` lines, two `related:` lines) came back `{}` and vanished from every
+// consumer at once, the project cards included. It is fixed at this ONE shared
+// reader rather than in listProjects alone, because every caller below routes
+// through here — and through the SAME policy module the write-side self-heal
+// uses, so the two cannot drift. A healthy page is byte-identical to before:
+// the fallback only runs once the strict parse has already failed, and the
+// on-disk repair (frontmatter-heal.mjs, driven from the serial commit queue) is
+// what closes the window this keeps a card alive through.
+function frontmatter(md, label = '') {
+  return loadFrontmatter(md, label).data
 }
 
 function noteTags(md) {
@@ -203,7 +208,10 @@ export function listProjects() {
     const abs = path.join(dir, f)
     const md = readMd(abs)
     if (md == null) continue
-    const fm = frontmatter(md)
+    // Labelled, so a page that only reads through the union-merge repair names
+    // itself in the log — this membership test is where the damage SHOWS, as a
+    // card silently missing from the dashboard.
+    const fm = frontmatter(md, path.relative(VAULT, abs))
     if (fm.type !== 'project') continue
     const goal = String(fm.goal || '').trim()
     if (!goal) continue
