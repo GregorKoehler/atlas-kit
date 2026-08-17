@@ -19,9 +19,16 @@
  * to what it was before profiles existed. See the {claudeEnv} slot in
  * agent-local.mjs for the one place that holds.
  *
- * 🔴 VALUES ARE SECRETS. `listProviders()` — what `GET /api/providers` and the
- * spawn dropdown are built on — returns names and labels ONLY. A profile's `env`
- * leaves this module through `resolveProvider()` alone, and its one consumer
+ * 🔴 VALUES ARE SECRETS, with ONE narrow, deliberate carve-out. `listProviders()`
+ * — what `GET /api/providers` and the spawn dropdowns are built on — returns
+ * names, labels, and the `tiers` map: the values of the THREE allowlisted key
+ * names in `TIER_ENV` below (`ANTHROPIC_DEFAULT_{OPUS,SONNET,HAIKU}_MODEL`).
+ * Those values are model slugs by definition — they are precisely what the
+ * browser must display, so the picker can say "Opus → deepseek/deepseek-v4-pro"
+ * instead of lying about which backend a spawn will run on. The allowlist is
+ * three literal names, never a pattern: every OTHER value — `ANTHROPIC_AUTH_TOKEN`
+ * above all — still leaves this module through `resolveProvider()` alone, and its
+ * one consumer
  * (`providerEnvPrefix()` in agent-local.mjs) writes it to a 0600 file the agent's
  * own shell sources and deletes before `claude` starts — never on a command line,
  * in a response, in a log or in the audit journal. Passing it as
@@ -55,6 +62,24 @@ const NAME_RE = /^[a-z0-9][a-z0-9-]*$/
  * first turn. (The value itself is shell-quoted on the way out, so this is a
  * sanity check on the operator's file, not an escaping requirement.) */
 const ENV_NAME_RE = /^[A-Za-z_][A-Za-z0-9_]*$/
+
+/* The tier→model mapping the picker is allowed to SHOW, as an explicit allowlist
+ * of three literal env names. Claude Code resolves a `--model` alias through
+ * exactly these (there is no ANTHROPIC_DEFAULT_FABLE_MODEL, which is why `fable`
+ * is unmappable everywhere). Nothing here is derived by pattern-matching the env
+ * block: an operator's profile may hold any variable at all, and only these three
+ * names — model slugs, not credentials — ever cross into a response. */
+const TIER_ENV = { opus: 'ANTHROPIC_DEFAULT_OPUS_MODEL', sonnet: 'ANTHROPIC_DEFAULT_SONNET_MODEL', haiku: 'ANTHROPIC_DEFAULT_HAIKU_MODEL' }
+
+/** { tier: model slug } for the tiers a profile's env maps — `{}` when it maps none. */
+export function tiersOf(env) {
+  const tiers = {}
+  for (const [tier, key] of Object.entries(TIER_ENV)) {
+    const v = env?.[key]
+    if (typeof v === 'string' && v) tiers[tier] = v
+  }
+  return tiers
+}
 
 function readFileJson() {
   try {
@@ -92,13 +117,17 @@ function load() {
 }
 
 /**
- * [{ name, label }] — what the dropdown and `GET /api/providers` are built on.
- * ⚠️ NEVER add `env` here: this shape is what keeps a key out of every response,
- * every log line and the browser.
+ * [{ name, label, tiers }] — what the dropdowns and `GET /api/providers` are built
+ * on. `tiers` is the model picker's labels ("Opus → deepseek/deepseek-v4-pro") and
+ * the set of tiers a spawn against this profile may name; `{}` for a profile that
+ * maps none, which degrades the picker to plain tier labels.
+ * ⚠️ NEVER add `env` here, and never widen past `tiersOf()`'s three allowlisted
+ * key names: this shape is what keeps a key out of every response, every log line
+ * and the browser.
  */
 export function listProviders() {
   return Object.entries(load())
-    .map(([name, p]) => ({ name, label: p.label }))
+    .map(([name, p]) => ({ name, label: p.label, tiers: tiersOf(p.env) }))
     .sort((a, b) => a.name.localeCompare(b.name))
 }
 

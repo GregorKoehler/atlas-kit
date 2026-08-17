@@ -819,7 +819,7 @@ function registerAgentControl(server) {
         vault: z.string().optional().describe('for a knowledge agent: which vault (e.g. "atlas")'),
         model: z.enum(['opus', 'fable', 'sonnet']).optional().describe('default opus for a dev agent you spawn; opus for a knowledge agent'),
         effort: z.enum(['high', 'xhigh', 'max']).optional().describe('default high (dev) / xhigh (knowledge)'),
-        provider: z.string().optional().describe('OPTIONAL model-backend profile, for a dev agent or a knowledge chat (a name from GET /api/providers, e.g. "deepseek-openrouter") — same harness, different Anthropic-compatible endpoint. Omit for the default Anthropic subscription, which is what almost every spawn wants; only pass one when the operator asked for that backend. With a profile, `model` picks the TIER (opus/sonnet) the profile maps.'),
+        provider: z.string().optional().describe('OPTIONAL model-backend profile, for a dev agent or a knowledge chat (a name from GET /api/providers, e.g. "deepseek-openrouter") — same harness, different Anthropic-compatible endpoint. Omit for the default Anthropic subscription, which is what almost every spawn wants; only pass one when the operator asked for that backend. With a profile, `model` picks a TIER — and it must be one THAT profile maps (its `tiers` in GET /api/providers; `fable` is never mappable).'),
       },
     },
     // Stamp this orchestrator as the parent so the dashboard can draw the spawn

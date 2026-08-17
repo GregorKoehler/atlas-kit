@@ -9,6 +9,12 @@ import { useAgents } from '../../lib/useAgents'
 import { spawnAgent, scheduleAgent, unscheduleAgent } from '../../lib/api'
 import { useDraft } from '../../lib/useDraft'
 import { useProviders } from '../../lib/providers'
+import { modelOptions, keepModel, modelTitle } from '../../lib/modelTiers'
+
+// The tiers a knowledge/Atlas chat may pick, in dropdown order. A provider
+// profile narrows and relabels this list (modelTiers.ts); without one it renders
+// verbatim.
+const CHAT_TIERS = ['fable', 'opus', 'sonnet']
 
 /**
  * Knowledge agents — vault-grounded chats, spawned from the Knowledge Base tab
@@ -52,13 +58,18 @@ export function KnowledgeAgents({
   // renders and no chat carries a `provider`, i.e. nothing here changes.
   const providers = useProviders()
   const [provider, setProvider] = useState('')
-  // A profile maps the opus/sonnet TIERS only (Claude Code has no `fable` tier to
-  // point at ANTHROPIC_DEFAULT_*_MODEL), so Fable and a profile are mutually
-  // exclusive — the server refuses the pair. Picking a profile moves a Fable
-  // selection to Opus rather than leaving the form on a combination that 400s.
+  // What the model dropdown offers RIGHT NOW: under a profile, only the tiers that
+  // profile maps, each labelled with the model it maps to — otherwise the form
+  // reads "Opus / Sonnet" whichever backend is picked, and never says what will
+  // actually run. Fable is never mappable (no ANTHROPIC_DEFAULT_FABLE_MODEL).
+  const profile = providers.find((p) => p.name === provider)
+  const modelOpts = modelOptions(CHAT_TIERS, profile)
+  // Picking a profile must never leave the form on a combination the spawn route
+  // refuses: an unoffered selection moves to Opus (this form's default) or, if the
+  // new profile does not map that, to the first tier it does.
   const pickProvider = (name: string) => {
     setProvider(name)
-    if (name && model === 'fable') setModel('opus')
+    setModel((m) => keepModel(m, modelOptions(CHAT_TIERS, providers.find((p) => p.name === name)), 'opus'))
   }
   const [busy, setBusy] = useState(false)
   const [err, setErr] = useState('')
@@ -161,14 +172,16 @@ export function KnowledgeAgents({
             className="capture__input capture__input--sm agents__select"
             value={model}
             onChange={(e) => setModel(e.currentTarget.value)}
-            title="Model for this chat (always the 1M-context variant)"
+            title={modelTitle(profile, 'chat')}
           >
-            {/* Hidden under a provider profile: the tier has to be one the profile
-                maps (opus/sonnet), and offering an option the spawn would refuse
-                is worse than not offering it. */}
-            {provider ? null : <option value="fable">Fable</option>}
-            <option value="opus">Opus</option>
-            <option value="sonnet">Sonnet</option>
+            {/* Under a provider profile these are the tiers THAT profile maps,
+                shown with what they map to; offering an option the spawn would
+                refuse is worse than not offering it. Without one: today's list. */}
+            {modelOpts.map((o) => (
+              <option value={o.value} key={o.value}>
+                {o.label}
+              </option>
+            ))}
           </select>
           {/* Runtime-gated: renders only on a box that configured profiles
               (docs/PROVIDERS.md). "Anthropic" is the empty value — the default

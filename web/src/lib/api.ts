@@ -180,11 +180,16 @@ export interface AddonsView {
 
 /** What `GET /api/providers` serves — the model-BACKEND profiles configured on
  *  this box (docs/PROVIDERS.md), so the spawn picker offers them at runtime.
- *  ⚠️ NAME AND LABEL ONLY, by design: a profile's env holds the operator's API
- *  key and never leaves the server. Empty on a box with no profiles. */
+ *  ⚠️ NAME, LABEL AND THE TIER MAP ONLY, by design: `tiers` is the value of the
+ *  three allowlisted ANTHROPIC_DEFAULT_{OPUS,SONNET,HAIKU}_MODEL keys — model
+ *  slugs, which is what the picker must display ("Opus → deepseek/deepseek-v4-pro")
+ *  and which tiers a spawn may name. Every other value in a profile's env, the
+ *  operator's API key above all, never leaves the server. `tiers` may be `{}` for
+ *  a profile that maps none. Empty list on a box with no profiles. */
 export interface ProviderProfile {
   name: string
   label: string
+  tiers?: Partial<Record<string, string>>
 }
 export interface ProvidersView {
   providers: ProviderProfile[]

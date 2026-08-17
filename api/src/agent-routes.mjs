@@ -40,7 +40,7 @@ import { createReceiptState, armReceipt, diffReceipts, receiptParent } from './a
 import { appendMessage, readMessages, checkBudget, noteSend } from './agent-messages.mjs'
 import { runAtlasQuery, appendQueryLog } from './atlas-query-relay.mjs'
 import { resolveVault, isTypedVault } from './vaults.mjs'
-import { listProviders, resolveProvider } from './providers.mjs'
+import { listProviders, resolveProvider, tiersOf } from './providers.mjs'
 import { EVIDENCE_FRAMING_BYTES } from './atlas-candidates.mjs'
 
 // Remote bridges (workstation + any in bridges.json) are resolved per-repo /
@@ -410,10 +410,13 @@ export function spawnPicks({ model, effort, kind, provider } = {}) {
     effortLevel: effort || 'xhigh',
   }
 }
-/* Which tiers a provider profile can map. Claude Code resolves an alias through
- * ANTHROPIC_DEFAULT_{OPUS,SONNET,HAIKU}_MODEL — there is no `fable` tier, so a
- * `fable` pick would reach the gateway as the literal model name `fable`. The
- * dropdown hides the combination; this is the server-side half. */
+/* Which tiers a provider profile can map when the profile itself says nothing.
+ * Claude Code resolves an alias through ANTHROPIC_DEFAULT_{OPUS,SONNET,HAIKU}_MODEL
+ * — there is no `fable` tier, so a `fable` pick would reach the gateway as the
+ * literal model name `fable`. The dropdown hides the combination; this is the
+ * server-side half. A profile that DOES declare tiers is checked against its own
+ * (see performSpawn): the set is per-profile, because a profile that maps only
+ * sonnet must refuse opus, and one that maps haiku must accept it. */
 const PROVIDER_TIERS = new Set(['opus', 'sonnet'])
 
 // Call a bridge; returns { ok, status, body } and never throws — a down bridge /
@@ -1051,10 +1054,18 @@ async function performSpawn(raw) {
   // mode of ignoring it is an agent quietly running (and billing) on exactly the
   // default backend the operator was trying to move off.
   if (provider !== undefined) {
-    if (typeof provider !== 'string' || !resolveProvider(provider))
+    const profile = typeof provider === 'string' ? resolveProvider(provider) : null
+    if (!profile)
       return { status: 400, body: { ok: false, error: `unknown "provider" profile (configured: ${listProviders().map((p) => p.name).join(', ') || 'none'})` } }
-    if (model !== undefined && !PROVIDER_TIERS.has(model))
-      return { status: 400, body: { ok: false, error: `"model" with a provider profile must be a mappable tier (${[...PROVIDER_TIERS].join('/')}) — see docs/PROVIDERS.md` } }
+    // Per PROFILE, not per kit: a tier is mappable only if THIS profile declares
+    // ANTHROPIC_DEFAULT_<TIER>_MODEL for it. Selecting a tier the profile does not
+    // map sends the literal alias to the gateway and dies at the agent's first
+    // turn. A profile that declares no tier vars at all keeps today's behaviour
+    // exactly — this must not newly refuse a spawn that works today.
+    const mapped = Object.keys(tiersOf(profile.env))
+    const mappable = mapped.length ? new Set(mapped) : PROVIDER_TIERS
+    if (model !== undefined && !mappable.has(model))
+      return { status: 400, body: { ok: false, error: `"model" with the "${provider}" profile must be a mappable tier (${[...mappable].join('/')}) — see docs/PROVIDERS.md` } }
     // Knowledge chats are always box-local (the box owns the vault), so only a
     // DEV spawn can route to the remote bridge — the executor that does not carry
     // profiles yet.
@@ -2074,9 +2085,10 @@ export function agentRouter(bearerAuth) {
    * install, so the picker appears because this box has profiles, never because
    * someone compiled a different bundle — the same shape GET /api/addons has).
    *
-   * 🔴 NAMES AND LABELS ONLY. listProviders() cannot return an `env` block; this
-   * route must never grow one. Unauthed like GET /api/agents, which is exactly
-   * why the shape matters. */
+   * 🔴 NAMES, LABELS AND THE TIER MAP ONLY. listProviders() cannot return an
+   * `env` block — only the three allowlisted ANTHROPIC_DEFAULT_*_MODEL values,
+   * which are model slugs the picker displays. This route must never grow more.
+   * Unauthed like GET /api/agents, which is exactly why the shape matters. */
   router.get('/api/providers', (_req, res) => res.json({ providers: listProviders() }))
 
   // Aggregate dev/knowledge-agent time-tracking history. Read-only, like GET
