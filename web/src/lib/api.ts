@@ -1341,6 +1341,40 @@ export interface AgentActionResult {
   boxChars?: number
 }
 
+/* --- The access session in front of the dashboard ------------------ *
+ * A kit install may sit behind Cloudflare Access, another auth proxy, or none.
+ * With a proxy, an expired session makes it 302 every request to its login
+ * page. A `fetch` with `redirect: 'manual'` surfaces that as an opaque
+ * redirect (type 'opaqueredirect', status 0) instead of silently following it
+ * to an HTML page the app cannot use; a bare 401/403 is the same situation.
+ * ONE classifier, used by the app-wide session probe. */
+export function isAuthBounce(res: Pick<Response, 'type' | 'status'>): boolean {
+  return res.type === 'opaqueredirect' || res.status === 0 || res.status === 401 || res.status === 403
+}
+
+/** Re-authenticate: a TOP-LEVEL navigation, the only thing that can show a
+ *  login page served by the proxy (a fetch can't). The kit registers no
+ *  service worker and serves index.html `no-cache`, so a reload always reaches
+ *  the proxy, which runs its login and sends the browser back. (A fork that
+ *  adds a service worker must route this around it, or the reload is answered
+ *  from its cache and the login never shows.) */
+export function relogin(): void {
+  window.location.reload()
+}
+
+/** Cheap same-origin probe: is the access session still valid?
+ *  'expired' → auth bounce; 'offline' → fetch threw (no network — say nothing);
+ *  'ok' → anything else (including a 5xx: the session is fine, the API isn't). */
+export async function probeSession(): Promise<'ok' | 'expired' | 'offline'> {
+  let res: Response
+  try {
+    res = await fetch(`${API_BASE}/health`, { cache: 'no-store', redirect: 'manual' })
+  } catch {
+    return 'offline'
+  }
+  return isAuthBounce(res) ? 'expired' : 'ok'
+}
+
 /** Bundled view of the workstation's agent sessions (GET /api/agents). */
 export function fetchAgents(): Promise<AgentsView | null> {
   return getJson<AgentsView>(`${API_BASE}/agents`)

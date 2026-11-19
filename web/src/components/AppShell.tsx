@@ -7,6 +7,7 @@ import { AtlasCenter } from './AtlasCenter'
 import { ThemeSwitcher } from './ThemeSwitcher'
 import { AsciiBackdrop } from './AsciiBackdrop'
 import { ChatNoteReader } from './ChatNoteReader'
+import { SessionExpiredBanner } from './SessionExpiredBanner'
 
 // One tasteful staggered reveal on load. No looping animation — this runs
 // on a TV all day, so motion is strictly entrance-only.
@@ -43,6 +44,7 @@ export function AppShell() {
       <span className="corner corner--tr" />
       <span className="corner corner--bl" />
       <span className="corner corner--br" />
+      <SessionExpiredBanner />
       {/* Atlas page links clicked in any chat view open here, over the chat. */}
       <ChatNoteReader />
 

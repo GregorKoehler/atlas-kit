@@ -7687,3 +7687,30 @@ button.capture-job__title--link {
 .prose__callout--done .prose__callout-title {
   color: var(--status-green);
 }
+
+/* App-wide "session expired" banner (SessionExpiredBanner.tsx) — pinned to the
+   top, amber like the other auth/attention chips. */
+.session-expired {
+  position: fixed;
+  top: max(0.5rem, env(safe-area-inset-top));
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 100;
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  max-width: calc(100vw - 2rem);
+  padding: 0.4rem 0.5rem 0.4rem 0.8rem;
+  border: 1px solid var(--status-amber);
+  border-radius: 6px;
+  background: var(--bg-800);
+  color: var(--status-amber);
+  font-size: 0.8rem;
+}
+.session-expired__btn {
+  padding: 0.2rem 0.6rem;
+  border: 1px solid var(--status-amber);
+  border-radius: 4px;
+  color: var(--status-amber);
+  font-weight: 600;
+}
