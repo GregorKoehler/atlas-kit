@@ -194,6 +194,31 @@ function askUserQuestionOf(input) {
   }
 }
 
+// Claude Code's own paste detection wraps a long multi-line input — and the
+// executors TYPE every prompt (tui-input.mjs typeAndSubmit), so any long send
+// trips it — and the user turn lands on disk as
+//   "\n\n<pasted_content id=\"657c\">\n…the text…\n</pasted_content id=\"657c\">\n"
+// (random hex id, repeated on the close). Measured on real transcripts: every
+// such turn was the whole turn, the smallest ~900 chars — operator pastes, but
+// also Atlas steers, peer mail and fleet notes. The chat showed the raw tags
+// in the bubble, and because the provenance headers
+// (msgProvenance.ts) and the steer fingerprint (steerKey) both read the text
+// as typed, a wrapped steer could classify as the operator's own words.
+// Unwrapped here, on the READ path only: the model still gets the wrapper.
+// Only a complete open/close pair with the same id is unwrapped — an unmatched
+// or malformed tag stays as the text it is. The newlines hugging a block are
+// the wrapper's: the block becomes its own paragraph, nothing more.
+const PASTED = /\n*<pasted_content id="([0-9a-f]+)">\n?([\s\S]*?)\n?<\/pasted_content id="\1">\n*/g
+export function unwrapPasted(text) {
+  if (!text.includes('<pasted_content id="')) return text
+  let end = 0 // where the previous block's match ended, so adjacent blocks share one break
+  return text.replace(PASTED, (m, _id, body, at) => {
+    const out = (at > end ? '\n\n' : '') + body + (at + m.length < text.length ? '\n\n' : '')
+    end = at + m.length
+    return out
+  })
+}
+
 // Parse one `.jsonl` file's TEXT into ordered chat messages. Pure (no fs). Returns
 // { sessionId, firstTs, messages:[{role,ts,text,tools,uuid}], assistantCount }.
 export function parseTranscript(text) {
@@ -228,7 +253,7 @@ export function parseTranscript(text) {
     //     background task finished, not operator speech.
     const att = e.type === 'attachment' ? e.attachment : null
     if (att && att.type === 'queued_command' && att.commandMode === 'prompt') {
-      let queuedText = String(att.prompt || '').trim()
+      let queuedText = unwrapPasted(String(att.prompt || '')).trim()
       if (!queuedText) continue
       queuedText = capText(queuedText, MAX_FIRST_TEXT) // clamped to MAX_TEXT in stitchParsed
       const qts = att.timestamp || e.timestamp || null
@@ -283,7 +308,7 @@ export function parseTranscript(text) {
     // A user-role entry that only carries a tool_result is tool OUTPUT, not a turn;
     // isMeta entries are system-injected. Neither belongs in the conversation.
     if (e.type === 'user' && (isToolResult || e.isMeta)) continue
-    out = out.trim()
+    out = unwrapPasted(out).trim()
     if (!out && !tools.length) continue
     out = capText(out, MAX_FIRST_TEXT) // outer bound only — stitchParsed clamps non-opening turns to MAX_TEXT
     const ts = e.timestamp || null
