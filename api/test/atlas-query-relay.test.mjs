@@ -67,6 +67,10 @@ fs.writeFileSync(
   }),
 )
 
+// Over get_note's own 20,000 cap: one section too long for a single answer.
+const LONG_BODY = Array.from({ length: 900 }, (_, i) => `entry ${i} ${'word '.repeat(10)}`).join('\n') + '\n'
+const LONG_NOTE = `# Long\n\nIntro.\n\n## Log\n${LONG_BODY}`
+
 /* --- the fake read API (what the MCP tool handlers call) --------------- */
 const hits = []
 const readApi = http.createServer((req, res) => {
@@ -86,7 +90,7 @@ const readApi = http.createServer((req, res) => {
     if (url.pathname === '/api/search')
       return json({ items: url.searchParams.get('q') === 'huge' ? Array.from({ length: 200 }, (_, i) => ({ path: `Wiki/p${i}.md`, snippet: 'x'.repeat(40) })) : [{ path: 'Wiki/Projects/My Project.md', snippet: 'a hit' }] })
     if (url.pathname === '/api/atlas/query') return json({ items: [{ title: 'ship the relay', status: 'next' }] })
-    if (url.pathname === '/api/note') return text('# My Project\n\nnotes')
+    if (url.pathname === '/api/note') return text(url.searchParams.get('path') === 'Wiki/Long.md' ? LONG_NOTE : '# My Project\n\nnotes')
     if (url.pathname === '/api/wiki/log') return text('## [2026-07-29] ingest | something')
     if (url.pathname === '/api/wiki/index') return text('- [[My Project]]')
     if (url.pathname === '/api/wiki/pages') return json({ items: [{ title: 'My Project', path: 'Wiki/Projects/My Project.md' }] })
@@ -213,6 +217,33 @@ test('a big answer is truncated predictably, and says how to narrow it', async (
   assert.match(r.result, /^[\s\S]{400}\n… \[truncated: 400 of \d+ chars — narrow the query/)
   const log = readQueries().at(-1)
   assert.deepEqual({ truncated: log.truncated, bytes: log.bytes }, { truncated: true, bytes: r.bytes })
+})
+
+test('get_note: section and offset pass through, and the relay never cuts its answer again', async () => {
+  // RESULT_MAX is 400 in this file, so any second cut would show. get_note bounds
+  // itself, and a second cut would lose text no printed offset could reach.
+  const parts = []
+  let args = { path: 'Wiki/Long.md', section: 'Log' }
+  while (args) {
+    fresh()
+    const r = await query({ tool: 'get_note', args })
+    assert.equal(r.ok, true, r.error)
+    assert.ok(!r.truncated, 'the relay cut a get_note answer')
+    assert.ok(r.result.length <= 20000)
+    assert.ok(r.result.length > 400 || parts.length, 'the first part is over the relay cap')
+    assert.equal(new URL(`http://x${hits.at(-1).search}`).searchParams.get('vault'), 'atlas')
+    const [first] = r.result.split('\n')
+    const [, c, d] = first.match(/section chars (\d+)–(\d+) of \d+\]$/)
+    parts.push(r.result.slice(first.length + 1, first.length + 1 + (d - c)))
+    const next = r.result.match(/next call: get_note (\{.*\})(?:, or one subsection below)?\]/)
+    args = next ? JSON.parse(next[1]) : null
+  }
+  assert.equal(parts.join(''), `## Log\n${LONG_BODY}`)
+
+  fresh()
+  const bad = await query({ tool: 'get_note', args: { path: 'Wiki/Long.md', section: 'nope' } })
+  assert.equal(bad.status, 400)
+  assert.match(bad.error, /no section "nope".*\n?.*"Log"/s, 'the unknown-section error reaches the agent')
 })
 
 /* --- 3. the log ------------------------------------------------------- */

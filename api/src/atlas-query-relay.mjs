@@ -212,7 +212,9 @@ export async function runAtlasQuery({ from, bridge, tool, args }) {
     appendQueryLog({ from, bridge, tool, args: argsJson, ok: false, ms, reason: 'query-error' })
     return { status: 400, ok: false, error: text || `${tool} failed` }
   }
-  const truncated = text.length > RESULT_MAX
+  // get_note bounds itself at the tool layer and names the exact next call; cutting
+  // its answer again would lose text that no offset it printed could reach.
+  const truncated = tool !== 'get_note' && text.length > RESULT_MAX
   const result = truncated
     ? `${text.slice(0, RESULT_MAX)}\n… [truncated: ${RESULT_MAX} of ${text.length} chars — narrow the query (add "limit", or filter with query_atlas) and ask again]`
     : text
