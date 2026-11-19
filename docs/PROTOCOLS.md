@@ -28,7 +28,7 @@ Five operations act on a live session, each with a different disruption profile:
 | Action | Implementation | Behavior | Use when |
 |---|---|---|---|
 | **queue** | `queuePrompt()` — `agent-local.mjs` | Appends to `s.queued` (a FIFO). `flushQueued()`, on a 3s timer (`QUEUE_FLUSH_MS`), delivers the first entry **`queue-delivery.mjs` says it may** — the head at idle — see [§1a](#1a-when-a-queued-message-is-delivered). A menu, or being the active ship-train head, still holds everything. | The agent is mid-turn; you want to add context without breaking its flow. The gentle default. |
-| **prompt** | `prompt()` — `agent-local.mjs` | Delivers immediately. Refuses with `409` if a choice menu (plan/permission) is pending, unless `force` is set — typing into a live menu would silently confirm the highlighted option. Delivery itself **sanitises terminal escapes and reads the input box back before pressing Enter** (`tui-input.mjs`): `send-keys -l` is a keyboard, so an escape sequence in pasted text is parsed as keys and swallows the words around it. A buffer that can't be read back is cleared and the call fails rather than submitting something mangled. | The agent is already idle, waiting on you. |
+| **prompt** | `prompt()` — `agent-local.mjs` | Delivers immediately. Refuses with `409` if a choice menu (plan/permission) is pending, unless `force` is set — typing into a live menu would silently confirm the highlighted option. Delivery itself **sanitises terminal escapes and reads the input box back before pressing Enter** (`tui-input.mjs`): `send-keys -l` is a keyboard, so an escape sequence in pasted text is parsed as keys and swallows the words around it. A buffer that can't be read back is cleared and the call fails rather than submitting something mangled. Invisible Unicode (bidi marks, ZWSP, BOM… — Claude Code strips those itself on Enter and then submits *nothing*) is removed before typing, and **every Enter is verified**: the box must empty, else it is cleared and the call fails `deliver-unsubmitted`. Every refusal is a `502` with `notDelivered: true` (nothing was sent — the web client resends once), audited as a payload fingerprint, never the text. A send that never got JSON back from the API (an edge's HTML 502, a network error) reads *dashboard not reachable* in the card and is reported to `POST /api/agents/client-send-fail` once the API answers again. All of it is `typeAndSubmit` in `tui-input.mjs`, shared by both executors. | The agent is already idle, waiting on you. |
 | **interrupt** | `interrupt()` — `agent-local.mjs:2101` | Sends `Escape` (stops the in-flight turn, **keeps** the transcript), waits `INTERRUPT_SETTLE_MS` (400ms) for the TUI to settle, then delivers. Disruptive. | The agent is going wrong and must change course *now*. |
 | **kill** | `kill()` — `agent-local.mjs:2856` | For a dev agent **without** a live paired Atlas worker (or on a second press), an immediate `tmux kill-session` — the worktree + `agent/<id>` branch are **kept** for review. For a dev agent **with** a paired worker (first press), closes gracefully: delivers `DEV_RECAP_PROMPT` (line 2671), moves the session to `ingesting/recap`, and lets the driver run recap → worker ingest → Atlas merge → reap. Never touches the git remote beyond killing tmux. | The agent's work is done or it was started in error, but you're not ready to delete its branch. |
 | **merge** | `mergePr()` — `agent-local.mjs` | Pre-flights the PR server-side (`merge-preflight.mjs`) and **refuses a stale / conflicted / blocked / red / checks-pending one with the state named**; on pass, runs `gh pr merge --merge` in the session's repo checkout and records who merged. Box-local only. `force: true` skips the pre-flight, audited as such. Neither `kill` nor `cleanup` ever merges anything. | You already know the PR is fresh and green. Otherwise **ship** the agent — merging does not rebase. |
@@ -61,9 +61,18 @@ tick ([§1b](#1b-an-observation-is-only-true-when-it-was-made)):
   forwarding — an unstamped entry would silently read as observational.
 
 A pending **menu** holds every kind (typing into a menu is a selection, not text), as does
-being the active ship-train head. A delivery the executor refuses (a box it can't clear, a
-buffer that won't read back) backs the session off with `deliveryBackoffMs` instead of
-retrying every 3 s; the message stays queued. `AGENT_BOUNDARY_DELIVERY=0` /
+being the active ship-train head. So does a **hold**: delivery looks at the pane before it
+types a key (`typeAndSubmit`, `tui-input.mjs`), and a Claude Code **panel** above the box (the
+feedback-draft card, the session survey — `pane-panel.mjs`), no input box on screen, or a box
+that already holds text each refuse with *nothing typed*. The queue parks on its reason
+(`deliverHold`, shown on the first queued chip; `queue-held`/`queue-unheld` audited once per
+change, no backoff ladder) and delivers the moment it is gone; a direct prompt answers `409`
+with the reason. Text already in the box is never typed onto and never wiped — only the card's
+explicit "Clear it & send" and the lifecycle prompts (ship, close/recap, ingest hand-off) clear
+it first, verified. The card answers a panel through `POST /api/agents/panel` with the panel's
+own safe keys (dismiss `0`, review `1`, Esc) — never its `2`, which sends feedback to Anthropic.
+A delivery the executor refuses after typing (a buffer that won't read back) backs the session
+off with `deliveryBackoffMs` instead of retrying every 3 s; the message stays queued. `AGENT_BOUNDARY_DELIVERY=0` /
 `BRIDGE_BOUNDARY_DELIVERY=0` restore idle-only delivery, independently per executor.
 
 ---

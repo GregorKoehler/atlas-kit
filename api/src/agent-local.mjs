@@ -59,7 +59,8 @@ import { capacityVerdict, readMemStatus } from './agent-capacity.mjs'
 // the spinner line above the input box — because the footer is rendered to the
 // pane width and drops that marker mid-turn. Shared, not copied.
 import { isBusy } from './pane-busy.mjs'
-import { sanitizeForTyping, deliveryLanded, clearInputBox, TUI_CLEAR_KEY, TUI_VERIFY, TUI_VERIFY_MAX_CHARS, TUI_VERIFY_SETTLE_MS, TUI_VERIFY_TRIES } from './tui-input.mjs'
+import { typeAndSubmit, payloadFingerprint, pressPanelAction, holdResponse, TUI_HOLD_STAGES } from './tui-input.mjs'
+import { parsePanel } from './pane-panel.mjs'
 // A launch prompt travels by FILE, never inside the tmux command — the shell
 // shape is shared with the bridge executor so the two cannot drift.
 import { promptFileBody, promptFileCommand } from './prompt-file-launch.mjs'
@@ -1328,6 +1329,8 @@ function publicView(s, status, lastOutput, menuKind, transcript, appUp, menuChoi
             ...(q.kind ? { kind: q.kind } : {}),
             ...(q.summary ? { summary: q.summary } : {}),
           })),
+          // Why the queue is not going out (a panel, a draft in the box…).
+          ...(s.deliverHold ? { deliverHold: s.deliverHold } : {}),
         }
       : {}),
     ...(transcript && transcript.context
@@ -1684,9 +1687,14 @@ export async function listSessions() {
       applyingCardNow.add(s.id)
       applyCardNow(s, cardNow)
     }
-    out.push(
-      publicView(s, status, tail || s.lastSeen || '', menuKind, transcript, appUp, menuChoice, listDownloads(s.id)),
-    )
+    // A Claude Code panel over the input box (the feedback-draft card) — the
+    // card shows it with its safe keys, and delivery is held while it is up
+    // (pane-panel.mjs).
+    const panel = alive ? parsePanel(pane) : null
+    out.push({
+      ...publicView(s, status, tail || s.lastSeen || '', menuKind, transcript, appUp, menuChoice, listDownloads(s.id)),
+      ...(panel ? { panel } : {}),
+    })
   }
   if (changed) persist()
   out.sort((a, b) => (a.startedAt < b.startedAt ? 1 : -1))
@@ -2623,49 +2631,30 @@ async function prepare(id, text, images) {
 // back off the pane we clear the box and fail, so the caller sees an error and
 // the queue keeps the prompt for the next tick. Never delivered beats silently
 // replaced — and both are loud (audit + the card's error).
-async function deliver(s, payload) {
-  const safe = sanitizeForTyping(payload)
-  const stripped = payload.length - safe.length
-  // ⚠️ NEVER type into a non-empty box. Whatever is in there — our own residue
-  // from a refusal, a half-delivered prompt from a crash — the typed text
-  // concatenates onto it and the next Enter submits the pair. Clearing is
-  // VERIFIED, not counted: `C-u` kills a display ROW, so the count depends on
-  // the wrapped height of content we didn't put there (tui-input.mjs).
-  const io = {
+//
+// And look BEFORE typing: a Claude Code panel above the box, no box on screen,
+// or a box already holding text each refuse with nothing typed (a HOLD — see
+// tui-input.mjs TUI_HOLD_STAGES; holds are audited by their callers, once, not
+// per refusal). `clearDraft` empties a non-empty box first, verified — only for
+// an operator's explicit "clear & send" and the lifecycle prompts below.
+async function deliver(s, payload, { clearDraft = false } = {}) {
+  const d = await typeAndSubmit(payload, {
     readPane: () => captureTail(s, TAIL_LINES, true),
-    pressClear: () => run(['tmux', 'send-keys', '-t', s.tmux, TUI_CLEAR_KEY]),
-  }
-  let cleared = 0
-  if (TUI_VERIFY) {
-    const pre = await clearInputBox(io)
-    if (!pre.ok) {
-      audit({ action: 'deliver-box-stuck', id: s.id, repo: s.repo, len: safe.length, presses: pre.presses, residue: pre.residue, ok: false })
-      return { ok: false, error: 'input box is not empty and could not be cleared (nothing typed)' }
-    }
-    cleared = pre.presses
-  }
-  const t = await run(['tmux', 'send-keys', '-t', s.tmux, '-l', safe])
-  if (!t.ok) return { ok: false, error: t.stderr.slice(0, 500) || 'send-keys failed' }
-  if (TUI_VERIFY && safe.length <= TUI_VERIFY_MAX_CHARS && !(await typedTextLanded(s, safe))) {
-    const post = await clearInputBox(io)
-    audit({ action: 'deliver-mangled', id: s.id, repo: s.repo, len: safe.length, stripped, presses: post.presses, emptied: post.ok, ok: false })
-    return { ok: false, error: 'input did not land in the session (not submitted)' }
-  }
-  await run(['tmux', 'send-keys', '-t', s.tmux, 'Enter'])
-  return { ok: true, stripped, cleared }
+    typeText: (text) => run(['tmux', 'send-keys', '-t', s.tmux, '-l', text]),
+    pressKey: (key) => run(['tmux', 'send-keys', '-t', s.tmux, key]),
+    clearDraft,
+  })
+  if (!d.ok && d.stage !== 'type' && !TUI_HOLD_STAGES.has(d.stage)) auditDeliverFail(s, payload, d)
+  return d
 }
 
-// Read the typed text back off the pane. The pane lags the keystrokes, so this
-// looks more than once (see TUI_VERIFY_SETTLE_MS) — the happy path still
-// returns on the first look, and only a genuinely mangled buffer pays the wait.
-// The capture keeps its SGR (`-e`): the box's faint placeholder is what tells
-// an empty box from one holding text.
-async function typedTextLanded(s, payload) {
-  for (let i = 0; i < TUI_VERIFY_TRIES; i++) {
-    if (i) await sleep(TUI_VERIFY_SETTLE_MS)
-    if (deliveryLanded(await captureTail(s, TAIL_LINES, true), payload)) return true
-  }
-  return false
+// One audit line per refused delivery, named by the stage that refused it. The
+// payload rides as a FINGERPRINT (length + non-ASCII counts by category), never
+// its content — enough to tell an invisible-mark paste from pane lag later.
+function auditDeliverFail(s, payload, d) {
+  const action = { 'box-stuck': 'deliver-box-stuck', mangled: 'deliver-mangled', unsubmitted: 'deliver-unsubmitted' }[d.stage]
+  const { len, lines, nonAscii } = payloadFingerprint(payload)
+  audit({ action, id: s.id, repo: s.repo, len, lines, nonAscii, stripped: d.stripped, presses: d.presses, ...(d.residue !== undefined ? { residue: d.residue } : {}), ...(d.emptied !== undefined ? { emptied: d.emptied } : {}), ...(d.boxSeen === false ? { boxSeen: false } : {}), ok: false })
 }
 
 // Remember that an Atlas orchestrator — not the operator — injected this prompt.
@@ -2698,7 +2687,7 @@ export function describeSession(id) {
   return { id: s.id, kind: s.kind || 'dev', repo: s.repo, vault: s.vault, task: s.task, status: s.status }
 }
 
-export async function prompt({ id, text, images, force, steeredBy }) {
+export async function prompt({ id, text, images, force, steeredBy, clearBox }) {
   const p = await prepare(id, text, images)
   if (p.err) return p.err
   // Refuse to type into a pending CHOICE menu (plan/permission/AskUserQuestion):
@@ -2710,8 +2699,23 @@ export async function prompt({ id, text, images, force, steeredBy }) {
     const pane = await captureTail(p.s, TAIL_LINES)
     if (menuKindOf(pane) === 'choice') return { status: 409, ok: false, error: 'menu', menuKind: 'choice' }
   }
-  const d = await deliver(p.s, p.payload)
-  if (!d.ok) return { status: 502, ok: false, error: d.error }
+  // `clearBox`: the card's "clear the input & send", after a 409 box-not-empty.
+  const d = await deliver(p.s, p.payload, { clearDraft: !!clearBox })
+  // Held before a key was typed — a panel, no box on screen, a box holding
+  // text: 409 with the reason (and the panel), which the card turns into its
+  // buttons.
+  if (!d.ok && TUI_HOLD_STAGES.has(d.stage)) {
+    audit({ action: 'prompt-held', id, repo: p.s.repo, stage: d.stage, ...(d.panel ? { panel: d.panel.kind } : {}), len: p.payload.length, ok: false })
+    return holdResponse(d)
+  }
+  // 502 here is a CONTRACT, not "the server is down": deliver() either typed
+  // AND submitted, or it submitted NOTHING (typeAndSubmit in tui-input.mjs).
+  // `notDelivered` says exactly that, machine-readably — it is what lets the
+  // client retry this 502 once and only this one: a *transport* 502 ("bridge
+  // unreachable") carries no such proof, and retrying that could double-send.
+  // The retry cannot stack a copy: a box the refusal could not SEE empty
+  // (`emptied: false`) holds the retry at box-not-empty/no-box before it types.
+  if (!d.ok) return { status: 502, ok: false, error: d.error, notDelivered: true }
   // Attribute the next run to this prompt (phase tracker snapshots it on open).
   p.s.lastPrompt = { text: p.text, at: nowIso() }
   recordSteer(p.s, p.text, steeredBy)
@@ -2730,7 +2734,7 @@ export async function interrupt({ id, text, images, steeredBy }) {
   await run(['tmux', 'send-keys', '-t', p.s.tmux, 'Escape'])
   await sleep(INTERRUPT_SETTLE_MS)
   const d = await deliver(p.s, p.payload)
-  if (!d.ok) return { status: 502, ok: false, error: d.error }
+  if (!d.ok) return TUI_HOLD_STAGES.has(d.stage) ? holdResponse(d) : { status: 502, ok: false, error: d.error, notDelivered: true }
   // The Escape blip clears the busy marker briefly — hold the run phase so the
   // steer doesn't register as the turn ending; attribute the run to this input.
   p.s.phaseHold = Date.now() + PHASE_HOLD_MS
@@ -2904,7 +2908,7 @@ export async function sendNow({ id }) {
   if (!d.ok) {
     s.queued = [q, ...(s.queued || [])]
     persist()
-    return { status: 502, ok: false, error: d.error }
+    return TUI_HOLD_STAGES.has(d.stage) ? holdResponse(d) : { status: 502, ok: false, error: d.error }
   }
   // Same as interrupt: hold the run across the Escape blip and attribute it.
   s.phaseHold = Date.now() + PHASE_HOLD_MS
@@ -2961,6 +2965,19 @@ export function purgeNotesAbout(childId) {
 // just on the GET poll) so a queued prompt fires even with the dashboard closed.
 // Skips sessions still working (busy marker) or parked on a menu (text would land
 // in the menu, not as a prompt). Re-entrancy-guarded; a failed send retries next tick.
+// A held queue (TUI_HOLD_STAGES): the reason rides the session to the card
+// (`deliverHold`), and only a CHANGE of reason is logged — a hold is re-checked
+// every 3 s tick and must not write a line per tick the way a refusal did.
+function holdQueue(s, hold) {
+  if ((s.deliverHold?.reason || null) === (hold?.reason || null) && (s.deliverHold?.kind || null) === (hold?.kind || null)) return
+  if (hold) {
+    s.deliverHold = { ...hold, at: nowIso() }
+    console.log(`[agent-local] queue for ${s.id} held — ${hold.reason}${hold.kind ? ` (${hold.kind})` : ''}; the messages stay queued`)
+  } else delete s.deliverHold
+  audit({ action: hold ? 'queue-held' : 'queue-unheld', id: s.id, repo: s.repo, ...(hold || {}), ok: true })
+  persist()
+}
+
 let flushing = false
 async function flushQueued() {
   if (flushing) return
@@ -2990,12 +3007,25 @@ async function flushQueued() {
       })
       if (sel.drops.length) dropStaleNotes(s, sel.drops)
       if (!sel.pick) continue
+      // A panel over the box PARKS the queue — no typing, no backoff ladder —
+      // until it is gone (pane-panel.mjs: hours of refusals under a feedback
+      // card, each leaving a copy behind). Checked off this tick's capture
+      // first; deliver() re-checks at typing time and holds the same way.
+      const panel = parsePanel(pane)
+      if (panel) {
+        holdQueue(s, { reason: 'panel', kind: panel.kind })
+        continue
+      }
       const picked = new Set(sel.pick.entries)
       const q = sel.pick.entries[0]
       const dec = { via: sel.pick.via }
       const text = deliveryText(sel.pick.entries, Date.now())
       const payload = withImages(text, sel.pick.entries.flatMap((e) => e.paths || []))
       const d = await deliver(s, payload)
+      if (!d.ok && TUI_HOLD_STAGES.has(d.stage)) {
+        holdQueue(s, { reason: d.stage, ...(d.panel ? { kind: d.panel.kind } : {}) })
+        continue
+      }
       if (!d.ok) {
         s.deliverFailures = (s.deliverFailures || 0) + 1
         const backoffMs = deliveryBackoffMs(s.deliverFailures)
@@ -3009,6 +3039,7 @@ async function flushQueued() {
       }
       delete s.deliverFailures
       delete s.deliverRetryAt
+      holdQueue(s, null)
       s.lastPrompt = { text, at: nowIso() }
       // The steer fingerprint is taken over the DELIVERED string, so a text this
       // path had to rebuild (an age line, a digest, image paths) must be
@@ -3141,7 +3172,9 @@ const ACTS = {
     const m = registry.shipTrain.members.find((x) => x.id === s.id)
     const text = (m && m.text) || s.lc.shipText
     if (!text) return
-    const d = await deliver(s, text)
+    // Ship is operator-commanded and always cleared the box first; a stray
+    // draft must not wedge the serial train. A panel still holds it.
+    const d = await deliver(s, text, { clearDraft: true })
     if (!d.ok) return // retry next tick
     s.lc.shipPromptedAt = nowIso()
     s.lastPrompt = { text: '(ship)', at: nowIso() }
@@ -3170,7 +3203,7 @@ const ACTS = {
     if (worker && recap && (await sessionAlive(worker))) {
       await run(['tmux', 'send-keys', '-t', worker.tmux, 'Escape'])
       await sleep(INTERRUPT_SETTLE_MS)
-      const d = await deliver(worker, atlasIngestPrompt(recap, s))
+      const d = await deliver(worker, atlasIngestPrompt(recap, s), { clearDraft: true })
       if (d.ok) {
         s.lc.closePhase = 'ingest'
         s.lc.ingestAt = nowIso()
@@ -3472,6 +3505,10 @@ export async function keys({ id, keys: ks }) {
   for (const k of ks)
     if (!ALLOWED_KEYS.has(k)) return { status: 400, ok: false, error: `key not allowed: ${k}` }
   if (!(await sessionAlive(s))) return { status: 409, ok: false, error: 'session not running' }
+  // Raw keys never reach a Claude Code PANEL: its digits act (a `2`, twice,
+  // sends feedback to Anthropic). Its own safe keys go through panelAction.
+  const panel = parsePanel(await captureTail(s, TAIL_LINES))
+  if (panel) return { status: 409, ok: false, error: 'panel', panel }
   const r = await run(['tmux', 'send-keys', '-t', s.tmux, ...ks])
   if (!r.ok) return { status: 502, ok: false, error: r.stderr.slice(0, 500) || 'send-keys failed' }
   // A menu confirmation can unblock a run — attribute it (no free-text prompt).
@@ -3479,6 +3516,23 @@ export async function keys({ id, keys: ks }) {
   persist()
   audit({ action: 'keys', id, repo: s.repo, keys: ks, ok: true })
   return { status: 200, ok: true }
+}
+
+// Answer the Claude Code panel blocking a session with one of ITS safe keys —
+// the card's Dismiss / Review / Close (tui-input.mjs pressPanelAction: the
+// action is re-read off the live pane, and `2` is never one).
+export async function panelAction({ id, action }) {
+  const s = registry.sessions[id]
+  if (!s) return { status: 404, ok: false, error: 'no such session' }
+  if (typeof action !== 'string' || !action) return { status: 400, ok: false, error: 'action required' }
+  if (!(await sessionAlive(s))) return { status: 409, ok: false, error: 'session not running' }
+  const r = await pressPanelAction(action, {
+    readPane: () => captureTail(s, TAIL_LINES, true),
+    typeText: (text) => run(['tmux', 'send-keys', '-t', s.tmux, '-l', text]),
+    pressKey: (key) => run(['tmux', 'send-keys', '-t', s.tmux, key]),
+  })
+  audit({ action: 'panel-action', id, repo: s.repo, panelAction: action, ...(r.panel ? { left: r.panel.kind } : {}), ...(r.ok ? {} : { error: r.error }), ok: r.ok })
+  return r.ok ? { status: 200, ok: true, panel: r.panel } : { status: 409, ok: false, error: r.error, panel: r.panel }
 }
 
 // Verified selection of a pending choice-menu option — never a blind
@@ -3534,7 +3588,7 @@ export async function kill({ id }) {
     // Typed vaults (atlas, a sibling vault, … — those carrying a Wiki/Legend.md)
     // flush insights the TYPED way (typed edges/dates + Legend + log).
     const closePrompt = isTypedVault(s.vault) ? ATLAS_KNOWLEDGE_CLOSE_PROMPT : KNOWLEDGE_CLOSE_PROMPT
-    const d = await deliver(s, closePrompt)
+    const d = await deliver(s, closePrompt, { clearDraft: true })
     if (d.ok) {
       beginClose(s) // → ingesting (no closePhase); the driver reaps when the wrap-up turn ends
       audit({ action: 'close', id, repo: s.repo, ok: true })
@@ -3550,7 +3604,7 @@ export async function kill({ id }) {
     delete s.queued
     await run(['tmux', 'send-keys', '-t', s.tmux, 'Escape'])
     await sleep(INTERRUPT_SETTLE_MS)
-    const d = await deliver(s, DEV_RECAP_PROMPT)
+    const d = await deliver(s, DEV_RECAP_PROMPT, { clearDraft: true })
     if (d.ok) {
       beginClose(s, { phase: 'recap' }) // → ingesting/recap; the driver runs recap → ingest → merge → reap
       audit({ action: 'close', id, repo: s.repo, kind: 'dev', ok: true })
@@ -3610,7 +3664,7 @@ export async function cleanup({ id }) {
     delete s.queued
     await run(['tmux', 'send-keys', '-t', s.tmux, 'Escape'])
     await sleep(INTERRUPT_SETTLE_MS)
-    const d = await deliver(s, DEV_RECAP_PROMPT)
+    const d = await deliver(s, DEV_RECAP_PROMPT, { clearDraft: true })
     if (d.ok) {
       beginClose(s, { phase: 'recap', cleanup: true })
       audit({ action: 'close', id, repo: s.repo, kind: 'dev', cleanup: true, ok: true })

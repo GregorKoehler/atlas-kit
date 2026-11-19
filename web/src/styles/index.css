@@ -4517,6 +4517,9 @@ button.capture-job__title--link {
   color: var(--accent);
   text-decoration: none;
   border-bottom: 1px solid rgba(34, 211, 238, 0.3);
+  /* A 500-char URL in a chat bubble must wrap, never scroll the page sideways
+     (auto-linked URLs are one unbroken word). */
+  overflow-wrap: anywhere;
 }
 .prose__a:hover {
   color: var(--accent-teal);
@@ -7228,6 +7231,10 @@ button.capture-job__title--link {
   color: var(--accent);
   cursor: pointer;
   border-bottom: 1px dashed rgba(34, 211, 238, 0.4);
+  /* A long page name or vault path in a 390px chat bubble wraps, never
+     pushes the bubble wider (a button is inline-block). */
+  overflow-wrap: anywhere;
+  text-align: start;
 }
 .wikilink:hover {
   color: var(--accent-teal);
@@ -7340,6 +7347,44 @@ button.capture-job__title--link {
 .reader__body {
   padding: 1.1rem 1.25rem 1.4rem;
   overflow-y: auto;
+}
+/* Compact reader: an Atlas page link clicked in a chat (ChatNoteReader). A
+   panel docked right over the chat, which stays visible (light scrim, no blur)
+   — above a full-screen chat (120) and the app-only overlay (130), below the
+   downloads sheet/preview (140+). A full-height sheet on a phone. */
+.reader--compact {
+  z-index: 135;
+  justify-content: flex-end;
+  padding: 1rem;
+  background: rgba(4, 8, 12, 0.3);
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+.reader--compact .reader__panel {
+  width: min(560px, 100%);
+  height: min(80vh, 760px);
+  max-height: 100%;
+  /* Opaque: with no scrim blur, the chat would read through the glass. */
+  background: var(--bg-800);
+  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.45);
+}
+.reader--compact .reader__body {
+  flex: 1;
+}
+@media (max-width: 640px) {
+  .reader--compact {
+    padding: 0;
+  }
+  .reader--compact .reader__panel {
+    width: 100%;
+    height: 100%;
+    border-radius: 0;
+    padding-top: env(safe-area-inset-top);
+    padding-bottom: env(safe-area-inset-bottom);
+  }
+  .reader--compact .reader__body {
+    padding: 0.75rem 0.6rem 1rem;
+  }
 }
 /* HTML wiki page rendered in a sandboxed iframe (experimental). */
 .reader__html {
@@ -7641,4 +7686,31 @@ button.capture-job__title--link {
 .prose__callout--check .prose__callout-title,
 .prose__callout--done .prose__callout-title {
   color: var(--status-green);
+}
+
+/* App-wide "session expired" banner (SessionExpiredBanner.tsx) — pinned to the
+   top, amber like the other auth/attention chips. */
+.session-expired {
+  position: fixed;
+  top: max(0.5rem, env(safe-area-inset-top));
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 100;
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  max-width: calc(100vw - 2rem);
+  padding: 0.4rem 0.5rem 0.4rem 0.8rem;
+  border: 1px solid var(--status-amber);
+  border-radius: 6px;
+  background: var(--bg-800);
+  color: var(--status-amber);
+  font-size: 0.8rem;
+}
+.session-expired__btn {
+  padding: 0.2rem 0.6rem;
+  border: 1px solid var(--status-amber);
+  border-radius: 4px;
+  color: var(--status-amber);
+  font-weight: 600;
 }

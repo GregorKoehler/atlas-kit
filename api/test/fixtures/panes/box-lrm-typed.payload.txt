@@ -1,0 +1,1 @@
+Kannst du den TXT-Record für‎example.org‎bei‎Andere‎ prüfen? Der Wert ist MS=ms12345678 und die Domain steht im Admin Center auf‎Unverified‎ seit heute Morgen.

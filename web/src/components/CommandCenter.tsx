@@ -30,7 +30,7 @@ export function CommandCenter() {
 function CommandCenterInner() {
   // Atlas page manifest — resolves wikilinks followed inside the reader.
   const { data: pages } = useData(() => fetchWikiPages(VAULT))
-  const { path, missing, canGoBack, openPath, navigate, back, close } = useNoteReader(pages)
+  const { path, missing, anchor, canGoBack, openPath, navigate, back, close } = useNoteReader(pages)
 
   // On load, kick the optional server-side GitHub scorecard refresh (cooldown-
   // guarded; a no-op unless you configured scripts/refresh-github.mjs + a token).
@@ -66,6 +66,7 @@ function CommandCenterInner() {
       <NoteReader
         path={path}
         missing={missing}
+        anchor={anchor}
         vault={VAULT}
         canGoBack={canGoBack}
         onBack={back}

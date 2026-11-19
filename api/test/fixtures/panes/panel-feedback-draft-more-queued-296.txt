@@ -1,0 +1,40 @@
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+╭─────────────────────────────────────────────────────────────────────╮
+│ ✻ Product feedback drafted: Panel probe second draft, please ignore │
+│ │ - What happened: second harness test, nothing to report.          │
+│ 1 to review · 2 to send · 0 to dismiss · +1 more queued             │
+╰─────────────────────────────────────────────────────────────────────╯
+
+
+────────────────────────────────────────────────────────────────────────────────
+❯ 
+────────────────────────────────────────────────────────────────────────────────
+  ⏵⏵ auto mode on (shift+tab to cycle) · ← for agents · 2 feedback drafts

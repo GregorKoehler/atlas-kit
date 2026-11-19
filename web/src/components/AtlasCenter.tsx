@@ -22,7 +22,7 @@ const gridStagger: Transition = { staggerChildren: 0.07, delayChildren: 0.05 }
 
 export function AtlasCenter() {
   const { data: pages } = useData(() => fetchWikiPages(VAULT))
-  const { path, missing, canGoBack, openPath, navigate, back, close } = useNoteReader(pages)
+  const { path, missing, anchor, canGoBack, openPath, navigate, back, close } = useNoteReader(pages)
   const [highlight] = useState<string | null>(null)
   // Bumped when a task's project/area is edited in the reader, so the Kanban
   // re-polls and re-colours the card immediately instead of on its next tick.
@@ -79,6 +79,7 @@ export function AtlasCenter() {
       <NoteReader
         path={path}
         missing={missing}
+        anchor={anchor}
         vault={VAULT}
         canGoBack={canGoBack}
         onBack={back}

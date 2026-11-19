@@ -1,0 +1,60 @@
+[48;5;237m  [38;5;231mdraft a harmless test report: type idea, title 'Panel probe test draft, [39m
+  [38;5;231mplease ignore', details '- [1mWhat happened:[0m[38;5;231m[48;5;237m harness test of the feedback draft [39m
+  [38;5;231mpanel, nothing to report.'. Do not do anything else and do not send anything.[39m
+
+[38;5;114m[49m●[39m [1mSendFeedback[0m(Panel probe test draft, please ignore)
+
+[38;5;231m●[39m I called SendFeedback once and the test draft is saved on your machine;
+  nothing was sent.
+
+[38;5;246m✻[39m [38;5;246mCooked for 5s · done 5:23 PM[39m
+
+[38;5;246m[48;5;237m❯ [38;5;231m⚙ [1mAutomatic fleet update from the dashboard[0m[38;5;231m[48;5;237m — an OBSERVATION of an [39m
+  [38;5;231magent you spawned, not a message from the operator.[39m
+
+  [38;5;231m⏱ Observed at a while ago, an hour before this delivery — it may no longer [39m
+  [38;5;231mhold.[39m
+
+  [38;5;231m⏸ Turn ended — the dev agent you spawned on demo-workspace [39m
+  [38;5;231m(dev-demo-every-workspace-slot-starts- — "dev-demo: every workspace [39m
+  [38;5;231mslot starts with test fixture already uplo") has gone IDLE after a short [39m
+  [38;5;231mturn and is now waiting at its prompt. This answers no message of yours — it [39m
+  [38;5;231mis what the dashboard observed. Read its transcript (or ask it) for what it [39m
+  [38;5;231mdid and whether it is blocked. One line per turn it finishes — this is not a [39m
+  [38;5;231mstatus feed.[39m
+[49m
+[38;5;231m●[39m The dashboard says the dev agent on demo-workspace (dev-demo
+  test-fixture slot) has gone idle and is waiting at its prompt. That
+  observation is about an hour old. I didn't spawn that agent in this session,
+  and I haven't looked at its transcript, so I can't tell you what it did or
+  whether it's stuck. Want me to run a fleet-status pass to find out?
+
+[38;5;246m✻[39m [38;5;246mCogitated for 3s · done 5:24 PM[39m
+
+[38;5;246m[48;5;237m❯ [38;5;231m⚙ [1mAutomatic fleet update from the dashboard[0m[38;5;231m[48;5;237m — an OBSERVATION of an [39m
+  [38;5;231magent you spawned, derived from its state; nobody typed it. Not an [39m
+  [38;5;231minstruction from the operator: act on it only if it changes what you should [39m
+  [38;5;231mdo next.[39m
+
+  [38;5;231m⏸ Turn ended — the dev agent you spawned on demo-workspace [39m
+  [38;5;231m(dev-demo-every-workspace-slot-starts- — "dev-demo: every workspace [39m
+  [38;5;231mslot starts with test fixture 0001 already uplo") has gone IDLE after a [39m
+  [38;5;231m33s turn and is now waiting at its prompt. This answers no message of yours —[39m
+  [38;5;231mit is what the dashboard observed. Read its transcript (or ask it) for what [39m
+  [38;5;231mit did and whether it is blocked. One line per turn it finishes — this is not[39m
+  [38;5;231ma status feed.[39m
+
+[38;5;231m[49m●[39m The dashboard reports another short turn (33s) from the demo-workspace
+  dev agent working on the 0001 test-fixture task; it's now idle at its
+  prompt again. I'm not acting on this without a request from you, and my offer
+  to check its transcript still stands.
+
+[38;5;246m✻[39m [38;5;246mCrunched for 2s · done 5:26 PM[39m
+
+Turn off Claude-drafted feedback? [38;5;246m0 to turn off · Esc to keep[39m
+
+
+[38;5;244m────────────────────────────────────────────────────────────────────────────────
+[39m❯ 
+[38;5;244m────────────────────────────────────────────────────────────────────────────────
+[39m  [38;5;220m⏵⏵ auto mode on[38;5;246m (shift+tab to cycle) · ← for agents · 1 feedback draft[39m

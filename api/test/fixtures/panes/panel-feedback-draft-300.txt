@@ -1,0 +1,60 @@
+
+ ▐▛███▛█   Claude Code v2.1.300
+▝▜██████▀  Opus 5.5 · Claude Max
+ ▝▝   ▝▝   /…/00000000-0000-4000-8000-000000000000/scratchpad/probe-cwd
+
+
+❯ This is a harness test. Please call your SendFeedback tool exactly once to
+  draft a harmless test report: type idea, title 'Panel probe test draft,
+  please ignore', details '- What happened: harness test of the feedback draft
+  panel, nothing to report.'. Do not do anything else and do not send anything.
+
+● SendFeedback(Panel probe test draft, please ignore)
+
+● I drafted the test report and nothing was sent. It's queued locally, and you
+  can review or send it with /feedback.
+
+✻ Worked for 4s · done 5:20 PM
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+╭──────────────────────────────────────────────────────────────────────────╮
+│ ✻ Product feedback drafted: Panel probe test draft, please ignore        │
+│ │ - What happened: harness test of the feedback draft panel, nothing to  │
+│ │ report.                                                                │
+│ 1 to review · 2 to send · 0 to dismiss                                   │
+╰──────────────────────────────────────────────────────────────────────────╯
+
+
+────────────────────────────────────────────────────────────────────────────────
+❯ /feedback
+────────────────────────────────────────────────────────────────────────────────
+  ⏵⏵ auto mode on (shift+tab to cycle) · ← for agents · 1 feedback draft

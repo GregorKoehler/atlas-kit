@@ -39,9 +39,12 @@ import {
   deliveryLanded,
   inputBoxText,
   clearInputBox,
+  typeAndSubmit,
+  payloadFingerprint,
   TUI_CLEAR_KEY,
   TUI_CLEAR_MAX_PRESSES,
   TUI_VERIFY_MAX_CHARS,
+  TUI_VERIFY_BACKOFF_MS,
 } from '../src/tui-input.mjs'
 
 /* ── The measured box ───────────────────────────────────────────────────────
@@ -263,6 +266,15 @@ test('a box that keeps changing but never empties is refused at the bound', asyn
   assert.equal(r.presses, 6)
 })
 
+test('the gate is one env var away from the unconditional-Enter behaviour; sanitising is not', () => {
+  const src = fs.readFileSync(path.join(root, 'api', 'src', 'tui-input.mjs'), 'utf8')
+  const fn = src.slice(src.indexOf('export async function typeAndSubmit('))
+  assert.match(fn, /const safe = sanitizeForTyping\(payload\)/)
+  assert.match(fn, /if \(TUI_VERIFY\) \{\n\s+const pre = await readPane\(\)/, 'the pre-type look is behind the switch')
+  assert.match(fn, /if \(TUI_VERIFY && !\(await settled\(readPane, landed, sleep\)\)\)/, 'so is the read-back')
+  assert.match(fn, /if \(TUI_VERIFY && !\(await settled\(readPane, \(p\) => !inputBoxText\(p\), sleep\)\)\)/, 'so is the submit check')
+})
+
 test('the clear loop SETTLES between press and look, or lag reads as a fixpoint', async () => {
   // Measured live: without a settle the loop stopped after 1-2 presses and left
   // ~420 chars in the box — it reproduced the accumulation it exists to stop,
@@ -297,29 +309,39 @@ test('the clear key is Ctrl-U — Ctrl-C on an empty box could exit the agent', 
  * — merging changes nothing on a bridge.
  */
 const root = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '..')
+const panes = path.join(path.dirname(fileURLToPath(import.meta.url)), 'fixtures', 'panes')
+const pane = (name) => fs.readFileSync(path.join(panes, `${name}.txt`), 'utf8')
 const executors = {
   box: fs.readFileSync(path.join(root, 'api', 'src', 'agent-local.mjs'), 'utf8'),
   bridge: fs.readFileSync(path.join(root, 'agent-bridge', 'server.mjs'), 'utf8'),
 }
 
 for (const [name, src] of Object.entries(executors)) {
-  test(`${name}: clears via the shared verified loop, never a counted burst`, () => {
-    assert.match(src, /import \{[^}]*clearInputBox[^}]*\} from '[^']*tui-input\.mjs'/)
+  test(`${name}: delivers through the ONE shared typeAndSubmit, never its own copy`, () => {
+    assert.match(src, /import \{[^}]*typeAndSubmit[^}]*\} from '[^']*tui-input\.mjs'/)
     assert.doesNotMatch(src, /clearInputKeys/, 'counting presses is the bug')
-    // Pre-type AND post-refusal: residue must never survive either path.
-    assert.equal((src.match(/await clearInputBox\(io\)/g) || []).length, 2)
+    // The sanitise/clear/verify/Enter sequence lives in tui-input.mjs; an
+    // executor that types or clears by itself has forked the rule.
+    assert.doesNotMatch(src, /\b(sanitizeForTyping|clearInputBox|deliveryLanded)\(/)
+    assert.equal((src.match(/await typeAndSubmit\(payload, \{/g) || []).length, 1)
   })
 
   test(`${name}: reads the box back with SGR kept, or the placeholder reads as text`, () => {
     assert.match(src, /readPane: \(\) => captureTail\(s, TAIL_LINES, true\)/)
-    assert.match(src, /deliveryLanded\(await captureTail\(s, TAIL_LINES, true\), payload\)/)
   })
 
-  test(`${name}: the gate is one env var away from the unconditional-Enter behaviour`, () => {
-    assert.match(src, /if \(TUI_VERIFY\) \{/, 'pre-type clear is behind the switch')
-    assert.match(src, /if \(TUI_VERIFY && safe\.length <= TUI_VERIFY_MAX_CHARS/, 'so is the verify')
-    // Sanitising is NOT behind it — it is the actual fix for the swallow.
-    assert.match(src, /const safe = sanitizeForTyping\(payload\)/)
+  test(`${name}: a refused delivery is audited by stage, as a fingerprint — never its text`, () => {
+    for (const a of ['deliver-box-stuck', 'deliver-mangled', 'deliver-unsubmitted']) assert.ok(src.includes(`'${a}'`), a)
+    const fn = src.slice(src.indexOf('function auditDeliverFail('))
+    assert.match(fn.slice(0, 900), /payloadFingerprint\(payload\)/)
+    assert.doesNotMatch(fn.slice(0, 900), /text:|payload:/, 'the content never reaches audit.log')
+  })
+
+  test(`${name}: a refused prompt or interrupt is a notDelivered 502 — the client's one safe retry`, () => {
+    assert.equal((src.match(/\{ status: 502, ok: false, error: d\.error, notDelivered: true \}/g) || []).length, 2)
+    // …and a HOLD (nothing typed: a panel, no box, a draft in the box) is a 409
+    // with its reason, never the 502 the client would retry.
+    assert.match(src, /TUI_HOLD_STAGES\.has\(d\.stage\)\) \{\n\s+audit\(\{ action: 'prompt-held'/)
   })
 
   test(`${name}: a refused head backs off instead of retrying every tick`, () => {
@@ -328,3 +350,259 @@ for (const [name, src] of Object.entries(executors)) {
     assert.match(src, /delete s\.deliverFailures/, 'a success clears the counter')
   })
 }
+
+/* ── Invisible Unicode + the eaten Enter ────────────────────────────────────
+ * One chat: 12 sends → 502 (`deliver-mangled`, len 211) and, before that, a
+ * 2883-char paste logged `action: prompt, ok: true` four times with NO user
+ * turn in the session. The paste came out of a web admin console with 50
+ * U+200E LEFT-TO-RIGHT MARKs. Measured against Claude Code 2.1.287 in a throwaway pane: on Enter it
+ * strips invisible characters ITSELF and shows "Removed N invisible characters
+ * · review and press Enter to send" — that Enter submits nothing. Short
+ * payloads failed our read-back first (box renders the marks as nothing); long
+ * ones skipped the read-back, so the eaten Enter went unnoticed. A/B on the
+ * same pane, the old delivery vs this one: LRM 211 → 502 / delivered, LRM 2883 →
+ * LOST / delivered, ZWSP+BOM → 502 / delivered, NFD+NBSP+PUA → 502 / delivered.
+ *
+ * The class table below is that pane's verdict per character class: HELD = the
+ * send was held (banner), so we must strip it; KEPT = submitted as typed.
+ */
+const HELD = {
+  LRM: '\u200e', RLM: '\u200f', ZWSP: '\u200b', ZWNJ: '\u200c', 'lone ZWJ': '\u200d', LRE: '\u202a', RLO: '\u202e',
+  'word joiner': '\u2060', 'invisible times': '\u2062', LRI: '\u2066', PDI: '\u2069', BOM: '\ufeff', 'soft hyphen': '\u00ad',
+  CGJ: '\u034f', 'Hangul filler': '\u3164', MVS: '\u180e', ALM: '\u061c', 'lone VS16': 'a\ufe0f', VS1: 'a\ufe00',
+  'tag char': '\u{E0041}', 'musical invisible': '\u{1D173}', 'interlinear anchor': '\ufff9', 'Mongolian FVS': '\u180b',
+  'Khmer inherent vowel': '\u17b4', 'dangling ZWJ after emoji': '\u{1F468}\u200d',
+}
+for (const [name, c] of Object.entries(HELD)) {
+  test(`strip: ${name} never reaches the pane`, () => {
+    const out = sanitizeForTyping(`vor${c}nach`)
+    assert.doesNotMatch(out, /[\p{Default_Ignorable_Code_Point}\uFFF9-\uFFFB]/u)
+    assert.ok(out.startsWith('vor') && out.endsWith('nach'), 'only the invisible character goes')
+  })
+}
+
+test('keep: emoji sequences Claude Code submits as typed stay byte-identical', () => {
+  for (const e of ['\u{1F468}\u200d\u{1F469}\u200d\u{1F467}', '\u2764\ufe0f', '1\ufe0f\u20e3', '\u{1F44D}\u{1F3FD}',
+    '\u{1F3F4}\u{E0067}\u{E0062}\u{E0065}\u{E006E}\u{E0067}\u{E007F}', '\u{1F469}\u{1F3FD}\u200d\u{1F4BB}']) {
+    assert.equal(sanitizeForTyping(`x ${e} y`), `x ${e} y`, JSON.stringify(e))
+  }
+})
+
+test('NFD (a macOS paste) becomes NFC', () => {
+  const out = sanitizeForTyping('Gru\u0308\u00dfe')
+  assert.equal(out, 'Grüße')
+  assert.equal(out.length, 5)
+})
+
+test('non-ASCII spaces become a plain space; line/paragraph separators a newline', () => {
+  assert.equal(sanitizeForTyping('10\u00a0€ und 5\u202f% —\u2003ok\u3000!'), '10 € und 5 % — ok !')
+  // U+2028 held the send WITHOUT the banner on the live pane.
+  assert.equal(sanitizeForTyping('eins\u2028zwei\u2029drei'), 'eins\nzwei\ndrei')
+})
+
+test('a Private Use bullet at a line start becomes •, an icon glyph elsewhere is dropped', () => {
+  // U+F0A7 is Word's Wingdings bullet; U+E70F an icon-font glyph from a
+  // pasted web console.
+  assert.equal(sanitizeForTyping('\uf0a7 erstens\n  \uf0a7 zweitens'), '• erstens\n  • zweitens')
+  assert.equal(sanitizeForTyping('Status \ue70f verifiziert'), 'Status  verifiziert')
+})
+
+test('the incident payload: what the box shows now equals what we typed', () => {
+  // A capture (Claude Code 2.1.287) of a payload with six LRMs typed raw —
+  // the shape is real, the words are synthetic: the box renders them as nothing. The old gate compared that box
+  // against the payload WITH the marks — never equal → 502, eleven times.
+  const typed = fs.readFileSync(path.join(panes, 'box-lrm-typed.payload.txt'), 'utf8')
+  const p = pane('box-lrm-typed')
+  assert.equal((typed.match(/\u200e/g) || []).length, 6)
+  assert.equal(deliveryLanded(p, sanitizeForTyping(typed)), true)
+  // Both sides are normalised alike, so even an unstripped mark cannot fail it.
+  assert.equal(deliveryLanded(p, typed), true)
+})
+
+test('the eaten Enter is visible: Claude Code’s "Removed N invisible characters" frame still holds the text', () => {
+  const p = pane('box-invisible-removed-held')
+  assert.match(p, /invisible character/)
+  assert.ok(inputBoxText(p).length > 100, 'the box is NOT empty — nothing was submitted')
+})
+
+test('fingerprint: length, lines and non-ASCII counts by category — never content', () => {
+  const fp = payloadFingerprint('für\u200eexampleco\ue70f\n\u00a0x')
+  assert.deepEqual(fp, { len: 17, lines: 2, nonAscii: { Ll: 1, Cf: 1, Co: 1, Zs: 1 } })
+  assert.ok(!JSON.stringify(fp).includes('exampleco'))
+  assert.deepEqual(payloadFingerprint(''), { len: 0, lines: 0, nonAscii: {} })
+})
+
+/* ── typeAndSubmit against a simulated Claude Code pane ─────────────────────
+ * Behaves like the measured TUI: typed text appends, `C-u` kills a display
+ * row, Enter submits (box empties) — unless `eatEnter`, which is what Claude
+ * Code's invisible-character guard does. `lagMs` makes the pane render the
+ * state of `lagMs` ago, on a virtual clock advanced by the injected sleep, so
+ * the backoff is tested without real time. A paste over ~900 chars collapses
+ * to `[Pasted text #1]`, as on the live pane.
+ */
+class FakeTui {
+  constructor({ lagMs = 0, eatEnter = false } = {}) {
+    this.content = ''; this.now = 0; this.lagMs = lagMs; this.eatEnter = eatEnter
+    this.history = [[0, '']]; this.submitted = []; this.keys = []; this.looks = []
+  }
+  set(content) { this.content = content; this.history.push([this.now, content]) }
+  shownContent() {
+    let c = ''
+    for (const [t, v] of this.history) if (t <= this.now - this.lagMs) c = v
+    return c
+  }
+  render() {
+    const c = this.shownContent()
+    const body = !c ? ['\x1b[39m❯ \x1b[2mTry "how do I log an error?"\x1b[0m']
+      : c.length > 900 ? ['❯ [Pasted text #1 +40 lines]']
+      : (c.match(new RegExp(`.{1,${COLS}}`, 'g')) || []).slice(-CAPACITY).map((r, i) => (i ? '  ' : '❯ ') + r)
+    return ['─'.repeat(80), ...body, '─'.repeat(80), '  ⏵⏵ bypass permissions on'].join('\n')
+  }
+  io() {
+    return {
+      readPane: async () => { this.looks.push(this.now); return this.render() },
+      typeText: async (t) => { this.set(this.content + t.replace(/\s+/g, ' ')); return { ok: true } },
+      pressKey: async (k) => {
+        this.keys.push(k)
+        if (k === 'C-u') this.set(this.content.length > 900 ? '' : (this.content.match(new RegExp(`.{1,${COLS}}`, 'g')) || []).slice(0, -1).join(''))
+        if (k === 'Enter' && !this.eatEnter && this.content) { this.submitted.push(this.content); this.set('') }
+      },
+      sleep: async (ms) => { this.now += ms },
+    }
+  }
+}
+
+test('typeAndSubmit: the happy path submits once and pays no backoff', async () => {
+  const tui = new FakeTui()
+  const r = await typeAndSubmit('ship it when CI is green', tui.io())
+  assert.equal(r.ok, true)
+  assert.deepEqual(tui.submitted, ['ship it when CI is green'])
+  assert.equal(tui.now, 0, 'no sleep at all on a pane that keeps up')
+})
+
+test('typeAndSubmit: the LRM paste is typed clean and submitted', async () => {
+  const tui = new FakeTui()
+  const r = await typeAndSubmit('Wert für\u200eexample.org\u200ebei', tui.io())
+  assert.equal(r.ok, true)
+  assert.equal(r.stripped, 2)
+  assert.deepEqual(tui.submitted, ['Wert fürexample.orgbei'])
+})
+
+test('typeAndSubmit: an eaten Enter on a LONG paste is a refusal, not a silent ok', async () => {
+  // The silent loss: > TUI_VERIFY_MAX_CHARS, Enter eaten, logged ok:true.
+  const tui = new FakeTui({ eatEnter: true })
+  const r = await typeAndSubmit('x'.repeat(2883), tui.io())
+  assert.equal(r.ok, false)
+  assert.equal(r.stage, 'unsubmitted')
+  assert.equal(tui.content, '', 'the box is cleared — the next send cannot concatenate onto it')
+  assert.equal(r.emptied, true)
+  assert.deepEqual(tui.submitted, [])
+})
+
+test('typeAndSubmit: an eaten Enter on a SHORT payload is refused too', async () => {
+  const tui = new FakeTui({ eatEnter: true })
+  const r = await typeAndSubmit('und wie geht es weiter?', tui.io())
+  assert.equal(r.stage, 'unsubmitted')
+  assert.equal(tui.content, '')
+})
+
+test('typeAndSubmit: a pane lagging 1 s is waited out, not refused (was 3 × 150 ms)', async () => {
+  const tui = new FakeTui({ lagMs: 1000 })
+  const r = await typeAndSubmit('und wie geht es weiter?', tui.io())
+  assert.equal(r.ok, true)
+  assert.equal(tui.submitted.length, 1)
+  // …and the window is bounded: ~1.5 s per read-back, never a loop.
+  assert.equal(TUI_VERIFY_BACKOFF_MS.reduce((a, b) => a + b, 0), 1500)
+})
+
+test('typeAndSubmit: a pane lagging past the window is refused, and nothing is submitted', async () => {
+  const tui = new FakeTui({ lagMs: 2000 })
+  const r = await typeAndSubmit('und wie geht es weiter?', tui.io())
+  assert.equal(r.ok, false)
+  assert.equal(r.stage, 'mangled')
+  assert.deepEqual(tui.submitted, [])
+  assert.ok(!tui.keys.includes('Enter'), 'nothing was submitted — the client may retry')
+})
+
+test('typeAndSubmit: a long paste must SHOW UP before Enter — the stale empty frame is not "submitted"', async () => {
+  // Measured: 2.6 KB typed, Enter, first post-Enter look at 32 ms still showed
+  // the pre-typing empty box. Here the pane lags 300 ms: the Enter must wait
+  // for the placeholder, so the submit check sees a real before/after.
+  const tui = new FakeTui({ lagMs: 300 })
+  const io = tui.io()
+  const press = io.pressKey
+  let shownAtEnter = null
+  io.pressKey = async (k) => { if (k === 'Enter') shownAtEnter = tui.shownContent().length; return press(k) }
+  const r = await typeAndSubmit('y'.repeat(2000), io)
+  assert.equal(r.ok, true)
+  assert.equal(shownAtEnter, 2000, 'Enter only after the paste was on screen')
+})
+
+test('typeAndSubmit: text already in the box is neither typed onto NOR wiped — nothing is pressed', async () => {
+  // The old pre-type clear made "whatever is in the box" ours to
+  // delete, and failing open on an unseen box let the next copy stack on it.
+  // Now a non-empty box is a refusal: it is an operator's draft, Claude Code
+  // holding a send, or a failure of ours that could not be cleaned up.
+  const tui = new FakeTui()
+  tui.set('my own half-written thought')
+  const r = await typeAndSubmit('a queued fleet note', tui.io())
+  assert.equal(r.stage, 'box-not-empty')
+  assert.equal(r.residue, 'myownhalf-writtenthought'.length)
+  assert.deepEqual(tui.keys, [], 'no C-u, no Enter')
+  assert.equal(tui.content, 'my own half-written thought', 'the draft is untouched')
+})
+
+test('typeAndSubmit: clearDraft (an explicit "clear & send") empties the box, verified, then delivers', async () => {
+  const tui = new FakeTui()
+  tui.set('x'.repeat(300))
+  const r = await typeAndSubmit('ship it', { ...tui.io(), clearDraft: true })
+  assert.equal(r.ok, true)
+  assert.ok(r.cleared >= 4, 'C-u until the box was SEEN empty')
+  assert.deepEqual(tui.submitted, ['ship it'])
+})
+
+test('typeAndSubmit: clearDraft on a box that will not clear stops BEFORE typing', async () => {
+  const churn = { n: 0 }
+  const io = {
+    readPane: async () => ['─'.repeat(80), '❯ residue ' + churn.n, '─'.repeat(80)].join('\n'),
+    typeText: async () => { throw new Error('must not type') },
+    pressKey: async () => { churn.n++ },
+    sleep: async () => {},
+    clearDraft: true,
+  }
+  const r = await typeAndSubmit('hello', io)
+  assert.equal(r.stage, 'box-stuck')
+})
+
+test('typeAndSubmit: no box on the pane (a dialog owns it) is refused BEFORE typing', async () => {
+  // E.g. a session parked in `/login`. That used to be typed blind and then refused as 'mangled' with `emptied: true`.
+  const io = { readPane: async () => 'Select login method:\n ❯ 1. Claude account', typeText: async () => { throw new Error('must not type') }, pressKey: async () => { throw new Error('must not press') }, sleep: async () => {} }
+  const r = await typeAndSubmit('did the login work?', io)
+  assert.equal(r.stage, 'no-box')
+})
+
+test('typeAndSubmit: `emptied` is only claimed for a box SEEN empty — and the retry cannot stack', async () => {
+  // The feedback-panel incident's shape (pane-panel.mjs): the text lands, the read-back can neither confirm it nor
+  // find the box afterwards. It used to report `emptied: true` (clearInputBox
+  // fails OPEN on an unseen box), the text stayed, and every retry appended
+  // another copy — ~10 of them went in as one turn.
+  const tui = new FakeTui()
+  const render = tui.render.bind(tui)
+  tui.render = () => (tui.content ? 'the box is not on this capture\n  ⏵⏵ bypass permissions on' : render())
+  const first = await typeAndSubmit('can you unlock the whole domain?', tui.io())
+  assert.equal(first.stage, 'mangled')
+  assert.equal(first.boxSeen, false)
+  assert.equal(first.emptied, false, 'an unseen box is not an emptied box')
+  for (let retry = 0; retry < 10; retry++) {
+    const r = await typeAndSubmit('can you unlock the whole domain?', tui.io())
+    assert.equal(r.stage, 'no-box')
+  }
+  assert.equal(tui.content, 'can you unlock the whole domain?', 'ONE copy, never a stack')
+  assert.deepEqual(tui.submitted, [])
+})
+
+test('the faint "Press up to edit queued messages" hint is an EMPTY box (real capture, 2.1.296)', () => {
+  // A busy agent with a message parked in Claude Code's own queue. Since the
+  // box is no longer cleared on the way in, this hint must not read as a draft.
+  assert.equal(inputBoxText(pane('box-queued-hint-faint-ansi')), '')
+})

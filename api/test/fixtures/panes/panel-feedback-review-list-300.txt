@@ -1,0 +1,60 @@
+
+ ▐▛███▛█   Claude Code v2.1.300
+▝▜██████▀  Opus 5.5 · Claude Max
+ ▝▝   ▝▝   /…/00000000-0000-4000-8000-000000000000/scratchpad/probe-cwd
+
+
+❯ This is a harness test. Please call your SendFeedback tool exactly once to
+  draft a harmless test report: type idea, title 'Panel probe test draft,
+  please ignore', details '- What happened: harness test of the feedback draft
+  panel, nothing to report.'. Do not do anything else and do not send anything.
+
+● SendFeedback(Panel probe test draft, please ignore)
+
+● I drafted the test report and nothing was sent. It's queued locally, and you
+  can review or send it with /feedback.
+
+✻ Worked for 4s · done 5:20 PM
+
+❯ say hi back, nothing else
+
+● Hi!
+
+✻ Cogitated for 1s · done 5:21 PM
+
+❯ ⚙ Automatic fleet update from the dashboard — an OBSERVATION of an
+  agent you spawned, not a message from the operator.
+
+  ⏸ Turn ended — the dev agent you spawned on demo-workspace
+  (dev-demo-every-workspace-slot-starts- — "dev-demo: every workspace
+  slot starts with test fixture already uplo") has gone IDLE after a short
+  turn and is now waiting at its prompt. This answers no message of yours — it
+  is what the dashboard observed. Read its transcript (or ask it) for what it
+  did and whether it is blocked. One line per turn it finishes — this is not a
+  status feed.
+
+● The dashboard reports that the dev-demo-every-workspace-slot-starts- agent
+  on demo-workspace went idle after a short turn and is waiting at its
+  prompt. I didn't spawn it in this session, so I don't yet know what it did or
+  whether it's blocked. Want me to check its transcript with a fleet status
+  pass?
+
+✻ Worked for 5s · done 5:22 PM
+
+
+
+▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔
+   Feedback drafts
+
+     This session
+   ❯ Panel probe test draft, please ignore   idea · 6m
+     Other sessions
+     Panel probe test draft, please ignore   idea · 4m
+     Model mislabelled a warning as an e…   bug · 5h · /srv/demo-vault       
+
+     + Write new feedback
+
+   Drafts live only on this machine and are never sent without you. Unsent
+   drafts expire after 30 days.
+
+   Enter to review · d to discard · Esc to close

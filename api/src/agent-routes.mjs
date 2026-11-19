@@ -1355,6 +1355,34 @@ export const withHeader = (sender, text) => `${messageHeader(sender)}\n\n${text}
  *    can't ping-pong forever. Exhaustion is a 429 the sending agent reads.
  * ------------------------------------------------------------------ */
 
+/* A send the BROWSER saw fail without ever getting a JSON answer from this API
+ * — fetch threw, or a 502/524 came back as Cloudflare's HTML page or Caddy's
+ * empty upstream-down body. None of those reach audit.log on their own — a
+ * "502, then it works again" in the browser leaves no trace here — so the
+ * client reports them here once it can. Whitelisted, bounded fields only —
+ * never the text: which op, what came back (status, a Cloudflare ray id when
+ * there is one), how long it took. */
+const CLIENT_SEND_OPS = new Set(['prompt', 'interrupt', 'queue'])
+export function clientSendFailEntry(b) {
+  const o = b && typeof b === 'object' ? b : {}
+  const int = (v, max) => (Number.isInteger(v) && v >= 0 && v <= max ? v : undefined)
+  const str = (v, re) => (typeof v === 'string' && re.test(v) ? v : undefined)
+  if (!CLIENT_SEND_OPS.has(o.op)) return null
+  const e = {
+    action: 'client-send-fail',
+    op: o.op,
+    kind: o.kind === 'network' ? 'network' : 'non-json',
+    status: int(o.status, 599),
+    cfRay: str(o.cfRay, /^[0-9a-f]{8,32}(-[A-Z]{3})?$/i),
+    ms: int(o.ms, 3600000),
+    len: int(o.len, 10_000_000),
+    sentAt: str(o.at, /^\d{4}-\d\d-\d\dT[\d:.]+Z$/),
+    ok: false,
+  }
+  for (const k of Object.keys(e)) if (e[k] === undefined) delete e[k]
+  return e
+}
+
 // Is `from` allowed to message `to`? Pure (parent lookup injected) so the
 // bounding rule is testable without a registry. Returns { ok } or { ok:false, error }.
 export function messageAllowed(from, to, parentOf) {
@@ -2250,9 +2278,22 @@ export function agentRouter(bearerAuth) {
     // `force` bypasses the pending-choice-menu guard — set by the card's "dismiss
     // menu & send" after it has Escaped the menu (see local/bridge prompt()).
     body.force = !!(req.body && req.body.force)
+    // `clearBox` empties a box that already held text first — the card's "clear
+    // the input & send", offered only after a 409 box-not-empty.
+    if (req.body && req.body.clearBox === true) body.clearBox = true
     if (local.hasSession(body.id)) return sendLocal(res, armIfSent(body, await local.prompt(body)))
     const r = armIfSent(body, await callBridgeForId('POST', '/prompt', body, body.id, BRIDGE_EXEC_TIMEOUT_MS))
     res.status(r.status).json(r.body)
+  })
+
+  router.post('/api/agents/client-send-fail', bearerAuth, (req, res) => {
+    const reports = Array.isArray(req.body?.reports) ? req.body.reports.slice(0, 20) : [req.body]
+    let n = 0
+    for (const r of reports) {
+      const e = clientSendFailEntry(r)
+      if (e) { local.audit(e); n++ }
+    }
+    res.json({ ok: true, recorded: n })
   })
 
   // Interrupt the in-flight turn and steer with the given context (Esc, then send;
@@ -2402,6 +2443,21 @@ export function agentRouter(bearerAuth) {
     if (!Array.isArray(keys) || !keys.length) return res.status(400).json({ ok: false, error: 'missing "keys"' })
     if (local.hasSession(id)) return sendLocal(res, await local.keys({ id, keys }))
     const r = await callBridgeForId('POST', '/keys', { id, keys }, id, BRIDGE_EXEC_TIMEOUT_MS)
+    res.status(r.status).json(r.body)
+  })
+
+  // Answer a Claude Code PANEL over the input box (the feedback-draft card,
+  // the session survey) with one of its own safe keys: `action` is dismiss /
+  // review / close / keep / back, re-read off the live pane by the executor —
+  // never a key from the client, and never `2` (send feedback to Anthropic:
+  // the operator's call, in the terminal). An un-restarted bridge 404s here,
+  // which the card shows as an error; nothing is pressed.
+  router.post('/api/agents/panel', bearerAuth, async (req, res) => {
+    const { id, action } = req.body || {}
+    if (!id || typeof id !== 'string') return res.status(400).json({ ok: false, error: 'missing "id"' })
+    if (!action || typeof action !== 'string') return res.status(400).json({ ok: false, error: 'missing "action"' })
+    if (local.hasSession(id)) return sendLocal(res, await local.panelAction({ id, action }))
+    const r = await callBridgeForId('POST', '/panel', { id, action }, id, BRIDGE_EXEC_TIMEOUT_MS)
     res.status(r.status).json(r.body)
   })
 
