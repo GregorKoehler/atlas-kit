@@ -46,6 +46,7 @@ import { useProviders } from '../../lib/providers'
 import { modelOptions, keepModel, modelTitle } from '../../lib/modelTiers'
 import { lockBodyScroll } from '../../lib/scrollLock'
 import { MicField } from '../MicField'
+import { useFileReads } from '../../lib/fileReads'
 import { ScheduleButton } from '../ScheduleButton'
 
 // The tiers a DEV spawn may pick, in dropdown order. A provider profile narrows
@@ -696,18 +697,25 @@ export function AgentList({
   const [images, setImages] = useState<AgentAttachment[]>([])
   const [busy, setBusy] = useState(false)
   const [err, setErr] = useState('')
+  // Picked files still being read: spawning now would start the agent without
+  // them (lib/fileReads.ts), so every spawn path waits for `reading` to hit 0.
+  const { reading, reads } = useFileReads()
 
   // Attach picked files (capped at MAX_IMAGES total), reading each to a data URL.
   // Mirrors AgentRow.addImages; the input is cleared so re-picking the same file fires.
-  const addImages = async (e: Event) => {
+  const addImages = (e: Event) => {
     const input = e.currentTarget as HTMLInputElement
     const files = Array.from(input.files || [])
     input.value = ''
     if (!files.length) return
-    const read = await Promise.all(
-      files.map(async (f) => ({ name: f.name, dataUrl: await readAsDataUrl(f) })),
+    const work = Promise.all(files.map(async (f) => ({ name: f.name, dataUrl: await readAsDataUrl(f) })))
+    reads.read(work, (read) => setImages((prev) => [...prev, ...read].slice(0, MAX_IMAGES))).catch(() =>
+      setErr('could not read the attached file(s)'),
     )
-    setImages((prev) => [...prev, ...read].slice(0, MAX_IMAGES))
+  }
+  const clearImages = () => {
+    reads.discard()
+    setImages([])
   }
 
   const scoped = repo !== undefined
@@ -748,7 +756,7 @@ export function AgentList({
     e.preventDefault()
     const t = task.trim()
     const r = scoped ? repo! : repoInput.trim()
-    if (!t || !r || busy) return
+    if (!t || !r || busy || reading) return
     setBusy(true)
     setErr('')
     const res = await spawnAgent({ task: t, repo: r, model, effort, provider: provider || undefined, images: images.length ? images : undefined })
@@ -756,7 +764,7 @@ export function AgentList({
     if (res.ok) {
       setTask('')
       setRepoInput('')
-      setImages([])
+      clearImages()
       onChanged()
     } else {
       setErr(res.error || 'spawn failed')
@@ -773,7 +781,7 @@ export function AgentList({
     if (res.ok) {
       setTask('')
       setRepoInput('')
-      setImages([])
+      clearImages()
       onChanged()
     }
     return res
@@ -865,7 +873,8 @@ export function AgentList({
         <button
           type="submit"
           className="btn btn--approve"
-          disabled={!task.trim() || (!scoped && !repoInput.trim()) || busy}
+          disabled={!task.trim() || (!scoped && !repoInput.trim()) || busy || !!reading}
+          title={reading ? 'waiting for the attached files to be read' : undefined}
         >
           {busy ? 'Spawning…' : 'Spawn'}
         </button>
@@ -895,8 +904,13 @@ export function AgentList({
           ))}
         </div>
       ) : null}
-      {images.length ? (
+      {images.length || reading ? (
         <div className="agent__imgs" role="group" aria-label="attached files">
+          {reading ? (
+            <span className="agent__img" role="status">
+              ⏳ reading files…
+            </span>
+          ) : null}
           {images.map((img, i) => (
             <span className="agent__img" key={`${img.name}-${i}`} title={img.name}>
               {img.dataUrl.startsWith('data:image/') ? (
@@ -1080,6 +1094,14 @@ export function AgentRow({
   // The unsent message to this agent persists per session across tab switches.
   const [text, setText] = useDraft(`agent-msg:${s.id}`)
   const [images, setImages] = useState<AgentAttachment[]>([])
+  // Picked files still being read: every send path waits (lib/fileReads.ts) —
+  // sent now, the message would go without them and they would land in the
+  // NEXT draft.
+  const { reading, reads } = useFileReads()
+  const clearImages = () => {
+    reads.discard()
+    setImages([])
+  }
   const [busy, setBusy] = useState(false)
   const [sendErr, setSendErr] = useState('')
   // Set when the operator tries to send free text while a choice menu is open —
@@ -1427,15 +1449,15 @@ export function AgentRow({
   // Attach picked files (capped at MAX_IMAGES total), reading each to a data URL
   // for upload. Allowlisted by extension (CSV etc. report MIME unreliably). The
   // input is cleared so re-picking the same file fires.
-  const addImages = async (e: Event) => {
+  const addImages = (e: Event) => {
     const input = e.currentTarget as HTMLInputElement
     const files = Array.from(input.files || [])
     input.value = ''
     if (!files.length) return
-    const read = await Promise.all(
-      files.map(async (f) => ({ name: f.name, dataUrl: await readAsDataUrl(f) })),
+    const work = Promise.all(files.map(async (f) => ({ name: f.name, dataUrl: await readAsDataUrl(f) })))
+    reads.read(work, (read) => setImages((prev) => [...prev, ...read].slice(0, MAX_IMAGES))).catch(() =>
+      setSendErr('could not read the attached file(s)'),
     )
-    setImages((prev) => [...prev, ...read].slice(0, MAX_IMAGES))
   }
 
   // One path for all three ways to deliver typed text:
@@ -1444,7 +1466,7 @@ export function AgentRow({
   //  - 'queue'     → park it; the backend delivers it when the turn finishes
   const deliver = async (mode: 'send' | 'interrupt' | 'queue') => {
     const t = text.trim()
-    if ((!t && !images.length) || busy) return
+    if ((!t && !images.length) || busy || reading) return
     setBusy(true)
     setSendErr('')
     const body = { id: s.id, text: t, images: images.length ? images : undefined }
@@ -1455,7 +1477,7 @@ export function AgentRow({
     setBusy(false)
     if (r.ok) {
       setText('')
-      setImages([])
+      clearImages()
       onChanged()
     } else if (r.error === 'menu') {
       // Backend caught a choice menu the card hadn't seen yet (poll lag) — show
@@ -1510,7 +1532,7 @@ export function AgentRow({
   // "I didn't want to answer the question — I want to say this instead."
   const dismissMenuAndSend = async () => {
     const t = text.trim()
-    if (busy || (!t && !images.length)) return
+    if (busy || reading || (!t && !images.length)) return
     setBusy(true)
     setSendErr('')
     await sendAgentKeys({ id: s.id, keys: ['Escape'] })
@@ -1519,7 +1541,7 @@ export function AgentRow({
     setBusy(false)
     if (r.ok) {
       setText('')
-      setImages([])
+      clearImages()
       setMenuWarn(false)
       if (!expanded) setExpanded(true)
       onChanged()
@@ -2326,8 +2348,13 @@ export function AgentRow({
           </button>
         </div>
       ) : null}
-      {images.length ? (
+      {images.length || reading ? (
         <div className="agent__imgs" role="group" aria-label="attached files">
+          {reading ? (
+            <span className="agent__img" role="status">
+              ⏳ reading files…
+            </span>
+          ) : null}
           {images.map((img, i) => (
             <span className="agent__img" key={`${img.name}-${i}`} title={img.name}>
               {img.dataUrl.startsWith('data:image/') ? (
@@ -2417,7 +2444,7 @@ export function AgentRow({
             type="button"
             className="agent__menu-warn-send"
             onClick={dismissMenuAndSend}
-            disabled={busy || (!text.trim() && !images.length)}
+            disabled={busy || !!reading || (!text.trim() && !images.length)}
             title="dismiss the menu (Esc), then send your text as a normal prompt"
           >
             Dismiss menu &amp; send
@@ -2463,7 +2490,7 @@ export function AgentRow({
               type="button"
               className="btn btn--interrupt"
               onClick={() => deliver('interrupt')}
-              disabled={(!text.trim() && !images.length) || busy}
+              disabled={(!text.trim() && !images.length) || busy || !!reading}
               title="stop the current response and send this now — the work it has done this turn is kept"
             >
               Interrupt &amp; send
@@ -2471,8 +2498,8 @@ export function AgentRow({
             <button
               type="submit"
               className="btn"
-              disabled={(!text.trim() && !images.length) || busy}
-              title="send after the current response finishes"
+              disabled={(!text.trim() && !images.length) || busy || !!reading}
+              title={reading ? 'waiting for the attached files to be read' : 'send after the current response finishes'}
             >
               Queue
             </button>
@@ -2481,8 +2508,8 @@ export function AgentRow({
           <button
             type="submit"
             className="btn"
-            disabled={(!text.trim() && !images.length) || busy || s.status !== 'idle'}
-            title={s.status === 'idle' ? 'send a prompt' : 'session is not running'}
+            disabled={(!text.trim() && !images.length) || busy || !!reading || s.status !== 'idle'}
+            title={reading ? 'waiting for the attached files to be read' : s.status === 'idle' ? 'send a prompt' : 'session is not running'}
           >
             Send
           </button>
