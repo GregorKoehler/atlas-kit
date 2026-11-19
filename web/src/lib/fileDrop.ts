@@ -1,14 +1,14 @@
 /* ------------------------------------------------------------------ *
  * A file dragged into the dashboard and dropped.
  *
- * Nothing in the dashboard takes a file drop (attachments go through the 📎
- * picker), so the browser's default applies: it OPENS the file — navigating
- * the tab away from the dashboard, which on the installed PWA (no URL bar, no
- * back button) strands the app, and an unsent draft with it. A drop must never
- * do anything by itself, so `guardStrayFileDrops` refuses file drops at the
- * window, and only those: a drag without Files (text, a Kanban card) is never
- * touched, and a drop an element already handled (preventDefault) is left to
- * it.
+ * The agent composers take a file drop (components/AgentAttach.tsx
+ * useDropZone), and it only fills the draft. A file dropped anywhere else
+ * would get the browser's default: it OPENS the file — navigating the tab away
+ * from the dashboard, which on the installed PWA (no URL bar, no back button)
+ * strands the app, and an unsent draft with it. So `guardStrayFileDrops`
+ * refuses those at the window, and only those: a drag without Files (text, a
+ * Kanban card) is never touched, and a drop an element already handled
+ * (preventDefault — a composer zone) is left to it.
  * ------------------------------------------------------------------ */
 
 /** True when a drag carries files from the OS (not text, not an in-page card). */

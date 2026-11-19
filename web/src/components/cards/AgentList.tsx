@@ -52,6 +52,7 @@ import { modelOptions, keepModel, modelTitle } from '../../lib/modelTiers'
 import { lockBodyScroll } from '../../lib/scrollLock'
 import { MicField } from '../MicField'
 import { useFileReads } from '../../lib/fileReads'
+import { AttachButton, AttachChips, PromptTextarea, useDropZone } from '../AgentAttach'
 import { ScheduleButton } from '../ScheduleButton'
 
 // The tiers a DEV spawn may pick, in dropdown order. A provider profile narrows
@@ -85,9 +86,6 @@ export function fmtSchedAt(at: string): string {
   const wd = d.toLocaleDateString([], { weekday: 'short' })
   return `${wd} ${hhmm}`
 }
-
-// Cap on attachments per prompt (mirrors the API's AGENT_MAX_IMAGES).
-const MAX_IMAGES = 6
 
 /* --- transcript view preference ----------------------------------------- *
  * The transcript pane's DEFAULT view. 'chat' (the on-disk history as rendered
@@ -393,16 +391,6 @@ const HOLD_WHY: Record<DeliverHoldReason, string> = {
 type QueuedMsg = NonNullable<AgentSession['queued']>[number]
 const queuedList = (q: AgentSession['queued']): QueuedMsg[] =>
   Array.isArray(q) ? q : q ? [q as unknown as QueuedMsg] : []
-
-// Read a File/Blob into a `data:…;base64,…` URL (image upload).
-function readAsDataUrl(file: Blob): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const r = new FileReader()
-    r.onload = () => resolve(String(r.result))
-    r.onerror = () => reject(r.error)
-    r.readAsDataURL(file)
-  })
-}
 
 const STATUS_LABEL: Record<AgentStatus, string> = {
   running: 'running',
@@ -775,19 +763,8 @@ export function AgentList({
   // Picked files still being read: spawning now would start the agent without
   // them (lib/fileReads.ts), so every spawn path waits for `reading` to hit 0.
   const { reading, reads } = useFileReads()
+  const drop = useDropZone() // files dropped on the form
 
-  // Attach picked files (capped at MAX_IMAGES total), reading each to a data URL.
-  // Mirrors AgentRow.addImages; the input is cleared so re-picking the same file fires.
-  const addImages = (e: Event) => {
-    const input = e.currentTarget as HTMLInputElement
-    const files = Array.from(input.files || [])
-    input.value = ''
-    if (!files.length) return
-    const work = Promise.all(files.map(async (f) => ({ name: f.name, dataUrl: await readAsDataUrl(f) })))
-    reads.read(work, (read) => setImages((prev) => [...prev, ...read].slice(0, MAX_IMAGES))).catch(() =>
-      setErr('could not read the attached file(s)'),
-    )
-  }
   const clearImages = () => {
     reads.discard()
     setImages([])
@@ -872,13 +849,16 @@ export function AgentList({
 
   return (
     <div className="agents">
-      <form className="agents__spawn" onSubmit={spawn}>
-        <MicField value={task} onChange={setTask}>
-          <input
-            className="capture__input capture__input--sm"
+      <form className="agents__spawn" onSubmit={spawn} {...drop.props}>
+        <MicField value={task} onChange={setTask} multiline>
+          <PromptTextarea
             placeholder="task (e.g. flaky-test-triage)"
             value={task}
-            onInput={(e) => setTask(e.currentTarget.value)}
+            setValue={setTask}
+            files={images}
+            setFiles={setImages}
+            reads={reads}
+            drop={drop}
           />
         </MicField>
         {!scoped ? (
@@ -932,19 +912,7 @@ export function AgentList({
           <option value="xhigh">Very high</option>
           <option value="max">Max</option>
         </select>
-        <label
-          className={`agent__attach${images.length >= MAX_IMAGES ? ' agent__attach--full' : ''}`}
-          title={images.length >= MAX_IMAGES ? `max ${MAX_IMAGES} files` : 'attach file(s) — any type'}
-        >
-          📎
-          <input
-            type="file"
-            multiple
-            hidden
-            disabled={busy || images.length >= MAX_IMAGES}
-            onChange={addImages}
-          />
-        </label>
+        <AttachButton files={images} drop={drop} disabled={busy} />
         <button
           type="submit"
           className="btn btn--approve"
@@ -958,6 +926,7 @@ export function AgentList({
           disabled={!task.trim() || (!scoped && !repoInput.trim()) || busy}
           title="schedule this spawn for later"
         />
+        {drop.overlay}
       </form>
       {pendingSpawns.length ? (
         <div className="agents__scheduled" role="list" aria-label="scheduled spawns">
@@ -979,36 +948,7 @@ export function AgentList({
           ))}
         </div>
       ) : null}
-      {images.length || reading ? (
-        <div className="agent__imgs" role="group" aria-label="attached files">
-          {reading ? (
-            <span className="agent__img" role="status">
-              ⏳ reading files…
-            </span>
-          ) : null}
-          {images.map((img, i) => (
-            <span className="agent__img" key={`${img.name}-${i}`} title={img.name}>
-              {img.dataUrl.startsWith('data:image/') ? (
-                <img className="agent__img-thumb" src={img.dataUrl} alt={img.name} />
-              ) : (
-                <span className="agent__img-thumb agent__img-thumb--file" aria-hidden="true">
-                  📄
-                </span>
-              )}
-              <span className="agent__img-name">{img.name}</span>
-              <button
-                type="button"
-                className="agent__img-rm"
-                onClick={() => setImages((prev) => prev.filter((_, j) => j !== i))}
-                disabled={busy}
-                title="remove attachment"
-              >
-                ×
-              </button>
-            </span>
-          ))}
-        </div>
-      ) : null}
+      <AttachChips files={images} setFiles={setImages} disabled={busy} text={task} reading={reading} drop={drop} />
       {err ? <div className="agents__err">✗ {err}</div> : null}
 
       {readyToShip.length >= 2 ? (
@@ -1177,6 +1117,8 @@ export function AgentRow({
     reads.discard()
     setImages([])
   }
+  // Files dragged onto the chat — the whole row (card or full screen) is the zone.
+  const drop = useDropZone()
   const [busy, setBusy] = useState(false)
   const [sendErr, setSendErr] = useState('')
   // Where this chat's Atlas page links ([[Page]], `Wiki/…/X.md`) open: a
@@ -1287,7 +1229,7 @@ export function AgentRow({
   const dict = useDictation(text, setText)
   // Keep dictated text's tail in view in the reply box too (same live-ASR behavior as
   // the spawn field); unfocused-only, so manual editing keeps its caret.
-  const promptRef = useRef<HTMLInputElement>(null)
+  const promptRef = useRef<HTMLTextAreaElement>(null)
   useEffect(() => {
     scrollFieldToEnd(promptRef.current, false)
   }, [text])
@@ -1527,20 +1469,6 @@ export function AgentRow({
       unlock()
     }
   }, [appFull])
-
-  // Attach picked files (capped at MAX_IMAGES total), reading each to a data URL
-  // for upload. Allowlisted by extension (CSV etc. report MIME unreliably). The
-  // input is cleared so re-picking the same file fires.
-  const addImages = (e: Event) => {
-    const input = e.currentTarget as HTMLInputElement
-    const files = Array.from(input.files || [])
-    input.value = ''
-    if (!files.length) return
-    const work = Promise.all(files.map(async (f) => ({ name: f.name, dataUrl: await readAsDataUrl(f) })))
-    reads.read(work, (read) => setImages((prev) => [...prev, ...read].slice(0, MAX_IMAGES))).catch(() =>
-      setSendErr('could not read the attached file(s)'),
-    )
-  }
 
   // One path for all three ways to deliver typed text:
   //  - 'send'      → straight to the prompt (used when the agent is idle)
@@ -2466,36 +2394,7 @@ export function AgentRow({
           </button>
         </div>
       ) : null}
-      {images.length || reading ? (
-        <div className="agent__imgs" role="group" aria-label="attached files">
-          {reading ? (
-            <span className="agent__img" role="status">
-              ⏳ reading files…
-            </span>
-          ) : null}
-          {images.map((img, i) => (
-            <span className="agent__img" key={`${img.name}-${i}`} title={img.name}>
-              {img.dataUrl.startsWith('data:image/') ? (
-                <img className="agent__img-thumb" src={img.dataUrl} alt={img.name} />
-              ) : (
-                <span className="agent__img-thumb agent__img-thumb--file" aria-hidden="true">
-                  📄
-                </span>
-              )}
-              <span className="agent__img-name">{img.name}</span>
-              <button
-                type="button"
-                className="agent__img-rm"
-                onClick={() => setImages((prev) => prev.filter((_, j) => j !== i))}
-                disabled={busy}
-                title="remove attachment"
-              >
-                ×
-              </button>
-            </span>
-          ))}
-        </div>
-      ) : null}
+      <AttachChips files={images} setFiles={setImages} disabled={busy} text={text} reading={reading} drop={drop} />
       {s.panel ? <PanelBlock panel={s.panel} busy={busy} onAction={answerPanel} /> : null}
       {queuedList(s.queued).map((q, i, all) => (
         <div className="agent__queued" role="status" key={i}>
@@ -2601,25 +2500,16 @@ export function AgentRow({
       ) : null}
       {dormant ? null : (
       <form className="agent__prompt" onSubmit={send}>
-        <label
-          className={`agent__attach${images.length >= MAX_IMAGES ? ' agent__attach--full' : ''}`}
-          title={images.length >= MAX_IMAGES ? `max ${MAX_IMAGES} files` : 'attach file(s) — any type'}
-        >
-          📎
-          <input
-            type="file"
-            multiple
-            hidden
-            disabled={busy || images.length >= MAX_IMAGES}
-            onChange={addImages}
-          />
-        </label>
-        <input
-          ref={promptRef}
-          className="capture__input capture__input--sm"
+        <AttachButton files={images} drop={drop} disabled={busy} />
+        <PromptTextarea
+          inputRef={promptRef}
           placeholder={images.length ? 'add a message (optional)…' : 'send a prompt…'}
           value={text}
-          onInput={(e) => setText(e.currentTarget.value)}
+          setValue={setText}
+          files={images}
+          setFiles={setImages}
+          reads={reads}
+          drop={drop}
           onFocus={onPromptFocus}
         />
         {s.status === 'running' ? (
@@ -2713,7 +2603,7 @@ export function AgentRow({
     <ChatVault.Provider value={chatVault}>
       {fullscreen ? (
         createPortal(
-          <div className={cls} role="dialog" aria-modal="true" ref={fullscreenRef}>
+          <div className={cls} role="dialog" aria-modal="true" ref={fullscreenRef} {...drop.props}>
             {/* The same clickable agents overview as the hero, agents only —
                 clicking another node swaps straight to THAT agent's full screen
                 (this row yields via the focus signal above). On a phone the graph
@@ -2744,11 +2634,15 @@ export function AgentRow({
               <AgentsOverview switcher currentId={s.id} />
             </div>
             {body}
+            {drop.overlay}
           </div>,
           document.body,
         )
       ) : (
-        <li className={cls}>{body}</li>
+        <li className={cls} {...drop.props}>
+          {body}
+          {drop.overlay}
+        </li>
       )}
       {appOverlay}
     </ChatVault.Provider>

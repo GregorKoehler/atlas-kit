@@ -721,7 +721,24 @@ any file type, not just images. They are validated once, above the kind branch, 
 `AGENT_MAX_IMAGES`; the executor saves them under `uploads/<id>` **after** the session id is
 resolved and **before** anything is registered or launched (so a bad attachment fails fast
 leaving nothing behind), and folds their absolute paths into the opening prompt as a
-single-line tail telling the agent to `Read` them first.
+tail telling the agent to `Read` them first. Prompts, queued prompts and interrupts carry
+attachments the same way. The cap is 20 files.
+
+**Inline images.** A pasted message with screenshots in it carries an `[Image N]` marker
+where each image sat, and image N travels as a file named `image-N.<ext>`
+(`web/src/lib/pasteImages.ts`). Both executors fold paths through the one `withImages`
+in `api/src/agent-attachments.mjs`. It swaps each marker for `[Image N: <saved path>]`
+in place, because N survives in the saved basename, so queued entries need no new field.
+Files without a marker keep the appended tail. With no marker at all, the output is
+byte-identical to the plain tail. An image the page could not read stays in the text as
+`[Image N unreadable: <src>]`, with a warning chip under the field. It is never dropped.
+
+**Drops.** Each composer is a drop zone (`useDropZone` in `web/src/components/AgentAttach.tsx`):
+the dev spawn form, the Ask form, and a whole chat, in its card row or full screen. A drop on
+the field works like a paste at the drop point. A drop anywhere else in the zone becomes chips.
+The 📎 picker goes the same way. A drop only fills the draft and never sends or spawns. Files
+over the per-file cap, empty files and files past the 20-file cap get a visible chip. A file
+dropped outside every zone is refused at the window (`web/src/lib/fileDrop.ts`).
 
 ---
 

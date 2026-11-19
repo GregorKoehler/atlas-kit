@@ -6141,6 +6141,33 @@ button.capture-job__title--link {
 .agent__prompt .capture__input--sm {
   flex: 1;
 }
+/* The prompt field grows with a pasted multi-line message — once it has, keep
+   the buttons their own height at its foot instead of stretching with it. */
+.agent__prompt:has(.prompt-field[data-grown]),
+.agents__spawn:has(.prompt-field[data-grown]) {
+  align-items: flex-end;
+}
+/* The prompt textarea (components/AgentAttach.tsx PromptTextarea): one row
+   tall like the input it replaced, auto-grown by script, capped here — then it
+   scrolls. */
+.prompt-field {
+  box-sizing: border-box;
+  display: block;
+  resize: none;
+  line-height: 1.4;
+  max-height: min(40vh, 16rem);
+  overflow-y: auto;
+}
+/* Empty: the placeholder on one truncated line, as the <input> showed it — a
+   one-row textarea would otherwise wrap it and scroll. */
+.prompt-field:placeholder-shown {
+  overflow: hidden;
+}
+.prompt-field::placeholder {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
 /* Attach-image button (a label fronting a hidden file input). */
 .agent__attach {
   display: inline-flex;
@@ -6239,6 +6266,13 @@ button.capture-job__title--link {
 }
 .agent__img-rm:hover {
   color: var(--status-red);
+}
+/* A pasted image that did not make it (unreadable / over the cap) — its marker
+   stays in the text, this says so above the field. */
+.agent__img--warn {
+  max-width: none;
+  border-color: var(--status-amber);
+  color: var(--status-amber);
 }
 /* "Interrupt & send" — the cut-in action while the agent is generating. Tinted
    amber (a caution: it stops the current turn) to set it apart from plain Send/Queue. */
@@ -7713,4 +7747,31 @@ button.capture-job__title--link {
   border-radius: 4px;
   color: var(--status-amber);
   font-weight: 600;
+}
+
+/* A file drag over a composer (AgentAttach.tsx useDropZone): a quiet veil over
+   the zone — the spawn/Ask form, or the whole chat. Never takes the pointer, so
+   the drop still reaches the field or the pane beneath it. Positioned only
+   while shown, so the zone's layout is otherwise untouched (the full screen is
+   already fixed). */
+.agents__spawn:has(> .agent-drop),
+.agent:not(.agent--fullscreen):has(> .agent-drop) {
+  position: relative;
+}
+.agent-drop {
+  position: absolute;
+  inset: 0;
+  z-index: 50;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px dashed var(--accent-dim);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--bg-900) 72%, transparent);
+  pointer-events: none;
+}
+.agent-drop__label {
+  color: var(--text-bright);
+  font-family: var(--font-body);
+  font-size: 0.85rem;
 }

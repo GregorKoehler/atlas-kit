@@ -6,7 +6,9 @@ import { AtlasSpawnedAgents } from './AtlasSpawnedAgents'
 import { ScheduleButton } from '../ScheduleButton'
 import { useAgentFocus, agentFocusConsumed } from '../../lib/agentFocus'
 import { useAgents } from '../../lib/useAgents'
-import { spawnAgent, scheduleAgent, unscheduleAgent } from '../../lib/api'
+import { spawnAgent, scheduleAgent, unscheduleAgent, type AgentAttachment } from '../../lib/api'
+import { useFileReads } from '../../lib/fileReads'
+import { AttachButton, AttachChips, PromptTextarea, useDropZone } from '../AgentAttach'
 import { useDraft } from '../../lib/useDraft'
 import { useProviders } from '../../lib/providers'
 import { modelOptions, keepModel, modelTitle } from '../../lib/modelTiers'
@@ -71,6 +73,16 @@ export function KnowledgeAgents({
     setProvider(name)
     setModel((m) => keepModel(m, modelOptions(CHAT_TIERS, providers.find((p) => p.name === name)), 'opus'))
   }
+  // Files attached to the question (📎 or pasted with it) — the executor folds
+  // their paths into the first turn, the same mechanism as a dev spawn's. Held
+  // while still being read (lib/fileReads.ts).
+  const [images, setImages] = useState<AgentAttachment[]>([])
+  const { reading, reads } = useFileReads()
+  const drop = useDropZone() // files dropped on the Ask form
+  const clearImages = () => {
+    reads.discard()
+    setImages([])
+  }
   const [busy, setBusy] = useState(false)
   const [err, setErr] = useState('')
   const [selected, setSelected] = useState<string | null>(null)
@@ -114,13 +126,14 @@ export function KnowledgeAgents({
   const ask = async (e: Event) => {
     e.preventDefault()
     const q = question.trim()
-    if (!q || busy) return
+    if (!q || busy || reading) return
     setBusy(true)
     setErr('')
-    const r = await spawnAgent({ task: q, kind: 'knowledge', vault, model, effort, provider: provider || undefined })
+    const r = await spawnAgent({ task: q, kind: 'knowledge', vault, model, effort, provider: provider || undefined, images: images.length ? images : undefined })
     setBusy(false)
     if (r.ok) {
       setQuestion('')
+      clearImages()
       setSelected(null)
       kick()
     } else {
@@ -139,6 +152,7 @@ export function KnowledgeAgents({
     })
     if (r.ok) {
       setQuestion('')
+      clearImages()
       kick()
     }
     return r
@@ -155,17 +169,20 @@ export function KnowledgeAgents({
   return (
     <Card title={atlas ? 'Atlas Agent' : 'Knowledge Agents'} className={className}>
       <div className="agents" ref={rootRef}>
-        <form className="agents__spawn" onSubmit={ask}>
-          <MicField value={question} onChange={setQuestion}>
-            <input
-              className="capture__input capture__input--sm"
+        <form className="agents__spawn" onSubmit={ask} {...drop.props}>
+          <MicField value={question} onChange={setQuestion} multiline>
+            <PromptTextarea
               placeholder={
                 atlas
                   ? 'Ask the Atlas — a chat over the typed knowledge graph; works new insights back in (typed) on close…'
                   : 'Ask the knowledge base — spawns a chat grounded in the wiki, can research gaps…'
               }
               value={question}
-              onInput={(e) => setQuestion(e.currentTarget.value)}
+              setValue={setQuestion}
+              files={images}
+              setFiles={setImages}
+              reads={reads}
+              drop={drop}
             />
           </MicField>
           <select
@@ -211,7 +228,13 @@ export function KnowledgeAgents({
             <option value="xhigh">Very high</option>
             <option value="max">Max</option>
           </select>
-          <button type="submit" className="btn btn--approve" disabled={!question.trim() || busy || !enabled}>
+          <AttachButton files={images} drop={drop} disabled={busy || !enabled} />
+          <button
+            type="submit"
+            className="btn btn--approve"
+            disabled={!question.trim() || busy || !!reading || !enabled}
+            title={reading ? 'waiting for the attached files to be read' : undefined}
+          >
             {busy ? 'Asking…' : 'Ask'}
           </button>
           <ScheduleButton
@@ -219,7 +242,9 @@ export function KnowledgeAgents({
             disabled={!question.trim() || busy || !enabled}
             title={atlas ? 'schedule this Atlas chat for later' : 'schedule this chat for later'}
           />
+          {drop.overlay}
         </form>
+        <AttachChips files={images} setFiles={setImages} disabled={busy} text={question} reading={reading} drop={drop} />
         {err ? <div className="agents__err">✗ {err}</div> : null}
         {pendingChats.length ? (
           <div className="agents__scheduled" role="list" aria-label="scheduled chats">
