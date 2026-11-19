@@ -18,6 +18,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { z } from 'zod'
 import { listVaults, defaultVaultKey } from '../vaults.mjs'
 import { addonMcpTools, addonSearchLegs } from '../addons.mjs'
+import { noteAnswer } from '../note-answer.mjs'
 
 const API_BASE = (process.env.ATLAS_API_BASE || 'http://127.0.0.1:3001').replace(/\/$/, '')
 const BEARER = process.env.DASHBOARD_BEARER_TOKEN || ''
@@ -452,14 +453,24 @@ export function buildServer({
   server.registerTool(
     'get_note',
     {
-      description: `Read a single note/page by its vault-relative path (e.g. "Wiki/Organizations/Cloudflare.md"). A page longer than ${RESPONSE_MAX} chars comes back truncated at a line boundary, and says so — a mature vault's project pages can be hundreds of KB.`,
-      inputSchema: { path: z.string().describe('vault-relative path to the note'), ...vaultReadParam },
+      description: `Read a single note/page by its vault-relative path (e.g. "Wiki/Organizations/Cloudflare.md"). Up to ${RESPONSE_MAX} chars a page comes back whole. A longer one (a mature vault's pages can run past 1 MB) comes back as its head, the exact next call, and an outline of the cut sections with each one's size and \`section\` value. Every part stays reachable, and no answer is over ${RESPONSE_MAX} chars: fetch one section with \`section\`, and follow the "next call" a truncation note names through a section or page that is itself too long.`,
+      inputSchema: {
+        path: z.string().describe('vault-relative path to the note'),
+        section: z
+          .string()
+          .optional()
+          .describe('return one `##`/`###` section verbatim, up to the next heading of the same or higher level (case-insensitive). Takes a heading, a value from the outline (repeated headings are "Log #2"), or a query_vault semantic row\'s `section` as it stands. An unknown section is an error listing the available ones.'),
+        offset: z
+          .number()
+          .int()
+          .nonnegative()
+          .optional()
+          .describe('continue from this many chars into the section, or into the page when no section is given. Use the value a truncation note names; parts concatenate back to the original exactly.'),
+        ...vaultReadParam,
+      },
     },
-    tool(async ({ path, vault }) =>
-      capText(
-        await apiGet(withVault(`/api/note?path=${encodeURIComponent(path)}`, vault)),
-        'this page is long — find the passage you need with query_vault (prose) or its typed fields with query_atlas',
-      ),
+    tool(async ({ path, section, offset, vault }) =>
+      noteAnswer(await apiGet(withVault(`/api/note?path=${encodeURIComponent(path)}`, vault)), { path, vault, section, offset, max: RESPONSE_MAX }),
     ),
   )
 

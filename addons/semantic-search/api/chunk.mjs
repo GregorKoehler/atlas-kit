@@ -15,6 +15,7 @@
  * ------------------------------------------------------------------ */
 import fs from 'node:fs'
 import path from 'node:path'
+import { sections, stripFrontmatter } from '../../../api/src/md-sections.mjs'
 
 /* Bump when the chunk boundaries change. It is recorded in the index's
  * meta.json and a mismatch forces a full re-embed — a vector produced from
@@ -64,67 +65,12 @@ function listMdRecursive(absDir, out = []) {
   return out
 }
 
-function stripFrontmatter(md) {
-  if (md.startsWith('---')) {
-    const end = md.indexOf('\n---', 3)
-    if (end !== -1) {
-      const after = md.indexOf('\n', end + 1)
-      return after !== -1 ? md.slice(after + 1) : ''
-    }
-  }
-  return md
-}
-
 function firstHeading(md, fallback) {
   for (const line of stripFrontmatter(md).split('\n')) {
     const m = line.match(/^#\s+(.+)$/)
     if (m) return m[1].trim()
   }
   return fallback
-}
-
-/**
- * Split one page's body into sections at ATX headings, as CHAR RANGES into
- * `body` plus the heading breadcrumb. A heading with no body under it is
- * dropped (a bare `## Notes` carries no retrievable claim), but its text
- * survives in its children's breadcrumb — and, once ranges are merged below,
- * in the merged range itself.
- *
- * → [{ crumb, start, end }] with `body.slice(start, end)` already trimmed at
- *   both edges, in document order, non-overlapping.
- */
-function sections(body) {
-  const lines = body.split('\n')
-  const out = []
-  const stack = [] // [{ depth, text }]
-  let bufStart = 0
-  let bufEnd = 0
-  let hasBuf = false
-  let offset = 0
-  const flush = () => {
-    if (hasBuf) {
-      const raw = body.slice(bufStart, bufEnd)
-      const lead = raw.length - raw.trimStart().length
-      const text = raw.trim()
-      if (text) out.push({ crumb: stack.map((s) => s.text).join(' › '), start: bufStart + lead, end: bufStart + lead + text.length })
-    }
-    hasBuf = false
-  }
-  for (const line of lines) {
-    const m = line.match(/^(#{1,6})\s+(.+)$/)
-    if (m) {
-      flush()
-      const depth = m[1].length
-      while (stack.length && stack[stack.length - 1].depth >= depth) stack.pop()
-      stack.push({ depth, text: m[2].trim() })
-    } else {
-      if (!hasBuf) (bufStart = offset), (hasBuf = true)
-      bufEnd = offset + line.length
-    }
-    offset += line.length + 1
-  }
-  flush()
-  return out
 }
 
 /**

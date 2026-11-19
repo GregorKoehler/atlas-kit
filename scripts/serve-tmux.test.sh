@@ -29,6 +29,22 @@ check(){ if eval "$2"; then ok "$1"; else bad "$1 [expr: $2]"; fi; }
 win_count() { tmux list-windows -t "$SESSION" -F '#W' 2>/dev/null | grep -c "^$1\$"; }
 pane_pid()  { tmux list-panes   -t "$SESSION:$1" -F '#{pane_pid}' 2>/dev/null | head -1; }
 
+# A fresh server holding one keepalive-less `express` session, the shape the OLD
+# serve.sh left running. Killing the only session takes the tmux server down, and a
+# new-session sent while that server is still exiting gets "server exited
+# unexpectedly" and creates nothing (seen on newer tmux). So: take the server down
+# explicitly, then retry until the session really exists.
+old_keepaliveless_session() {
+  tmux kill-server 2>/dev/null || true
+  for _ in $(seq 1 50); do
+    tmux new-session -d -s "$SESSION" -n express 'sleep 1000' 9>&- 2>/dev/null
+    tmux has-session -t "$SESSION" 2>/dev/null && return 0
+    sleep 0.1
+  done
+  echo "  could not start a fresh tmux server for the fixture" >&2
+  return 1
+}
+
 echo "== ensure_session creates a keepalive-backed session =="
 ensure_session
 check "session exists"                 'tmux has-session -t "$SESSION" 2>/dev/null'
@@ -42,8 +58,7 @@ echo "== transition: a pre-existing keepalive-less session gets one (first deplo
 # Simulate the running session from the OLD serve.sh: a session with only a service
 # window and NO keepalive. ensure_session must add the keepalive BEFORE stop() could
 # empty the session — otherwise the first deploy of this fix would 502 like the bug.
-tmux kill-session -t "$SESSION" 2>/dev/null || true
-tmux new-session -d -s "$SESSION" -n express 'sleep 1000' 9>&-
+old_keepaliveless_session
 check "precondition: no keepalive yet"  '[ "$(win_count "$KEEPALIVE")" = 0 ]'
 ensure_session
 check "keepalive added to old session"  '[ "$(win_count "$KEEPALIVE")" = 1 ]'
@@ -56,8 +71,7 @@ echo "== transition RACE: graft fails + server vanishes → recover via fresh se
 # nothing came up. Reproduce deterministically: a keepalive-less session exists, but the
 # FIRST keepalive new-window fails and takes the server down with it (server vanished
 # under us). ensure_session must NOT trust that, and must converge to a fresh session.
-tmux kill-session -t "$SESSION" 2>/dev/null || true
-tmux new-session -d -s "$SESSION" -n express 'sleep 1000' 9>&-
+old_keepaliveless_session
 _race_armed=1
 tmux() {                       # shadow serve.sh's wrapper for this scenario only
   if [ "${_race_armed:-0}" = 1 ] && [ "${1:-}" = new-window ]; then

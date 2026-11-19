@@ -31,6 +31,8 @@ function usage(msg) {
   console.error('  atlas-query query_vault {"query":"cloudflare tunnel","limit":5}')
   console.error('  atlas-query query_atlas {"type":"task","status":"next","edge_key":"for_project","edge_target":"My Project"}')
   console.error('  atlas-query get_note {"path":"Wiki/Projects/My Project.md"}')
+  console.error('  atlas-query get_note {"path":"Wiki/Projects/My Project.md","section":"Log"}     (one ## or ### section)')
+  console.error('  atlas-query get_note {"path":"Wiki/Projects/My Project.md","section":"Log","offset":19800}     (continue; each truncated answer prints its exact next call)')
   process.exit(2)
 }
 if (!tool) usage()

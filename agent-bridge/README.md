@@ -56,7 +56,10 @@ HANDBOOK roadmap).
   A `repo` not listed here is rejected. This is the spawn security boundary.
   `worktreeBase` defaults to `<path>/.agent-worktrees` (inside the repo, usually
   writable by the dev user); override it if the repo dir isn't writable by the
-  container's exec user. `appPort` (optional, default `8501`) is the container-
+  container's exec user. A new worktree starts from a freshly fetched origin
+  default branch (`origin/HEAD`, else `origin/master`/`origin/main`), never from
+  `path`'s own checkout, which is never pulled or reset; `baseRef` (optional,
+  e.g. `"origin/develop"`) overrides that start ref. `appPort` (optional, default `8501`) is the container-
   INTERNAL port an agent serves its live app on; the bridge reaches it via that
   port's already-PUBLISHED host mapping — confirm one exists with `docker port
   <container>` (no republish / restart needed).

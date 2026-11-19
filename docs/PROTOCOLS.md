@@ -566,6 +566,21 @@ message in the other direction.
   exactly the thing that must not vanish. `GET /api/agents/messages` reads it back.
   ⚠️ `delivered: true` means *handed off*, not *read*.
 
+**Claude Code's OWN cross-session messaging is closed at spawn — the bus is the only channel.**
+Claude Code ≥ 2.1.224 gives every session `ListAgents`/`SendMessage` plus a per-session inbox
+socket, **on by default**, so every agent session on the box is an addressable peer — a second
+channel with no lineage bound, no budget, no log line and nothing the dashboard can show. So every
+spawned session launches with `claude --settings <json>` from `api/src/native-msg-policy.mjs`, **one
+decision imported by both executors** (`agent-local.mjs`, `agent-bridge/server.mjs`), applied to every
+launch **and resume** template so a revived agent can't come back with the channel reopened. Per kind:
+**dev** = `crossSessionInbound: "refuse"` **plus** deny rules on both tools; **knowledge/Atlas** =
+`refuse` only, because `SendMessage` also continues an in-process subagent by id and an orchestrator
+needs that. A dev agent keeps the `Agent` tool (it still spawns sub-agents) and only loses the
+follow-up to one it already spawned. `--settings` loads *additional* settings (deny rules union across
+scopes) and unknown keys are ignored, so an older Claude Code launches unchanged; a template that
+already passes `--settings` is left alone. Kill-switch **`ATLAS_NATIVE_MSG_POLICY=off`**, read per
+process so the box and a bridge revert independently; off injects nothing.
+
 **The remote half.** The box's API is loopback-bound, so a container agent posts to its own
 bridge instead. The bridge parks the attempt, the box drains `POST /outbox` on the remote
 poll it already runs, decides it with the **same** `deliverAgentMessage()`, and posts the

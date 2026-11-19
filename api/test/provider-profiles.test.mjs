@@ -184,8 +184,9 @@ test('ZERO-PROFILE INVARIANT: no provider ⇒ the launch line is what it always 
   for (const [name, tmpl] of PROFILED_TEMPLATES) {
     const line = launchCommand(tmpl, { model: 'claude-sonnet-5[1m]', effort: 'xhigh', sid: 'abc', atlasSession: 'kb-atlas-x' })
     // …then the claude binary (an absolute shell-quoted path, or the bare word
-    // when it did not resolve — CI runners have no `claude` installed).
-    assert.match(line, /^IS_SANDBOX=1 (ATLAS_SESSION='[^']*' )?env -u ANTHROPIC_API_KEY \S+ --model /, `${name} lost the subscription-auth guarantee`)
+    // when it did not resolve — CI runners have no `claude` installed), and the
+    // native-messaging `--settings` (native-msg-policy.mjs) right after it.
+    assert.match(line, /^IS_SANDBOX=1 (ATLAS_SESSION='[^']*' )?env -u ANTHROPIC_API_KEY \S+ (--settings '[^']*' )?--model /, `${name} lost the subscription-auth guarantee`)
     assert.match(line, /--model 'claude-sonnet-5\[1m\]' --effort 'xhigh'/, name)
   }
 })
@@ -283,7 +284,7 @@ test('END TO END, through a real tmux: the backend env arrives, and appears in n
     assert.match(saw, /^ANTHROPIC_BASE_URL=https:\/\/openrouter\.ai\/api$/m)
     assert.match(saw, /^ANTHROPIC_DEFAULT_SONNET_MODEL=deepseek\/deepseek-v4-flash$/m)
     assert.match(saw, /^KEY=$/m) // set, and EMPTY — not `KEY=UNSET`
-    assert.match(saw, /^argv:--model sonnet --effort xhigh /m) // the TIER, for the profile to map
+    assert.match(saw, /^argv:(--settings \S+ )?--model sonnet --effort xhigh /m) // the TIER, for the profile to map
     // Nothing on the box can read the key out of a process listing.
     const ps = (await run('ps', ['-eo', 'args'])).stdout
     assert.ok(!ps.includes(CANARY), 'the API key is visible in `ps` output')
@@ -350,7 +351,7 @@ test('END TO END, through a real tmux: an ATLAS chat reaches the profiled backen
     assert.match(saw, /^ANTHROPIC_BASE_URL=https:\/\/openrouter\.ai\/api$/m)
     assert.match(saw, /^ANTHROPIC_DEFAULT_OPUS_MODEL=deepseek\/deepseek-v4-pro$/m)
     assert.match(saw, /^KEY=$/m) // set, and EMPTY — not `KEY=UNSET`
-    assert.match(saw, /^argv:--model opus --effort high --session-id kb-sid-1 /m) // the TIER, for the profile to map
+    assert.match(saw, /^argv:(--settings \S+ )?--model opus --effort high --session-id kb-sid-1 /m) // the TIER, for the profile to map
     assert.match(saw, /what changed today\?$/m) // …and the prompt still arrived by file
     const ps = (await run('ps', ['-eo', 'args'])).stdout
     assert.ok(!ps.includes(CANARY), 'the API key is visible in `ps` output')

@@ -92,6 +92,8 @@ import { ATLAS_QUERY_WRAPPER_SRC } from '../api/src/atlas-query-wrapper.mjs'
 // THIS box is the authority on its own memory, and the box-side pre-flight check
 // must refuse for exactly the same arithmetic (see agent-capacity.mjs).
 import { capacityVerdict, capacityMessage, readMemStatus } from '../api/src/agent-capacity.mjs'
+import { addAgentWorktree } from '../api/src/worktree-base.mjs'
+import { withNativeMsgPolicy } from '../api/src/native-msg-policy.mjs'
 import { buildRedeploySystemdRunArgs, isUnitCollisionError } from './redeploy.mjs'
 
 const PORT = Number(process.env.BRIDGE_PORT || 7878)
@@ -117,9 +119,14 @@ const AUDIT_LOG = process.env.BRIDGE_AUDIT_LOG || path.join(HERE, 'audit.log')
 // INSIDE the dev container via `docker exec` — the bridge host's filesystem, and
 // therefore any path it resolved, does not apply. The container's own PATH is the
 // only correct lookup. Set AGENT_LAUNCH_CMD to pin a path inside the container.
-const LAUNCH_CMD =
+// A bridge only ever runs DEV sessions (knowledge/Atlas chats are box-local), so
+// the launch carries the dev half of the native-messaging policy: refuse inbound
+// cross-session mail AND deny both native messaging tools — the SHARED decision
+// in api/src/native-msg-policy.mjs, never a copy, so box and bridge can't drift.
+// Turn it off on THIS machine alone with ATLAS_NATIVE_MSG_POLICY=off.
+const LAUNCH_CMD = withNativeMsgPolicy(
   process.env.AGENT_LAUNCH_CMD ||
-  'IS_SANDBOX=1 claude --model {model} --effort {effort} --dangerously-skip-permissions {task}'
+  'IS_SANDBOX=1 claude --model {model} --effort {effort} --dangerously-skip-permissions {task}', 'dev')
 // Where a session's launch prompt is materialized INSIDE its container. The
 // prompt is NOT interpolated into the tmux command (see prompt-file-launch.mjs):
 // tmux rejects a `new-session … sh -lc <cmd>` over ~16 KB with `command too
@@ -365,12 +372,12 @@ backfillModelEffort()
 /* --- docker exec --------------------------------------------------- */
 // Run `docker exec <container> <argv...>`. argv is a real arg array (no host
 // shell), so container/path/branch/text are never shell-interpolated.
-function dockerExec(container, argv) {
+function dockerExec(container, argv, opts = {}) {
   return new Promise((resolve) => {
     execFile(
       'docker',
       ['exec', container, ...argv],
-      { timeout: EXEC_TIMEOUT_MS, maxBuffer: 4 * 1024 * 1024 },
+      { timeout: EXEC_TIMEOUT_MS, maxBuffer: 4 * 1024 * 1024, ...opts },
       (err, stdout, stderr) => {
         resolve({
           ok: !err,
@@ -1336,15 +1343,20 @@ async function spawn({ task, repo, preamble, model, effort, images }) {
   await dockerExec(container, ['mkdir', '-p', worktreeBase])
   await dockerExec(container, ['mkdir', '-p', '/tmp/agent-stats'])
   await dockerExec(container, ['mkdir', '-p', downloadsDir(id)])
-  const wt = await dockerExec(container, [
-    'git', '-C', target.path, 'worktree', 'add', '-b', branch, worktree,
-  ])
+  // Start from a freshly fetched origin default branch, not target.path's HEAD
+  // (worktree-base.mjs); the base it used rides the session and the audit line.
+  const wt = await addAgentWorktree({
+    repo: target.path, branch, worktree, baseRef: target.baseRef,
+    exec: (argv, o) => dockerExec(container, argv, o),
+  })
+  const wtBase = { baseRef: wt.baseRef, baseSha: wt.baseSha, baseFetched: wt.baseFetched }
+  Object.assign(session, wtBase)
   if (!wt.ok) {
     session.status = 'error'
     session.error = (wt.stderr || 'git worktree add failed').slice(0, 500)
     registry.sessions[id] = session
     persist()
-    audit({ action: 'spawn', id, repo, ok: false, error: session.error })
+    audit({ action: 'spawn', id, repo, ...wtBase, ok: false, error: session.error })
     return { status: 502, ok: false, error: session.error }
   }
 
@@ -1399,7 +1411,7 @@ async function spawn({ task, repo, preamble, model, effort, images }) {
 
   registry.sessions[id] = session
   persist()
-  audit({ action: 'spawn', id, repo, branch, container, model: model || DEFAULT_MODEL, effort: effort || DEFAULT_EFFORT, images: imagePaths.length, ok: true })
+  audit({ action: 'spawn', id, repo, branch, container, ...wtBase, ...(wt.fetchError ? { fetchError: wt.fetchError } : {}), model: model || DEFAULT_MODEL, effort: effort || DEFAULT_EFFORT, images: imagePaths.length, ok: true })
   return { status: 200, ok: true, id }
 }
 

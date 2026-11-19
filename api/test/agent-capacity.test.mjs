@@ -122,7 +122,7 @@ test('the bridge refuses on its own box, BEFORE it creates anything', () => {
   assert.ok(start > 0 && end > start)
   const spawnFn = bridgeSrc.slice(start, end)
   const gate = spawnFn.indexOf('const cap = agentCapacity()')
-  const worktree = spawnFn.indexOf("'worktree', 'add'")
+  const worktree = spawnFn.indexOf('addAgentWorktree(') // fetch + worktree add (worktree-base.mjs)
   assert.ok(gate > 0, 'the bridge must apply the gate itself — an API-side check alone trusts a stale reading and misses direct calls')
   assert.ok(worktree > gate, 'refuse before a worktree, a port or a container file exists')
   assert.match(spawnFn.slice(gate, worktree), /status: 503, ok: false, error, capacity: cap/)

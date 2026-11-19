@@ -35,7 +35,7 @@ import path from 'node:path'
 import { CHUNKER_VERSION, pageBody } from './chunk.mjs'
 import { MODEL_ID, DIMS, QUERY_PROMPT, embedRuntimeAvailable, resident, embed } from './embed.mjs'
 import { callEncoder, encoderState, encoderWorkerEnabled } from './embed-client.mjs'
-import { readSweep } from './sweep.mjs'
+import { countFilled, readSweep } from './sweep.mjs'
 import { healNote } from './heal.mjs'
 
 /** Where an index lives for a vault. `data/` is the vault's machine-owned,
@@ -109,11 +109,11 @@ export function loadMeta(vaultPath) {
       entry = { mtimeMs, error: `index provenance mismatch (model ${meta.model} dims ${meta.dims} chunker ${meta.chunkerVersion})` }
     } else {
       /* ⚠️ THE FILE NAME COMES FROM meta.json, NEVER FROM A CONSTANT HERE. The
-       * indexer PING-PONGS between `vectors.f32` and `vectors.b.f32` so that
-       * renaming meta.json is the only commit point, and it DELETES the one it
-       * did not write.
+       * indexer writes a NEW file per run so that renaming meta.json is the only
+       * commit point, and it DELETES the ones meta.json no longer names. (It used
+       * to ping-pong `vectors.f32` ↔ `vectors.b.f32`, which is what this taught.)
        *
-       * Hard-coding `vectors.f32` here makes the fault FLAP WITH REBUILD PARITY
+       * Hard-coding `vectors.f32` here made the fault FLAP WITH REBUILD PARITY
        * rather than stay down, and that is the worse shape: after an odd number
        * of content-changing rebuilds the live name is `vectors.b.f32`, the leg
        * answers `available:false, reason: ENOENT …/vectors.f32`, and search
@@ -128,7 +128,14 @@ export function loadMeta(vaultPath) {
        * query that needed it. Same name, same error string, one stat. */
       const vectorsFile = meta.vectorsFile || 'vectors.f32'
       const bytes = fs.statSync(path.join(dir, vectorsFile)).size
-      entry = bytes / 4 < meta.rows.length * meta.dims ? { mtimeMs, error: `${vectorsFile} shorter than meta.rows` } : { mtimeMs, meta }
+      if (bytes / 4 < meta.rows.length * meta.dims) {
+        entry = { mtimeMs, error: `${vectorsFile} shorter than meta.rows` }
+      } else {
+        // An index built before `filled` existed is read, not refused, and its
+        // rows are counted so it cannot pass for full. Once per meta.json change.
+        if (!Number.isFinite(meta.filled)) meta.filled = countFilled(path.join(dir, vectorsFile), meta.rows.length, meta.dims)
+        entry = { mtimeMs, meta }
+      }
     }
   } catch (e) {
     entry = { mtimeMs, error: String(e?.message || e) }
@@ -179,7 +186,12 @@ export function loadIndex(vaultPath) {
  * both: `builtAt` is when the index CONTENT last changed, `sweptAt` is when a
  * sweep last confirmed it matches the vault. An index built two days ago and
  * swept two minutes ago is CURRENT, and reporting only `builtAt` would read as
- * two days stale. `ageMinutes` is off `sweptAt` for that reason. */
+ * two days stale. `ageMinutes` is off `sweptAt` for that reason.
+ *
+ * ⚠️ `filled` of `chunks` is how much of the vault this leg can see at all, and
+ * `aborted` is non-null when the last run stopped early, or when the live index is
+ * itself a committed partial. The scores cannot show either: a hollow index still
+ * answers with a confident list. */
 function provenance(vaultPath, meta) {
   const sweep = readSweep(indexDirFor(vaultPath)) // null: pre-sweep index, or never swept
   const seen = sweep?.sweptAt || meta.builtAt
@@ -190,6 +202,8 @@ function provenance(vaultPath, meta) {
     vaultSha: sweep?.vaultSha || meta.vaultSha,
     pages: meta.pages,
     chunks: meta.rows.length,
+    filled: meta.filled,
+    aborted: sweep?.aborted ?? (meta.aborted ? { at: meta.builtAt, reason: meta.aborted } : null),
     model: meta.model,
     dtype: meta.dtype,
     dims: meta.dims,
