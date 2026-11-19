@@ -82,7 +82,7 @@ import { promptFileBody, promptFileCommand } from '../api/src/prompt-file-launch
 // executor gates delivery on the same verdict, and a bridge-local copy would
 // drift (same reason decideDelivery is shared).
 import { isBusy } from '../api/src/pane-busy.mjs'
-import { sanitizeForTyping, deliveryLanded, clearInputBox, TUI_CLEAR_KEY, TUI_VERIFY, TUI_VERIFY_MAX_CHARS, TUI_VERIFY_SETTLE_MS, TUI_VERIFY_TRIES } from '../api/src/tui-input.mjs'
+import { typeAndSubmit, payloadFingerprint } from '../api/src/tui-input.mjs'
 // The `agent-msg` / `atlas-query` wrapper sources — ONE copy, written into each
 // container here and onto the box's PATH by agent-local.mjs, so the command an
 // agent runs is identical wherever it runs.
@@ -1445,44 +1445,21 @@ async function prepare(id, text, images) {
 // One implementation, both executors: a second copy would drift and only one
 // would get maintained.
 async function deliver(s, payload) {
-  const safe = sanitizeForTyping(payload)
-  const stripped = payload.length - safe.length
-  // ⚠️ Never type into a non-empty box — the typed text concatenates onto
-  // whatever is there and the Enter submits the pair. Clearing is VERIFIED, not
-  // counted: `C-u` kills a display ROW (api/src/tui-input.mjs carries the
-  // measurement and the accumulation it explains).
-  const io = {
+  const d = await typeAndSubmit(payload, {
     readPane: () => captureTail(s, TAIL_LINES, true),
-    pressClear: () => dockerExec(s.container, ['tmux', 'send-keys', '-t', s.tmux, TUI_CLEAR_KEY]),
-  }
-  let cleared = 0
-  if (TUI_VERIFY) {
-    const pre = await clearInputBox(io)
-    if (!pre.ok) {
-      audit({ action: 'deliver-box-stuck', id: s.id, repo: s.repo, len: safe.length, presses: pre.presses, residue: pre.residue, ok: false })
-      return { ok: false, error: 'input box is not empty and could not be cleared (nothing typed)' }
-    }
-    cleared = pre.presses
-  }
-  const t = await dockerExec(s.container, ['tmux', 'send-keys', '-t', s.tmux, '-l', safe])
-  if (!t.ok) return { ok: false, error: t.stderr.slice(0, 500) || 'send-keys failed' }
-  if (TUI_VERIFY && safe.length <= TUI_VERIFY_MAX_CHARS && !(await typedTextLanded(s, safe))) {
-    const post = await clearInputBox(io)
-    audit({ action: 'deliver-mangled', id: s.id, repo: s.repo, len: safe.length, stripped, presses: post.presses, emptied: post.ok, ok: false })
-    return { ok: false, error: 'input did not land in the session (not submitted)' }
-  }
-  await dockerExec(s.container, ['tmux', 'send-keys', '-t', s.tmux, 'Enter'])
-  return { ok: true, stripped, cleared }
+    typeText: (text) => dockerExec(s.container, ['tmux', 'send-keys', '-t', s.tmux, '-l', text]),
+    pressKey: (key) => dockerExec(s.container, ['tmux', 'send-keys', '-t', s.tmux, key]),
+  })
+  if (!d.ok && d.stage !== 'type') auditDeliverFail(s, payload, d)
+  return d
 }
 
-// Read the typed text back off the pane before submitting — the pane lags the
-// keystrokes, so look more than once. Mirrors the box-local executor.
-async function typedTextLanded(s, payload) {
-  for (let i = 0; i < TUI_VERIFY_TRIES; i++) {
-    if (i) await sleep(TUI_VERIFY_SETTLE_MS)
-    if (deliveryLanded(await captureTail(s, TAIL_LINES, true), payload)) return true
-  }
-  return false
+// One audit line per refused delivery, named by the stage that refused it; the
+// payload as a fingerprint, never its content. Mirrors agent-local.mjs.
+function auditDeliverFail(s, payload, d) {
+  const action = { 'box-stuck': 'deliver-box-stuck', mangled: 'deliver-mangled', unsubmitted: 'deliver-unsubmitted' }[d.stage]
+  const { len, lines, nonAscii } = payloadFingerprint(payload)
+  audit({ action, id: s.id, repo: s.repo, len, lines, nonAscii, stripped: d.stripped, presses: d.presses, ...(d.residue !== undefined ? { residue: d.residue } : {}), ...(d.emptied !== undefined ? { emptied: d.emptied } : {}), ...(d.boxSeen === false ? { boxSeen: false } : {}), ok: false })
 }
 
 // Remember that an Atlas orchestrator — not the operator — injected this prompt.
@@ -1520,7 +1497,13 @@ async function prompt({ id, text, images, force, steeredBy }) {
     if (menuKindOf(pane) === 'choice') return { status: 409, ok: false, error: 'menu', menuKind: 'choice' }
   }
   const d = await deliver(p.s, p.payload)
-  if (!d.ok) return { status: 502, ok: false, error: d.error }
+  // 502 here is a CONTRACT, not "the server is down": deliver() either typed
+  // AND submitted, or it submitted NOTHING and cleared the box (typeAndSubmit
+  // in tui-input.mjs). `notDelivered` says exactly that, machine-readably — it
+  // is what lets the client retry this 502 once and only this one: a
+  // *transport* 502 ("bridge unreachable") carries no such proof, and retrying
+  // that could double-send.
+  if (!d.ok) return { status: 502, ok: false, error: d.error, notDelivered: true }
   if (recordSteer(p.s, p.text, steeredBy)) persist()
   audit({ action: 'prompt', id, repo: p.s.repo, len: p.payload.length, images: p.paths.length, ...(steeredBy ? { steeredBy } : {}), ok: true })
   return { status: 200, ok: true }
@@ -1536,7 +1519,7 @@ async function interrupt({ id, text, images, steeredBy }) {
   await dockerExec(p.s.container, ['tmux', 'send-keys', '-t', p.s.tmux, 'Escape'])
   await sleep(INTERRUPT_SETTLE_MS)
   const d = await deliver(p.s, p.payload)
-  if (!d.ok) return { status: 502, ok: false, error: d.error }
+  if (!d.ok) return { status: 502, ok: false, error: d.error, notDelivered: true }
   if (recordSteer(p.s, p.text, steeredBy)) persist()
   audit({ action: 'interrupt', id, repo: p.s.repo, len: p.payload.length, images: p.paths.length, ...(steeredBy ? { steeredBy } : {}), ok: true })
   return { status: 200, ok: true }

@@ -59,7 +59,7 @@ import { capacityVerdict, readMemStatus } from './agent-capacity.mjs'
 // the spinner line above the input box — because the footer is rendered to the
 // pane width and drops that marker mid-turn. Shared, not copied.
 import { isBusy } from './pane-busy.mjs'
-import { sanitizeForTyping, deliveryLanded, clearInputBox, TUI_CLEAR_KEY, TUI_VERIFY, TUI_VERIFY_MAX_CHARS, TUI_VERIFY_SETTLE_MS, TUI_VERIFY_TRIES } from './tui-input.mjs'
+import { typeAndSubmit, payloadFingerprint } from './tui-input.mjs'
 // A launch prompt travels by FILE, never inside the tmux command — the shell
 // shape is shared with the bridge executor so the two cannot drift.
 import { promptFileBody, promptFileCommand } from './prompt-file-launch.mjs'
@@ -2624,48 +2624,22 @@ async function prepare(id, text, images) {
 // the queue keeps the prompt for the next tick. Never delivered beats silently
 // replaced — and both are loud (audit + the card's error).
 async function deliver(s, payload) {
-  const safe = sanitizeForTyping(payload)
-  const stripped = payload.length - safe.length
-  // ⚠️ NEVER type into a non-empty box. Whatever is in there — our own residue
-  // from a refusal, a half-delivered prompt from a crash — the typed text
-  // concatenates onto it and the next Enter submits the pair. Clearing is
-  // VERIFIED, not counted: `C-u` kills a display ROW, so the count depends on
-  // the wrapped height of content we didn't put there (tui-input.mjs).
-  const io = {
+  const d = await typeAndSubmit(payload, {
     readPane: () => captureTail(s, TAIL_LINES, true),
-    pressClear: () => run(['tmux', 'send-keys', '-t', s.tmux, TUI_CLEAR_KEY]),
-  }
-  let cleared = 0
-  if (TUI_VERIFY) {
-    const pre = await clearInputBox(io)
-    if (!pre.ok) {
-      audit({ action: 'deliver-box-stuck', id: s.id, repo: s.repo, len: safe.length, presses: pre.presses, residue: pre.residue, ok: false })
-      return { ok: false, error: 'input box is not empty and could not be cleared (nothing typed)' }
-    }
-    cleared = pre.presses
-  }
-  const t = await run(['tmux', 'send-keys', '-t', s.tmux, '-l', safe])
-  if (!t.ok) return { ok: false, error: t.stderr.slice(0, 500) || 'send-keys failed' }
-  if (TUI_VERIFY && safe.length <= TUI_VERIFY_MAX_CHARS && !(await typedTextLanded(s, safe))) {
-    const post = await clearInputBox(io)
-    audit({ action: 'deliver-mangled', id: s.id, repo: s.repo, len: safe.length, stripped, presses: post.presses, emptied: post.ok, ok: false })
-    return { ok: false, error: 'input did not land in the session (not submitted)' }
-  }
-  await run(['tmux', 'send-keys', '-t', s.tmux, 'Enter'])
-  return { ok: true, stripped, cleared }
+    typeText: (text) => run(['tmux', 'send-keys', '-t', s.tmux, '-l', text]),
+    pressKey: (key) => run(['tmux', 'send-keys', '-t', s.tmux, key]),
+  })
+  if (!d.ok && d.stage !== 'type') auditDeliverFail(s, payload, d)
+  return d
 }
 
-// Read the typed text back off the pane. The pane lags the keystrokes, so this
-// looks more than once (see TUI_VERIFY_SETTLE_MS) — the happy path still
-// returns on the first look, and only a genuinely mangled buffer pays the wait.
-// The capture keeps its SGR (`-e`): the box's faint placeholder is what tells
-// an empty box from one holding text.
-async function typedTextLanded(s, payload) {
-  for (let i = 0; i < TUI_VERIFY_TRIES; i++) {
-    if (i) await sleep(TUI_VERIFY_SETTLE_MS)
-    if (deliveryLanded(await captureTail(s, TAIL_LINES, true), payload)) return true
-  }
-  return false
+// One audit line per refused delivery, named by the stage that refused it. The
+// payload rides as a FINGERPRINT (length + non-ASCII counts by category), never
+// its content — enough to tell an invisible-mark paste from pane lag later.
+function auditDeliverFail(s, payload, d) {
+  const action = { 'box-stuck': 'deliver-box-stuck', mangled: 'deliver-mangled', unsubmitted: 'deliver-unsubmitted' }[d.stage]
+  const { len, lines, nonAscii } = payloadFingerprint(payload)
+  audit({ action, id: s.id, repo: s.repo, len, lines, nonAscii, stripped: d.stripped, presses: d.presses, ...(d.residue !== undefined ? { residue: d.residue } : {}), ...(d.emptied !== undefined ? { emptied: d.emptied } : {}), ...(d.boxSeen === false ? { boxSeen: false } : {}), ok: false })
 }
 
 // Remember that an Atlas orchestrator — not the operator — injected this prompt.
@@ -2711,7 +2685,13 @@ export async function prompt({ id, text, images, force, steeredBy }) {
     if (menuKindOf(pane) === 'choice') return { status: 409, ok: false, error: 'menu', menuKind: 'choice' }
   }
   const d = await deliver(p.s, p.payload)
-  if (!d.ok) return { status: 502, ok: false, error: d.error }
+  // 502 here is a CONTRACT, not "the server is down": deliver() either typed
+  // AND submitted, or it submitted NOTHING and cleared the box (typeAndSubmit
+  // in tui-input.mjs). `notDelivered` says exactly that, machine-readably — it
+  // is what lets the client retry this 502 once and only this one: a
+  // *transport* 502 ("bridge unreachable") carries no such proof, and retrying
+  // that could double-send.
+  if (!d.ok) return { status: 502, ok: false, error: d.error, notDelivered: true }
   // Attribute the next run to this prompt (phase tracker snapshots it on open).
   p.s.lastPrompt = { text: p.text, at: nowIso() }
   recordSteer(p.s, p.text, steeredBy)
@@ -2730,7 +2710,7 @@ export async function interrupt({ id, text, images, steeredBy }) {
   await run(['tmux', 'send-keys', '-t', p.s.tmux, 'Escape'])
   await sleep(INTERRUPT_SETTLE_MS)
   const d = await deliver(p.s, p.payload)
-  if (!d.ok) return { status: 502, ok: false, error: d.error }
+  if (!d.ok) return { status: 502, ok: false, error: d.error, notDelivered: true }
   // The Escape blip clears the busy marker briefly — hold the run phase so the
   // steer doesn't register as the turn ending; attribute the run to this input.
   p.s.phaseHold = Date.now() + PHASE_HOLD_MS

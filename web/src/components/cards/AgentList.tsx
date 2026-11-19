@@ -9,6 +9,7 @@ import {
   spawnAgent,
   promptAgent,
   interruptAgent,
+  sendErrorText,
   queueAgent,
   unqueueAgent,
   shipAgent,
@@ -1462,7 +1463,7 @@ export function AgentRow({
       setMenuWarn(true)
       if (!expanded) setExpanded(true)
     } else {
-      setSendErr(r.error || `${mode} failed`)
+      setSendErr(sendErrorText(r, mode))
     }
   }
 
@@ -1523,7 +1524,7 @@ export function AgentRow({
       if (!expanded) setExpanded(true)
       onChanged()
     } else {
-      setSendErr(r.error || 'send failed')
+      setSendErr(sendErrorText(r))
     }
   }
 

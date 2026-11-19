@@ -1301,6 +1301,19 @@ export interface AgentActionResult {
   error?: string
   /** Spawn only: the id of the session just created (e.g. to focus its chat). */
   id?: string
+  /** HTTP status of a failed call, when there was a response. */
+  status?: number
+  /** A prompt/interrupt 502 that PROVES nothing was submitted: the executor
+   * typed, could not confirm the text landed or was submitted, and cleared the
+   * input box. See `promptAgent` — this is what makes its one retry safe. */
+  notDelivered?: boolean
+  /** The call never got a JSON answer from OUR API: fetch threw, or an edge or
+   * proxy answered instead (an HTML 502/524 from a Cloudflare tunnel, a login
+   * page, a reverse proxy's empty upstream-down 502). Whether the prompt landed
+   * is unknown. */
+  unreachable?: boolean
+  /** Cloudflare's ray id for an `unreachable` answer, when the edge sent one. */
+  cfRay?: string
 }
 
 /** Bundled view of the workstation's agent sessions (GET /api/agents). */
@@ -1426,18 +1439,75 @@ export async function fetchAgentHistory(
 }
 
 async function agentPost(action: string, body: unknown): Promise<AgentActionResult> {
+  const t0 = Date.now()
+  const len = typeof (body as { text?: unknown })?.text === 'string' ? (body as { text: string }).text.length : undefined
+  let res: Response
   try {
-    const res = await fetch(`${API_BASE}/agents/${action}`, {
+    res = await fetch(`${API_BASE}/agents/${action}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
     })
-    const data = (await res.json().catch(() => ({}))) as AgentActionResult
-    if (!res.ok) return { ok: false, error: data.error || `HTTP ${res.status}` }
-    return data
   } catch (e) {
-    return { ok: false, error: String(e) }
+    reportSendFailure({ op: action, kind: 'network', ms: Date.now() - t0, len })
+    return { ok: false, unreachable: true, error: String(e) }
   }
+  const data = (await res.json().catch(() => null)) as AgentActionResult | null
+  // Our API answers every request with JSON — including its own 502s, which
+  // carry the `notDelivered` proof. No JSON means something IN FRONT of it
+  // answered, and that is the 502 nobody could see server-side.
+  if (!data || typeof data !== 'object') {
+    const cfRay = res.headers.get('cf-ray') || undefined
+    reportSendFailure({ op: action, kind: 'non-json', status: res.status, cfRay, ms: Date.now() - t0, len })
+    return { ok: false, unreachable: true, status: res.status, cfRay, error: `HTTP ${res.status}` }
+  }
+  flushSendFailures()
+  // Keep the failure body (its `notDelivered` proof) and the status — callers
+  // decide on those, not on the prose alone.
+  if (!res.ok) return { ...data, ok: false, error: data.error || `HTTP ${res.status}`, status: res.status }
+  return data
+}
+
+/* Edge-side send failures, reported to the API's audit.log
+ * (`action: client-send-fail`) so "502, then it works again" becomes countable
+ * and attributable — edge vs delivery — instead of invisible. Only the three
+ * sends are reported, and only their shape (op, status, Cloudflare ray, timing,
+ * text LENGTH — never the text). If the edge is down the report fails too, so
+ * it waits here and goes out with the next answer that proves the API is
+ * reachable again. */
+const SEND_OPS = new Set(['prompt', 'interrupt', 'queue'])
+let pendingSendFailures: Record<string, unknown>[] = []
+function reportSendFailure(r: { op: string; kind: 'network' | 'non-json'; status?: number; cfRay?: string; ms: number; len?: number }) {
+  if (!SEND_OPS.has(r.op)) return
+  pendingSendFailures = [...pendingSendFailures, { ...r, at: new Date().toISOString() }].slice(-20)
+}
+function flushSendFailures() {
+  if (!pendingSendFailures.length) return
+  const reports = pendingSendFailures
+  pendingSendFailures = []
+  fetch(`${API_BASE}/agents/client-send-fail`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ reports }),
+  })
+    .then((r) => { if (!r.ok) throw new Error(String(r.status)) })
+    .catch(() => { pendingSendFailures = [...reports, ...pendingSendFailures].slice(-20) })
+}
+
+/** The operator-facing line for a failed send — one wording per failure CLASS,
+ * because "HTTP 502" alone named three different things: (a) the session did
+ * not take the text (`notDelivered`: nothing was sent, a resend is safe),
+ * (b) the dashboard could not be reached at all (`unreachable`: it may or may
+ * not have landed), (c) a choice menu holds the session. The compose box keeps
+ * the text in every case — callers clear it only on success. */
+export function sendErrorText(r: AgentActionResult, what = 'send'): string {
+  if (r.error === 'menu') return 'A choice menu is open in the session — answer it, or dismiss it (Esc) and send again.'
+  if (r.notDelivered) return 'Message not delivered — the session did not take it, nothing was sent. Your text is still here: press send again.'
+  if (r.unreachable) {
+    const via = r.status ? ` (HTTP ${r.status} from the edge${r.cfRay ? `, ray ${r.cfRay}` : ''})` : ' (network error)'
+    return `Dashboard not reachable${via} — the message may not have arrived. Your text is still here; check the chat, then resend.`
+  }
+  return r.error || `${what} failed`
 }
 
 /** Spawn a new agent on a fresh `agent/<task>` worktree branch in `repo` —
@@ -1473,12 +1543,36 @@ export interface AgentAttachment {
  * backend refuses (409 `error: 'menu'`) if a choice menu is pending, so a typed
  * prompt can't silently accept a preselected option; `force` bypasses that guard
  * and is set by the card only after it has dismissed the menu (Esc) itself. */
-export function promptAgent(body: {
+/** How long to wait before the one automatic re-send below — long enough for a
+ * repainting pane to settle (the executor's own read-back already waits ~1.5 s
+ * on a backoff; misses measured in the field landed on a manual retry seconds
+ * later). */
+const PROMPT_RETRY_DELAY_MS = 1500
+
+/** Send a prompt to a running session, optionally with file attachments. The
+ * backend refuses (409 `error: 'menu'`) if a choice menu is pending, so a typed
+ * prompt can't silently accept a preselected option; `force` bypasses that guard
+ * and is set by the card only after it has dismissed the menu (Esc) itself.
+ *
+ * ⚠️ Retries ONCE, and only on a 502 that carries `notDelivered` — the
+ * executor's proof that NOTHING was submitted and the input box was cleared
+ * (api/src/tui-input.mjs `typeAndSubmit`). A duplicate send is impossible
+ * against that proof, which is the whole reason this is safe to do silently.
+ *
+ * Never retried: a 409 (a pending menu), an auth/4xx, a network error, and any
+ * 502 WITHOUT the proof — "bridge unreachable" or an edge's HTML 502 are
+ * transport failures where the prompt may well have landed, so re-sending could
+ * double-send. An un-restarted bridge omits the flag and simply doesn't get the
+ * retry. */
+export async function promptAgent(body: {
   id: string
   text: string
   images?: AgentAttachment[]
   force?: boolean
 }): Promise<AgentActionResult> {
+  const first = await agentPost('prompt', body)
+  if (first.ok || first.status !== 502 || !first.notDelivered) return first
+  await new Promise((r) => setTimeout(r, PROMPT_RETRY_DELAY_MS))
   return agentPost('prompt', body)
 }
 /** Interrupt a running session (Esc) and immediately send added context — the

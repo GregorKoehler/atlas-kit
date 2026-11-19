@@ -83,15 +83,23 @@ const BOX_SCROLLED_MIN_ROWS = 5
 // pane back with captureTail(TAIL_LINES = 32) — 32 rows of an 80-column grid,
 // so ~2.5 KB of text at most, and a longer prompt's HEAD has scrolled out of
 // that window before we could look for it. Verifying those would reject real
-// deliveries (an orchestrator brief runs 2-5 KB), so they are typed exactly as
-// they always were. Sanitising, which is the actual fix, applies at every size.
+// deliveries (an orchestrator brief runs 2-5 KB), so for those the read-back
+// only asks that SOMETHING arrived in the box (typeAndSubmit). Sanitising and the
+// post-Enter submit check apply at every size.
 export const TUI_VERIFY_MAX_CHARS = 1500
 // The pane LAGS the keystrokes, so one look is not enough: measured on a live
 // pane, an immediate capture saw the typed text in 2 of 8 deliveries and a
-// capture 100 ms later in 8 of 8. Callers look up to TUI_VERIFY_TRIES times,
-// sleeping this long between — the happy path still exits on the first look.
+// capture 100 ms later in 8 of 8. clearInputBox settles this long between a
+// press and the next look.
 export const TUI_VERIFY_SETTLE_MS = 150
-export const TUI_VERIFY_TRIES = 3
+// …and the read-backs (typed text landed? Enter submitted?) look again on a
+// BACKOFF, ~1.5 s in all. It used to be 3 looks × 150 ms, and a busy or
+// repainting pane outlasts that: in the field, `deliver-mangled` lines in the
+// audit log were mostly SINGLE misses whose identical payload landed on a
+// manual retry seconds later — pane lag, not a mangled buffer. A healthy pane
+// still answers on the first or second look (measured 60-190 ms), so only a
+// genuinely slow one pays the longer wait.
+export const TUI_VERIFY_BACKOFF_MS = [100, 150, 250, 400, 600]
 // The key that empties the box, and the bound on how many times we press it.
 // Ctrl-U (kill to line start) rather than Ctrl-C for a safety reason, not an
 // ergonomic one: Ctrl-C on an ALREADY-EMPTY box arms Claude Code's exit confirm
@@ -117,6 +125,41 @@ const DCS = new RegExp(`\\x1b[P^_][\\s\\S]{0,${OSC_MAX_CHARS}}?\\x1b\\\\`, 'g')
 const CSI = /\x1b\[[0-9;:<=>?]{0,32}[ -/]{0,8}[@-~]/g
 const C0 = /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g
 
+/* ── Invisible Unicode ──────────────────────────────────────────────────────
+ * One chat refused every send with 502 for 15 minutes, and before that LOST a
+ * 2883-char paste four times while the audit log said `ok: true`. The text had
+ * been pasted out of a web admin console that wraps values in U+200E
+ * LEFT-TO-RIGHT MARK (50 in one paste). Measured against Claude Code 2.1.287 in
+ * a throwaway pane:
+ * on Enter, Claude Code REMOVES invisible characters itself and shows
+ * "Removed N invisible characters · review and press Enter to send" — so that
+ * Enter submits NOTHING. A short payload failed our read-back first (the box
+ * renders the marks as nothing, the payload still held them → 502); a long one
+ * skipped the read-back, so its Enter was eaten and nobody noticed.
+ *
+ * So strip them BEFORE typing. The set is what that pane held a send on, one
+ * class at a time — it is \p{Default_Ignorable_Code_Point} (bidi marks and
+ * embeddings/isolates, ZWSP/ZWNJ/ZWJ, word joiner and the invisible operators,
+ * BOM, soft hyphen, CGJ, variation selectors, tag characters, Hangul fillers,
+ * Mongolian FVS/MVS, the Khmer inherent vowels, the invisible musical symbols)
+ * plus the interlinear annotation marks U+FFF9-FFFB — with the three emoji
+ * exceptions Claude Code itself keeps, because they are not invisible there:
+ * a ZWJ joining two pictographs (👨‍👩‍👧), U+FE0E/FE0F after a pictograph (❤️)
+ * or inside a keycap (1️⃣), and the tag run of a subdivision flag (🏴󠁧󠁢󠁥󠁮󠁧󠁿).
+ * A dangling ZWJ after an emoji is still held by Claude Code, so it goes.
+ * U+2028/2029 held the send WITHOUT the banner; they become the newline they
+ * mean. Not held, normalised anyway (spec): non-ASCII spaces (NBSP, narrow
+ * NBSP…) become a space, NFD (macOS) becomes NFC, and a Private Use glyph — a
+ * Word/Wingdings bullet (U+F0A7) or an icon-font glyph (U+E70F) that renders
+ * as tofu — becomes `•` at a line start, where it was a bullet, and is dropped
+ * elsewhere, where it was an icon.
+ */
+const INVISIBLE = /(?<=[\p{Extended_Pictographic}\p{Emoji_Modifier}\uFE0F])\u200D(?=\p{Extended_Pictographic})|(?<=\p{Extended_Pictographic})[\uFE0E\uFE0F]|(?<=[#*0-9])\uFE0F(?=\u20E3)|(?<=\u{1F3F4}[\u{E0020}-\u{E007E}]*)[\u{E0020}-\u{E007F}]|([\p{Default_Ignorable_Code_Point}\uFFF9-\uFFFB])/gu
+const LINE_SEP = /[\u2028\u2029]/g
+const ODD_SPACE = /(?! )\p{Zs}/gu
+const PUA_BULLET = /(^|\n)([ \t]*)\p{Co}/gu
+const PUA = /\p{Co}/gu
+
 /**
  * The bytes it is safe to type at a TUI, for the text a caller wants delivered.
  * Pure. Returns the payload unchanged when there is nothing to strip, so an
@@ -131,11 +174,21 @@ export function sanitizeForTyping(text) {
     .replace(DCS, '')
     .replace(CSI, '')
     .replace(C0, '')
+    .normalize('NFC')
+    .replace(LINE_SEP, '\n')
+    .replace(INVISIBLE, (m, drop) => (drop ? '' : m))
+    .replace(ODD_SPACE, ' ')
+    .replace(PUA_BULLET, '$1$2•')
+    .replace(PUA, '')
 }
 
 const SGR = /\x1b\[[0-9;:]*m/g
 const stripSgr = (s) => String(s).replace(SGR, '')
-const nows = (s) => String(s).replace(/\s+/g, '')
+// The comparison form of a payload or of the box: whitespace dropped (the box is
+// a wrapped 80-column grid), NFC, and every invisible/PUA code point dropped —
+// on BOTH sides, so one that survives sanitising (or a box that renders a mark
+// as nothing) can never be the difference between "landed" and "mangled".
+const nows = (s) => String(s).normalize('NFC').replace(/[\p{Default_Ignorable_Code_Point}\uFFF9-\uFFFB\p{Co}]/gu, '').replace(/\s+/g, '')
 
 /**
  * The box's visible text, with Claude Code's FAINT placeholder removed.
@@ -265,6 +318,108 @@ export async function clearInputBox({ readPane, pressClear, settle = defaultSett
   }
 }
 
-const defaultSettle = () => new Promise((r) => setTimeout(r, TUI_VERIFY_SETTLE_MS))
+const sleepMs = (ms) => new Promise((r) => setTimeout(r, ms))
+const defaultSettle = () => sleepMs(TUI_VERIFY_SETTLE_MS)
+
+// Look at the pane until `ok(pane)` holds, on the TUI_VERIFY_BACKOFF_MS
+// schedule. The happy path returns on the first look, without sleeping.
+async function settled(readPane, ok, sleep) {
+  for (let i = 0; ; i++) {
+    if (ok(await readPane())) return true
+    if (i >= TUI_VERIFY_BACKOFF_MS.length) return false
+    await sleep(TUI_VERIFY_BACKOFF_MS[i])
+  }
+}
+
+/**
+ * Type `payload` at the agent and submit it — the one delivery both executors
+ * run (agent-local.mjs and agent-bridge/server.mjs differ only in HOW they
+ * reach tmux, which is the injected IO):
+ *   readPane()      → the box-bearing tail of the pane, SGR kept (`-e`)
+ *   typeText(text)  → `send-keys -l text`, resolving { ok, stderr }
+ *   pressKey(key)   → `send-keys key`
+ *
+ * Sanitise → verified-empty box → type → read back (the whole text up to
+ * TUI_VERIFY_MAX_CHARS, "something arrived" past it) → Enter → verify it
+ * SUBMITTED. Returns { ok: true, stripped, cleared }, or
+ * { ok: false, stage, error, … } where every stage but 'type' has left the box
+ * EMPTY and submitted nothing — which is what the callers' `notDelivered` 502
+ * promises the client, and what makes its one automatic retry safe.
+ *
+ * The submit check is new, and it is the silent-loss fix: the pre-Enter
+ * read-back only runs on payloads that fit the capture, so a long paste whose
+ * Enter was eaten (Claude Code's invisible-character guard — see INVISIBLE
+ * above) was logged `ok: true` with the text still sitting in the box, and the next send's pre-clear quietly threw it away
+ * (`cleared: 1`). Submitting empties the box at once — 60-190 ms on a live
+ * pane, a busy agent included (the message queues) — so a box that still holds
+ * text after the backoff was NOT submitted, at any length. Fails open like the
+ * rest of the gate: no box on the capture, or a box showing chrome Ctrl-U
+ * cannot move (the pre-clear's `fixpoint`), and the check cannot read anything,
+ * so the Enter is trusted as before.
+ */
+export async function typeAndSubmit(payload, { readPane, typeText, pressKey, sleep = sleepMs }) {
+  const safe = sanitizeForTyping(payload)
+  const stripped = payload.length - safe.length
+  // ⚠️ NEVER type into a non-empty box. Whatever is in there — our own residue
+  // from a refusal, a half-delivered prompt from a crash — the typed text
+  // concatenates onto it and the next Enter submits the pair. Clearing is
+  // VERIFIED, not counted (clearInputBox).
+  const io = { readPane, pressClear: () => pressKey(TUI_CLEAR_KEY), settle: () => sleep(TUI_VERIFY_SETTLE_MS) }
+  let cleared = 0, readable = true
+  if (TUI_VERIFY) {
+    const pre = await clearInputBox(io)
+    if (!pre.ok) return { ok: false, stage: 'box-stuck', stripped, presses: pre.presses, residue: pre.residue, error: 'input box is not empty and could not be cleared (nothing typed)' }
+    cleared = pre.presses
+    readable = pre.seen && !pre.fixpoint
+  }
+  const t = await typeText(safe)
+  if (!t.ok) return { ok: false, stage: 'type', stripped, error: String(t.stderr || '').slice(0, 500) || 'send-keys failed' }
+  // A payload past the read-back cap cannot be compared (its head scrolls out
+  // of the capture), but it must at least SHOW UP before Enter: the box was just
+  // verified empty, so a look that beats the pane's repaint sees that same empty
+  // box — and would then read as "submitted" after the Enter. Measured: a
+  // 2.6 KB paste, Enter, and the first post-Enter look at 32 ms was still the
+  // pre-typing frame. No box on the capture (null) passes, as everywhere here.
+  const landed = safe.length <= TUI_VERIFY_MAX_CHARS ? (p) => deliveryLanded(p, safe) : (p) => inputBoxText(p) !== ''
+  // Both refusals SETTLE once before clearing. The clear's first look is
+  // immediate, and text that arrives late (the read-back gave up on a lagging
+  // pane) then reads as an empty box: `presses: 0`, and the NEXT send's
+  // pre-clear finds the residue — the single misses seen in the field have
+  // exactly that shape (`presses: 0`, then `cleared: 1-11` on the retry).
+  if (TUI_VERIFY && !(await settled(readPane, landed, sleep))) {
+    await sleep(TUI_VERIFY_SETTLE_MS)
+    const post = await clearInputBox(io)
+    // `boxSeen: false` = no input box on screen at all — a dialog owns the pane
+    // (e.g. a session parked in `/login`).
+    return { ok: false, stage: 'mangled', stripped, presses: post.presses, emptied: post.ok, boxSeen: post.seen, error: 'input did not land in the session (not submitted)' }
+  }
+  await pressKey('Enter')
+  if (TUI_VERIFY && readable && !(await settled(readPane, (p) => !inputBoxText(p), sleep))) {
+    const residue = (inputBoxText(await readPane()) || '').length
+    await sleep(TUI_VERIFY_SETTLE_MS)
+    const post = await clearInputBox(io)
+    return { ok: false, stage: 'unsubmitted', stripped, residue, presses: post.presses, emptied: post.ok, error: 'the session did not accept the message (Enter did not submit it; nothing was sent)' }
+  }
+  return { ok: true, stripped, cleared }
+}
+
+// What a failed payload LOOKED like, without its content: length, lines, and
+// how many non-ASCII code points of each Unicode general category it carried.
+// Two refusal bursts of the same length are undiagnosable when only `len` is
+// recorded; this is enough to tell an invisible-mark paste (Cf), a PUA glyph
+// (Co) or odd spaces (Zs) from plain accented prose (Ll) without ever writing
+// the operator's words to a log.
+const CATEGORIES = ['Lu', 'Ll', 'Lt', 'Lm', 'Lo', 'Mn', 'Mc', 'Me', 'Nd', 'Nl', 'No', 'Pc', 'Pd', 'Ps', 'Pe', 'Pi', 'Pf', 'Po', 'Sm', 'Sc', 'Sk', 'So', 'Zs', 'Zl', 'Zp', 'Cc', 'Cf', 'Cs', 'Co', 'Cn']
+  .map((gc) => [gc, new RegExp(`^\\p{gc=${gc}}$`, 'u')])
+export function payloadFingerprint(text) {
+  const s = typeof text === 'string' ? text : ''
+  const nonAscii = {}
+  for (const ch of s) {
+    if (ch.codePointAt(0) < 0x80) continue
+    const gc = (CATEGORIES.find(([, re]) => re.test(ch)) || ['?'])[0]
+    nonAscii[gc] = (nonAscii[gc] || 0) + 1
+  }
+  return { len: s.length, lines: s ? s.split('\n').length : 0, nonAscii }
+}
 
 export const TUI_INPUT_HEAD_CHARS = HEAD_CHARS

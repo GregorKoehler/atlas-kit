@@ -1355,6 +1355,34 @@ export const withHeader = (sender, text) => `${messageHeader(sender)}\n\n${text}
  *    can't ping-pong forever. Exhaustion is a 429 the sending agent reads.
  * ------------------------------------------------------------------ */
 
+/* A send the BROWSER saw fail without ever getting a JSON answer from this API
+ * — fetch threw, or a 502/524 came back as Cloudflare's HTML page or Caddy's
+ * empty upstream-down body. None of those reach audit.log on their own — a
+ * "502, then it works again" in the browser leaves no trace here — so the
+ * client reports them here once it can. Whitelisted, bounded fields only —
+ * never the text: which op, what came back (status, a Cloudflare ray id when
+ * there is one), how long it took. */
+const CLIENT_SEND_OPS = new Set(['prompt', 'interrupt', 'queue'])
+export function clientSendFailEntry(b) {
+  const o = b && typeof b === 'object' ? b : {}
+  const int = (v, max) => (Number.isInteger(v) && v >= 0 && v <= max ? v : undefined)
+  const str = (v, re) => (typeof v === 'string' && re.test(v) ? v : undefined)
+  if (!CLIENT_SEND_OPS.has(o.op)) return null
+  const e = {
+    action: 'client-send-fail',
+    op: o.op,
+    kind: o.kind === 'network' ? 'network' : 'non-json',
+    status: int(o.status, 599),
+    cfRay: str(o.cfRay, /^[0-9a-f]{8,32}(-[A-Z]{3})?$/i),
+    ms: int(o.ms, 3600000),
+    len: int(o.len, 10_000_000),
+    sentAt: str(o.at, /^\d{4}-\d\d-\d\dT[\d:.]+Z$/),
+    ok: false,
+  }
+  for (const k of Object.keys(e)) if (e[k] === undefined) delete e[k]
+  return e
+}
+
 // Is `from` allowed to message `to`? Pure (parent lookup injected) so the
 // bounding rule is testable without a registry. Returns { ok } or { ok:false, error }.
 export function messageAllowed(from, to, parentOf) {
@@ -2253,6 +2281,16 @@ export function agentRouter(bearerAuth) {
     if (local.hasSession(body.id)) return sendLocal(res, armIfSent(body, await local.prompt(body)))
     const r = armIfSent(body, await callBridgeForId('POST', '/prompt', body, body.id, BRIDGE_EXEC_TIMEOUT_MS))
     res.status(r.status).json(r.body)
+  })
+
+  router.post('/api/agents/client-send-fail', bearerAuth, (req, res) => {
+    const reports = Array.isArray(req.body?.reports) ? req.body.reports.slice(0, 20) : [req.body]
+    let n = 0
+    for (const r of reports) {
+      const e = clientSendFailEntry(r)
+      if (e) { local.audit(e); n++ }
+    }
+    res.json({ ok: true, recorded: n })
   })
 
   // Interrupt the in-flight turn and steer with the given context (Esc, then send;
