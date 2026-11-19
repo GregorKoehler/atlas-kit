@@ -382,7 +382,7 @@ Keep replies short — durable knowledge belongs in Atlas pages, not in the tran
 const EXTENDED_CONTEXT = !/^(0|false|no|off)$/i.test(process.env.AGENT_EXTENDED_CONTEXT || '')
 const CTX = EXTENDED_CONTEXT ? '[1m]' : ''
 const AGENT_MODELS = {
-  fable: `claude-fable-5${CTX}`,
+  fable: `claude-fable-5-2${CTX}`,
   opus: `claude-opus-5${CTX}`,
   sonnet: `claude-sonnet-5${CTX}`,
 }

@@ -69,13 +69,13 @@ test('MCP spawn_agent (knowledge) sends no model/effort — it inherits the rout
 
 test('explicit picks still override in every path', () => {
   assert.equal(spawnPicks({ model: 'sonnet', kind: 'knowledge' }).modelId, `claude-sonnet-5${CTX}`)
-  assert.equal(spawnPicks({ model: 'fable', kind: 'knowledge' }).modelId, `claude-fable-5${CTX}`)
-  assert.equal(spawnPicks({ model: 'fable' }).modelId, `claude-fable-5${CTX}`)
+  assert.equal(spawnPicks({ model: 'fable', kind: 'knowledge' }).modelId, `claude-fable-5-2${CTX}`)
+  assert.equal(spawnPicks({ model: 'fable' }).modelId, `claude-fable-5-2${CTX}`)
   assert.equal(spawnPicks({ effort: 'max', kind: 'knowledge' }).effortLevel, 'max')
   // …and through the MCP tool, for a dev agent and a knowledge agent alike.
   assert.equal(spawnPicks(spawnBody({ task: 't', repo: 'demo-repo', model: 'sonnet', effort: 'max' })).modelId, `claude-sonnet-5${CTX}`)
   assert.equal(spawnPicks(spawnBody({ task: 't', repo: 'demo-repo', model: 'sonnet', effort: 'max' })).effortLevel, 'max')
-  assert.equal(spawnPicks(spawnBody({ task: 't', kind: 'knowledge', model: 'fable' })).modelId, `claude-fable-5${CTX}`)
+  assert.equal(spawnPicks(spawnBody({ task: 't', kind: 'knowledge', model: 'fable' })).modelId, `claude-fable-5-2${CTX}`)
 })
 
 test('the spawn lineage parent is stamped only when the orchestrator env is set', () => {
@@ -91,7 +91,7 @@ test('AGENT_EXTENDED_CONTEXT=0 is the [1m] kill-switch — on every model', asyn
   const off = await import('../src/agent-routes.mjs?extended-context=off')
   assert.equal(off.spawnPicks({ kind: 'knowledge' }).modelId, 'claude-opus-5')
   assert.equal(off.spawnPicks({}).modelId, 'claude-sonnet-5')
-  assert.equal(off.spawnPicks({ model: 'fable' }).modelId, 'claude-fable-5')
+  assert.equal(off.spawnPicks({ model: 'fable' }).modelId, 'claude-fable-5-2')
   if (prev === undefined) delete process.env.AGENT_EXTENDED_CONTEXT
   else process.env.AGENT_EXTENDED_CONTEXT = prev
 })
