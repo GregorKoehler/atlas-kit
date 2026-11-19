@@ -11,6 +11,11 @@
  * https src the page cannot read; emoji <img>s stay text), when a paste is
  * taken over at all, numbering across pastes and 📎 files, the unreadable
  * marker, and that the composer's marker is exactly what the executors fold.
+ * And planTransfer — the one decision behind paste, a drop on the field, a
+ * drop beside it and the 📎 picker: images on the field get markers, other
+ * files chips, a plain-text paste stays native, and a file over the per-file
+ * limit, an empty one or one past the 20-file cap is refused with a visible
+ * line, never silently.
  *
  * Run: node --test web/src/lib/pasteImages.test.mjs
  * ------------------------------------------------------------------ */
@@ -24,6 +29,8 @@ import {
   overCapMarker,
   pastedFileName,
   pasteWarnings,
+  planTransfer,
+  overCapNote,
 } from './pasteImages.ts'
 import { withImages } from '../../../api/src/agent-attachments.mjs'
 
@@ -138,4 +145,75 @@ test('the composer and the executors speak one contract: marker + file name → 
   // Unreadable / over-cap markers are not `[Image N]`, so the executor never
   // places a file there — they stay as typed.
   assert.equal(withImages(unreadableMarker(1, 'https://x'), []), unreadableMarker(1, 'https://x'))
+})
+
+// ── planTransfer: paste / drop on the field / drop beside it / 📎 ──────────
+const MB = 1024 * 1024
+const OPTS = { firstN: 1, room: 20, max: 20, maxBytes: 8 * MB }
+const png = (name = 'shot.png', size = 1000) => ({ name, type: 'image/png', size })
+const pdf = (name = 'spec.pdf', size = 2000) => ({ name, type: 'application/pdf', size })
+const xfer = (files, html = '', plain = '') => ({ html, plain, files })
+
+test('transfer: files dropped on the field → a marker per image at the caret, other files as chips', () => {
+  const p = planTransfer(xfer([png('a.png'), pdf(), png('b.png')]), { ...OPTS, drop: true, at: 'field', firstN: 3 })
+  assert.deepEqual(p, {
+    insert: '[Image 3]\n[Image 4]',
+    marked: [{ n: 3, src: 0 }, { n: 4, src: 2 }],
+    chips: [1],
+    refused: [],
+  })
+})
+
+test('transfer: a drop is always taken over — the drag text is a name/URL, not typed text', () => {
+  // A drag of an image file carries its name as text/plain; a paste with text
+  // and an image file is an office app's rendering of the selection and stays native.
+  assert.deepEqual(planTransfer(xfer([png()], '', 'shot.png'), { ...OPTS, drop: true, at: 'field' }).insert, '[Image 1]')
+  assert.equal(planTransfer(xfer([png()], '', 'some words'), { ...OPTS, drop: false, at: 'field' }), null)
+  assert.equal(planTransfer(xfer([], '', 'just text'), { ...OPTS, drop: false, at: 'field' }), null)
+  // A drop of non-image files only: chips, no text.
+  assert.deepEqual(planTransfer(xfer([pdf()], '', 'spec.pdf'), { ...OPTS, drop: true, at: 'field' }), { insert: '', marked: [], chips: [0], refused: [] })
+})
+
+test('transfer: an image dragged out of a web page — html + its file, one to one', () => {
+  const html = '<img src="https://example.com/x.png">'
+  assert.deepEqual(planTransfer(xfer([png()], html), { ...OPTS, drop: true, at: 'field' }).marked, [{ n: 1, src: 0 }])
+  // No matching file: the <img> source is read instead.
+  assert.deepEqual(planTransfer(xfer([], html), { ...OPTS, drop: false, at: 'field' }).marked, [{ n: 1, src: 'https://example.com/x.png' }])
+})
+
+test('transfer: beside the field (a pane drop, 📎) everything is a chip, images included', () => {
+  assert.deepEqual(planTransfer(xfer([png(), pdf()], '<img src="x">'), { ...OPTS, drop: true, at: 'beside' }), {
+    insert: '',
+    marked: [],
+    chips: [0, 1],
+    refused: [],
+  })
+})
+
+test('transfer: over the per-file limit, empty or a folder → refused with a line, the rest still attached', () => {
+  const p = planTransfer(xfer([pdf('huge.mov', 8 * MB + 1), pdf('ok.pdf'), png('big.png', 9 * MB), pdf('folder', 0)]), { ...OPTS, drop: true, at: 'field' })
+  assert.deepEqual(p.chips, [1])
+  assert.deepEqual(p.marked, [], 'an oversize image gets no marker at all')
+  assert.deepEqual(p.refused, ['2 files not attached — larger than 8 MB', 'folder not attached — empty, or a folder'])
+  assert.deepEqual(planTransfer(xfer([pdf('huge.mov', 9 * MB)]), { ...OPTS, drop: true, at: 'beside' }).refused, ['huge.mov not attached — larger than 8 MB'])
+  // A lone oversize screenshot PASTED is refused out loud, not left native.
+  assert.deepEqual(planTransfer(xfer([png('big.png', 9 * MB)]), { ...OPTS, drop: false, at: 'field' }), {
+    insert: '',
+    marked: [],
+    chips: [],
+    refused: ['big.png not attached — larger than 8 MB'],
+  })
+  // Exactly the limit is fine (the executors refuse only > max).
+  assert.deepEqual(planTransfer(xfer([pdf('edge', 8 * MB)]), { ...OPTS, drop: true, at: 'beside' }).chips, [0])
+})
+
+test('transfer: the 20-file cap — markers claim room first, the overflow is visible', () => {
+  const p = planTransfer(xfer([png('a.png'), png('b.png'), pdf('c.pdf'), pdf('d.pdf')]), { ...OPTS, drop: true, at: 'field', room: 1 })
+  assert.deepEqual(p.marked, [{ n: 1, src: 0 }, { n: 2, src: 1, over: true }])
+  assert.deepEqual(p.chips, [])
+  assert.deepEqual(p.refused, ['2 files not attached — file limit reached (max 20)'])
+  const q = planTransfer(xfer([pdf('a'), pdf('b'), pdf('c')]), { ...OPTS, drop: true, at: 'beside', room: 2 })
+  assert.deepEqual(q.chips, [0, 1])
+  assert.deepEqual(q.refused, [overCapNote(1, 20)])
+  assert.equal(overCapNote(1, 20), '1 file not attached — file limit reached (max 20)')
 })

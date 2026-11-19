@@ -52,7 +52,7 @@ import { modelOptions, keepModel, modelTitle } from '../../lib/modelTiers'
 import { lockBodyScroll } from '../../lib/scrollLock'
 import { MicField } from '../MicField'
 import { useFileReads } from '../../lib/fileReads'
-import { AttachButton, AttachChips, PromptTextarea } from '../AgentAttach'
+import { AttachButton, AttachChips, PromptTextarea, useDropZone } from '../AgentAttach'
 import { ScheduleButton } from '../ScheduleButton'
 
 // The tiers a DEV spawn may pick, in dropdown order. A provider profile narrows
@@ -763,6 +763,7 @@ export function AgentList({
   // Picked files still being read: spawning now would start the agent without
   // them (lib/fileReads.ts), so every spawn path waits for `reading` to hit 0.
   const { reading, reads } = useFileReads()
+  const drop = useDropZone() // files dropped on the form
 
   const clearImages = () => {
     reads.discard()
@@ -848,7 +849,7 @@ export function AgentList({
 
   return (
     <div className="agents">
-      <form className="agents__spawn" onSubmit={spawn}>
+      <form className="agents__spawn" onSubmit={spawn} {...drop.props}>
         <MicField value={task} onChange={setTask} multiline>
           <PromptTextarea
             placeholder="task (e.g. flaky-test-triage)"
@@ -857,6 +858,7 @@ export function AgentList({
             files={images}
             setFiles={setImages}
             reads={reads}
+            drop={drop}
           />
         </MicField>
         {!scoped ? (
@@ -910,7 +912,7 @@ export function AgentList({
           <option value="xhigh">Very high</option>
           <option value="max">Max</option>
         </select>
-        <AttachButton files={images} setFiles={setImages} reads={reads} onError={setErr} disabled={busy} />
+        <AttachButton files={images} drop={drop} disabled={busy} />
         <button
           type="submit"
           className="btn btn--approve"
@@ -924,6 +926,7 @@ export function AgentList({
           disabled={!task.trim() || (!scoped && !repoInput.trim()) || busy}
           title="schedule this spawn for later"
         />
+        {drop.overlay}
       </form>
       {pendingSpawns.length ? (
         <div className="agents__scheduled" role="list" aria-label="scheduled spawns">
@@ -945,7 +948,7 @@ export function AgentList({
           ))}
         </div>
       ) : null}
-      <AttachChips files={images} setFiles={setImages} disabled={busy} text={task} reading={reading} />
+      <AttachChips files={images} setFiles={setImages} disabled={busy} text={task} reading={reading} drop={drop} />
       {err ? <div className="agents__err">✗ {err}</div> : null}
 
       {readyToShip.length >= 2 ? (
@@ -1114,6 +1117,8 @@ export function AgentRow({
     reads.discard()
     setImages([])
   }
+  // Files dragged onto the chat — the whole row (card or full screen) is the zone.
+  const drop = useDropZone()
   const [busy, setBusy] = useState(false)
   const [sendErr, setSendErr] = useState('')
   // Where this chat's Atlas page links ([[Page]], `Wiki/…/X.md`) open: a
@@ -2389,7 +2394,7 @@ export function AgentRow({
           </button>
         </div>
       ) : null}
-      <AttachChips files={images} setFiles={setImages} disabled={busy} text={text} reading={reading} />
+      <AttachChips files={images} setFiles={setImages} disabled={busy} text={text} reading={reading} drop={drop} />
       {s.panel ? <PanelBlock panel={s.panel} busy={busy} onAction={answerPanel} /> : null}
       {queuedList(s.queued).map((q, i, all) => (
         <div className="agent__queued" role="status" key={i}>
@@ -2495,7 +2500,7 @@ export function AgentRow({
       ) : null}
       {dormant ? null : (
       <form className="agent__prompt" onSubmit={send}>
-        <AttachButton files={images} setFiles={setImages} reads={reads} onError={setSendErr} disabled={busy} />
+        <AttachButton files={images} drop={drop} disabled={busy} />
         <PromptTextarea
           inputRef={promptRef}
           placeholder={images.length ? 'add a message (optional)…' : 'send a prompt…'}
@@ -2504,6 +2509,7 @@ export function AgentRow({
           files={images}
           setFiles={setImages}
           reads={reads}
+          drop={drop}
           onFocus={onPromptFocus}
         />
         {s.status === 'running' ? (
@@ -2597,7 +2603,7 @@ export function AgentRow({
     <ChatVault.Provider value={chatVault}>
       {fullscreen ? (
         createPortal(
-          <div className={cls} role="dialog" aria-modal="true" ref={fullscreenRef}>
+          <div className={cls} role="dialog" aria-modal="true" ref={fullscreenRef} {...drop.props}>
             {/* The same clickable agents overview as the hero, agents only —
                 clicking another node swaps straight to THAT agent's full screen
                 (this row yields via the focus signal above). On a phone the graph
@@ -2628,11 +2634,15 @@ export function AgentRow({
               <AgentsOverview switcher currentId={s.id} />
             </div>
             {body}
+            {drop.overlay}
           </div>,
           document.body,
         )
       ) : (
-        <li className={cls}>{body}</li>
+        <li className={cls} {...drop.props}>
+          {body}
+          {drop.overlay}
+        </li>
       )}
       {appOverlay}
     </ChatVault.Provider>

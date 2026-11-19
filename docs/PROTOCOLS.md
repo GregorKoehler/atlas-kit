@@ -733,6 +733,13 @@ Files without a marker keep the appended tail. With no marker at all, the output
 byte-identical to the plain tail. An image the page could not read stays in the text as
 `[Image N unreadable: <src>]`, with a warning chip under the field. It is never dropped.
 
+**Drops.** Each composer is a drop zone (`useDropZone` in `web/src/components/AgentAttach.tsx`):
+the dev spawn form, the Ask form, and a whole chat, in its card row or full screen. A drop on
+the field works like a paste at the drop point. A drop anywhere else in the zone becomes chips.
+The 📎 picker goes the same way. A drop only fills the draft and never sends or spawns. Files
+over the per-file cap, empty files and files past the 20-file cap get a visible chip. A file
+dropped outside every zone is refused at the window (`web/src/lib/fileDrop.ts`).
+
 ---
 
 ## 9a. The project-card NOW signal

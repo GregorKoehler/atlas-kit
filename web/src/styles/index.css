@@ -7748,3 +7748,30 @@ button.capture-job__title--link {
   color: var(--status-amber);
   font-weight: 600;
 }
+
+/* A file drag over a composer (AgentAttach.tsx useDropZone): a quiet veil over
+   the zone — the spawn/Ask form, or the whole chat. Never takes the pointer, so
+   the drop still reaches the field or the pane beneath it. Positioned only
+   while shown, so the zone's layout is otherwise untouched (the full screen is
+   already fixed). */
+.agents__spawn:has(> .agent-drop),
+.agent:not(.agent--fullscreen):has(> .agent-drop) {
+  position: relative;
+}
+.agent-drop {
+  position: absolute;
+  inset: 0;
+  z-index: 50;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px dashed var(--accent-dim);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--bg-900) 72%, transparent);
+  pointer-events: none;
+}
+.agent-drop__label {
+  color: var(--text-bright);
+  font-family: var(--font-body);
+  font-size: 0.85rem;
+}

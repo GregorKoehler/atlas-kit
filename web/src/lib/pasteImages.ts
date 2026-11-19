@@ -149,6 +149,94 @@ export function pastePlan(html: string, plain: string, imageFiles: number): 'nat
   return 'native'
 }
 
+/** A file on a paste/drop/📎 transfer, as far as the plan needs it. */
+export interface TransferFile {
+  name: string
+  type: string
+  size: number
+}
+
+/** What one transfer does to the draft. Indexes point into the input `files`. */
+export interface TransferPlan {
+  /** Text for the caret ('' = none). */
+  insert: string
+  /** Per `[Image N]` in `insert`, in order: its bytes (a file index or an <img>
+   * src) — or `over`, when the draft has no room left for it. */
+  marked: { n: number; src: number | string; over?: true }[]
+  /** Files attached under their own name, like a 📎 pick. */
+  chips: number[]
+  /** One visible line per kind of file that was NOT attached. */
+  refused: string[]
+}
+
+const filesWord = (k: number) => (k === 1 ? '1 file' : `${k} files`)
+
+/**
+ * The one decision behind every way a file reaches a composer — a paste, a
+ * drop on the field (`at: 'field'`), a drop beside it or a 📎 pick
+ * (`at: 'beside'`). Null = not ours: a plain-text paste stays the browser's.
+ *
+ * In the field, a paste or drop is the same thing: images get an `[Image N]`
+ * at the caret (pastePlan decides which ones), every other file becomes a
+ * chip. Beside the field, everything is a chip. A drag's text/plain is ignored
+ * — it is the file's name or URL, not something the operator typed — so a file
+ * drop is always taken over. Either way the transfer only fills the draft:
+ * nothing here sends or spawns.
+ *
+ * Nothing goes silently: a file over the server's per-file limit, an empty one
+ * (or a folder), or one past the `room` left under the `max` files is listed in
+ * `refused`; a marker past the cap is flagged `over` (the composer rewrites it
+ * to overCapMarker, as a paste always has). Markers claim room first.
+ */
+export function planTransfer(
+  dt: { html: string; plain: string; files: TransferFile[] },
+  o: { drop: boolean; at: 'field' | 'beside'; firstN: number; room: number; max: number; maxBytes: number },
+): TransferPlan | null {
+  const big: string[] = []
+  const empty: string[] = []
+  const ok: number[] = []
+  dt.files.forEach((f, i) => {
+    if (f.size > o.maxBytes) big.push(f.name)
+    else if (!f.size) empty.push(f.name)
+    else ok.push(i)
+  })
+  const isImage = (i: number) => dt.files[i].type.startsWith('image/')
+  let insert = ''
+  let marked: TransferPlan['marked'] = []
+  let chips = ok
+  if (o.at === 'field') {
+    const images = ok.filter(isImage)
+    // Refused images count for the takeover, so a lone oversize screenshot
+    // pasted is refused out loud rather than left to the browser.
+    const plan = pastePlan(dt.html, o.drop ? '' : dt.plain, dt.files.filter((f) => f.type.startsWith('image/')).length)
+    if (plan === 'native' && !o.drop) return null
+    chips = ok.filter((i) => !isImage(i))
+    if (plan === 'html') {
+      const parsed = htmlToMarkedText(dt.html, o.firstN)
+      insert = parsed.text
+      // The transfer's own image files are the real bytes when they match one
+      // to one (a browser's "Copy image"); otherwise read each <img>'s source.
+      marked = parsed.images.map((im, k) => ({ n: im.n, src: images.length === parsed.images.length ? images[k] : im.src }))
+    } else if (plan === 'files') {
+      marked = images.map((i, k) => ({ n: o.firstN + k, src: i }))
+      insert = marked.map((m) => `[Image ${m.n}]`).join('\n')
+    }
+  }
+  marked = marked.map((m, k) => (k < o.room ? m : { ...m, over: true }))
+  const fit = Math.max(0, o.room - marked.length)
+  const refused: string[] = []
+  const mb = Math.round(o.maxBytes / (1024 * 1024))
+  if (big.length) refused.push(`${big.length === 1 ? big[0] : filesWord(big.length)} not attached — larger than ${mb} MB`)
+  if (empty.length) refused.push(`${empty.length === 1 ? empty[0] : filesWord(empty.length)} not attached — empty, or a folder`)
+  if (chips.length > fit) refused.push(overCapNote(chips.length - fit, o.max))
+  return { insert, marked, chips: chips.slice(0, fit), refused }
+}
+
+/** The chip line for `k` files that did not fit under the file cap. */
+export function overCapNote(k: number, max: number): string {
+  return `${filesWord(k)} not attached — file limit reached (max ${max})`
+}
+
 /** The next free image number in a draft: past every `[Image N…` already in the
  * text and every attached file — 📎-picked ones count too, and a removed chip
  * never frees its number (its marker may still be in the text). */
