@@ -32,11 +32,23 @@
  * every few minutes — but rewriting 35 MB of float32 288 times a day is not, and
  * an untouched index needs no rewrite to be correct.
  *
- * ⚠️ THE COMMIT POINT IS THE meta.json RENAME, and vectors ping-pong between two
- * filenames. A reader loads meta.json and the vectors file it NAMES, so it can
- * never pair a new vector file with an old row table — overwriting
- * `vectors.f32` in place would make exactly that pairing possible during every
- * re-index, i.e. silently wrong results on a live path.
+ * ⚠️ THE COMMIT POINT IS THE meta.json RENAME, and every run writes its OWN
+ * vector file. A reader loads meta.json and the vectors file it NAMES, so it can
+ * never pair a new vector file with an old row table — overwriting a live file
+ * in place would make exactly that pairing possible during every re-index, i.e.
+ * silently wrong results on a live path.
+ *
+ * 🔴 ONE RUN AT A TIME, AND A PARTIAL MAY NOT REGRESS. Measured in the field: a
+ * bulk vault commit made one run take over an hour and nothing stopped the next
+ * five-minute ticks starting beside it — up to 5 ran at ~900 MB each. Each picked
+ * its target from the live name at START (ping-pong between two names) and
+ * opened it `w+`, so two runs could truncate one file, and each unlinked its
+ * start-time live name at the end, which could be the file meta.json named by
+ * then. `previous()` then failed, its bare catch said "first build", and an
+ * aborted run committed anyway: a nearly empty partial replaced a full index —
+ * 18 % of rows held a vector while the scorecard said every chunk was indexed.
+ * So: `takeSweepLock`, per-run target files, a commit gate on `filled`, and a
+ * loud refusal in `previous()`. test/index-sweep.test.mjs pins each property.
  *
  * Guarded: threads capped, memory floor between batches, vectors streamed to
  * disk. An OOM here does not fail an index, it takes the dashboard down.
@@ -44,12 +56,12 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import crypto from 'node:crypto'
-import { execFileSync } from 'node:child_process'
+import { execFileSync, spawnSync } from 'node:child_process'
 import { resolveVault, defaultVaultKey } from '../../../api/src/vaults.mjs'
 import { chunkVault, chunkText, CHUNKER_VERSION } from '../api/chunk.mjs'
 import { MODEL_ID, DIMS, DTYPE, THREADS, DOC_PROMPT, load, embed, embedRuntimeAvailable } from '../api/embed.mjs'
 import { INDEX_SUBDIR } from '../api/semantic.mjs'
-import { dayKey, readSweep, rollSweep } from '../api/sweep.mjs'
+import { countFilled, dayKey, readSweep, rollSweep } from '../api/sweep.mjs'
 
 const arg = (n, d = null) => {
   const i = process.argv.indexOf('--' + n)
@@ -79,6 +91,33 @@ if (!embedRuntimeAvailable()) {
 }
 
 const outDir = outArg || path.join(vaultPath, INDEX_SUBDIR)
+const metaPath = path.join(outDir, 'meta.json')
+
+/* --- single flight ------------------------------------------------------- *
+ * ⚠️ A KERNEL LOCK, not a pidfile: flock(2) belongs to the open file description,
+ * and the kernel drops it when the last fd on that description closes, so a
+ * SIGKILLed or OOM-killed holder can never freeze the sweep. Node has no flock(),
+ * so `flock -n 3` locks the description this process SHARES with the child; the
+ * child exits and the lock stays, held by the fd below until this process dies.
+ * fs.openSync sets O_CLOEXEC, so a `git` child cannot inherit and outlive it.
+ *
+ * Keyed to the directory it protects, so it covers the cron sweep and a manual
+ * run alike. It costs one short-lived spawn, before the vault walk, so a losing
+ * run touches nothing and a no-op sweep stays ~0.3 s. No `flock` binary → refuse:
+ * running unlocked is how the overlap above happened. */
+function takeSweepLock() {
+  fs.mkdirSync(outDir, { recursive: true })
+  const fd = fs.openSync(path.join(outDir, 'sweep.lock'), 'a')
+  const r = spawnSync('flock', ['-n', '3'], { stdio: ['ignore', 'ignore', 'inherit', fd] })
+  if (r.status === 0) return fd
+  if (r.status === 1) {
+    console.log(`${vaultKey}: another sweep holds ${outDir}/sweep.lock — skipping this run`)
+    process.exit(0)
+  }
+  console.error(`cannot take the sweep lock (${r.error?.message || `flock exited ${r.status}`}) — refusing to run unlocked`)
+  process.exit(2)
+}
+takeSweepLock()
 
 /* --- headroom guard ------------------------------------------------------ *
  * The box also runs the dashboard, a reverse proxy and agent sessions. Stop and
@@ -122,6 +161,34 @@ const { chunks, pages } = chunkVault(vaultPath)
 const docs = chunks.map((c) => DOC_PROMPT(c.title, chunkText(c)))
 const hashes = docs.map((d) => crypto.createHash('sha1').update(d).digest('hex').slice(0, 16))
 
+/* WHEN THE INDEX WAS LAST CONFIRMED CURRENT — a few hundred bytes beside the
+ * multi-MB meta.json, written by EVERY sweep including the ones that change
+ * nothing. `builtAt` answers "when did the content last change"; this answers
+ * "when did anyone last look", and only the second one tells an agent whether it
+ * is querying a stale index. Rewriting meta.json just to move a timestamp would
+ * put megabytes of disk churn on a sweep that has no work to do.
+ *
+ * It also carries the DAILY CHURN COUNTER the scorecard renders (api/sweep.mjs).
+ * ⚠️ That file, never `data/scorecard.json`: scorecard.json has one writer and a
+ * second producer on it is a silent clobber. The join happens at READ time in
+ * core's dashboard bundle. The added cost to a no-op sweep is one 150-byte read.
+ *
+ * `chunks` and `filled` describe the index meta.json names AFTER this run, which
+ * is not this run's attempt when an aborted run discards itself. */
+const writeSweep = ({ changed, embedded = 0, chunks: total, filled, aborted = null }) => {
+  const next = rollSweep(readSweep(outDir), {
+    sweptAt: new Date().toISOString(),
+    vaultSha,
+    chunks: total,
+    filled,
+    changed,
+    embedded,
+    day: dayKey(),
+    aborted,
+  })
+  fs.writeFileSync(path.join(outDir, 'sweep.json'), JSON.stringify(next))
+}
+
 /** The previous index as a hash→vector CACHE.
  *
  * ⚠️ Gated on the ENCODER (model/dtype/dims), NOT on the chunker version — and
@@ -134,8 +201,11 @@ const hashes = docs.map((d) => crypto.createHash('sha1').update(d).digest('hex')
  * SERVE new boundaries, it is just not required to re-embed unchanged text.) */
 function previous() {
   if (full) return null
+  // No meta.json is the ONE genuine first build. Everything below is a live index
+  // this run failed to read.
+  if (!fs.existsSync(metaPath)) return null
   try {
-    const meta = JSON.parse(fs.readFileSync(path.join(outDir, 'meta.json'), 'utf-8'))
+    const meta = JSON.parse(fs.readFileSync(metaPath, 'utf-8'))
     if (meta.model !== MODEL_ID || meta.dims !== DIMS || meta.dtype !== dtype) {
       console.log(`previous index was built by a different encoder (model/dtype/dims) — full rebuild`)
       return null
@@ -145,6 +215,7 @@ function previous() {
     }
     const buf = fs.readFileSync(path.join(outDir, meta.vectorsFile || 'vectors.f32'))
     const vecs = new Float32Array(buf.buffer, buf.byteOffset, buf.byteLength / 4)
+    if (vecs.length < meta.rows.length * meta.dims) throw new Error(`${meta.vectorsFile || 'vectors.f32'} is shorter than meta.rows`)
     const byHash = new Map()
     meta.rows.forEach((r, i) => {
       // Skip unwritten (all-zero) slots from an aborted run; a normalised vector
@@ -152,8 +223,16 @@ function previous() {
       if (r.hash && !byHash.has(r.hash) && (vecs[i * meta.dims] !== 0 || vecs[i * meta.dims + 1] !== 0)) byHash.set(r.hash, i)
     })
     return { meta, vecs, byHash }
-  } catch {
-    return null
+  } catch (e) {
+    /* 🔴 THIS CATCH USED TO `return null`, i.e. "first build": reuse 0 of every
+     * chunk, a full re-embed (well over an hour on a mature vault) started
+     * unattended on the box, on every tick, with nobody told. So it stops instead.
+     * A corrupt index heals only by a decision (`--full`, or re-importing one built
+     * elsewhere), and the scorecard shows the aborted state until someone makes it. */
+    const reason = `live index unreadable: ${e?.message || e}`
+    console.error(`\n🔴 ${outDir}: ${reason}\n🔴 NOT treating this as a first build. Nothing was written. Re-import an index, or run --full to re-embed everything on purpose.`)
+    writeSweep({ changed: false, chunks: chunks.length, filled: null, aborted: reason })
+    process.exit(4)
   }
 }
 
@@ -169,30 +248,6 @@ if (prev) {
 const todo = []
 for (let i = 0; i < chunks.length; i++) if (reuse[i] === -1) todo.push(i)
 
-/* WHEN THE INDEX WAS LAST CONFIRMED CURRENT — a few hundred bytes beside the
- * multi-MB meta.json, written by EVERY sweep including the ones that change
- * nothing. `builtAt` answers "when did the content last change"; this answers
- * "when did anyone last look", and only the second one tells an agent whether it
- * is querying a stale index. Rewriting meta.json just to move a timestamp would
- * put megabytes of disk churn on a sweep that has no work to do.
- *
- * It also carries the DAILY CHURN COUNTER the scorecard renders (api/sweep.mjs).
- * ⚠️ That file, never `data/scorecard.json`: scorecard.json has one writer and a
- * second producer on it is a silent clobber. The join happens at READ time in
- * core's dashboard bundle. The added cost to a no-op sweep is one 150-byte read. */
-const writeSweep = (changed, embedded = 0) => {
-  fs.mkdirSync(outDir, { recursive: true })
-  const next = rollSweep(readSweep(outDir), {
-    sweptAt: new Date().toISOString(),
-    vaultSha,
-    chunks: chunks.length,
-    changed,
-    embedded,
-    day: dayKey(),
-  })
-  fs.writeFileSync(path.join(outDir, 'sweep.json'), JSON.stringify(next))
-}
-
 /* Nothing to embed AND the same rows in the same order → the index on disk is
  * already the index this run would produce. Exit before touching 35 MB. */
 // ⚠️ The chunkerVersion test belongs here even though the CACHE ignores it: the
@@ -206,7 +261,7 @@ if (
   prev.meta.rows.length === chunks.length &&
   prev.meta.rows.every((r, i) => r.hash === hashes[i] && r.path === chunks[i].path)
 ) {
-  writeSweep(false)
+  writeSweep({ changed: false, chunks: chunks.length, filled: chunks.length })
   console.log(`${vaultKey}: ${chunks.length} chunks unchanged — index already current (built ${prev.meta.builtAt}, vault ${String(vaultSha).slice(0, 7)})`)
   process.exit(0)
 }
@@ -231,23 +286,14 @@ if (availNow && availNow < MIN_AVAIL_MB + 700) {
   process.exit(0)
 }
 
-fs.mkdirSync(outDir, { recursive: true })
-
-/* Ping-pong the vector file so the meta.json rename is the only commit point
- * (see the header). Write to whichever name the live index is NOT using. */
-const liveName =
-  prev?.meta?.vectorsFile ||
-  (() => {
-    try {
-      return JSON.parse(fs.readFileSync(path.join(outDir, 'meta.json'), 'utf-8')).vectorsFile || 'vectors.f32'
-    } catch {
-      return null
-    }
-  })()
-const vectorsFile = liveName === 'vectors.f32' ? 'vectors.b.f32' : 'vectors.f32'
+/* A TARGET NO OTHER RUN CAN NAME, so the meta.json rename is the only commit point
+ * (see the header) even if the lock is ever bypassed: two runs can never truncate
+ * one file. The pid in the name is how `removeUnnamedVectors` tells another run's
+ * in-progress target from a dead run's leftover. */
+const vectorsFile = `vectors.${process.pid}.${Date.now().toString(36)}.f32`
 
 const rowBytes = DIMS * 4
-const fd = fs.openSync(path.join(outDir, vectorsFile), 'w+')
+const fd = fs.openSync(path.join(outDir, vectorsFile), 'wx+')
 fs.ftruncateSync(fd, chunks.length * rowBytes)
 const writeRow = (row, f32) => fs.writeSync(fd, Buffer.from(f32.buffer, f32.byteOffset, f32.byteLength), 0, rowBytes, row * rowBytes)
 
@@ -267,15 +313,17 @@ let aborted = null
 const t0 = performance.now()
 
 if (todo.length) {
-  const idleBefore = rssMb()
-  ctx = await load({ dtype })
-  loadMs = ctx.loadMs
-  console.log(`model load ${loadMs.toFixed(0)} ms · RSS +${(rssMb() - idleBefore).toFixed(0)} MB`)
   // Length-bucketed order: a batch pads to roughly its own longest member
   // instead of to the vault's longest. Each row is still written back at its
   // ORIGINAL offset, so nothing about the output changes.
   const order = [...todo].sort((a, b) => docs[a].length - docs[b].length)
+  // The load sits inside the try: a load that fails is an aborted run like any
+  // other, and goes through the same commit gate below.
   try {
+    const idleBefore = rssMb()
+    ctx = await load({ dtype })
+    loadMs = ctx.loadMs
+    console.log(`model load ${loadMs.toFixed(0)} ms · RSS +${(rssMb() - idleBefore).toFixed(0)} MB`)
     for (let i = 0; i < order.length; i += batchSize) {
       assertHeadroom()
       const idx = order.slice(i, i + batchSize)
@@ -305,42 +353,98 @@ if (todo.length) {
 fs.closeSync(fd)
 
 const wallS = (performance.now() - t0) / 1000
-const meta = {
-  vault: vaultKey,
-  vaultPath,
-  vaultSha,
-  builtAt: new Date().toISOString(),
-  model: MODEL_ID,
-  dtype,
-  dims: DIMS,
-  chunkerVersion: CHUNKER_VERSION,
-  vectorsFile,
-  pages,
-  reused,
-  embedded: done,
-  aborted,
-  tokens,
-  indexSeconds: wallS,
-  loadMs,
-  peakRssMb: peakRss,
-  rows: chunks.map((c, i) => ({ path: c.path, title: c.title, crumb: c.crumb, hash: hashes[i], start: c.start, end: c.end })),
-}
-// THE COMMIT POINT. Write beside, then rename — a reader either sees the whole
-// old index or the whole new one, never a row table from one and vectors from
-// the other.
-fs.writeFileSync(path.join(outDir, 'meta.json.new'), JSON.stringify(meta))
-fs.renameSync(path.join(outDir, 'meta.json.new'), path.join(outDir, 'meta.json'))
-writeSweep(true, done)
-if (liveName && liveName !== vectorsFile) {
+const filled = reused + done
+
+/** What the index meta.json names RIGHT NOW holds, read at the commit decision and
+ * not at start: under a bypassed lock it may have moved. An index built before
+ * `filled` existed is counted. null = nothing to protect: unreadable, or from an
+ * encoder/chunker the reader refuses, which serves zero rows however full it is. */
+function liveIndex() {
   try {
-    fs.unlinkSync(path.join(outDir, liveName))
+    const m = JSON.parse(fs.readFileSync(metaPath, 'utf-8'))
+    if (m.model !== MODEL_ID || m.dims !== DIMS || m.chunkerVersion !== CHUNKER_VERSION) return null
+    return { rows: m.rows.length, filled: Number.isFinite(m.filled) ? m.filled : countFilled(path.join(outDir, m.vectorsFile || 'vectors.f32'), m.rows.length, m.dims) }
   } catch {
-    /* first build, or already gone */
+    return null
   }
 }
 
-console.log(`\n${aborted ? 'PARTIAL' : 'done'}: ${reused} reused + ${done} embedded of ${chunks.length} chunks in ${(wallS / 60).toFixed(1)} min · peak RSS ${peakRss.toFixed(0)} MB`)
-console.log(`wrote ${outDir}/${vectorsFile} + meta.json  (vault ${vaultSha ? vaultSha.slice(0, 7) : 'not a git repo'})`)
+const pidAlive = (pid) => {
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch (e) {
+    return e.code === 'EPERM'
+  }
+}
+
+/* Removes only what the CURRENT meta.json does not name, and never another LIVE
+ * run's target: without the second rule, a bypassed lock lets this delete a file
+ * that run is about to commit, and meta.json then names a missing file. Re-read
+ * here, after the rename, because an overlapping run may have committed since.
+ * The two legacy ping-pong names carry no pid and are always safe once unnamed.
+ * A leftover of a killed run is removed by the next run that commits. */
+function removeUnnamedVectors() {
+  const named = JSON.parse(fs.readFileSync(metaPath, 'utf-8')).vectorsFile || 'vectors.f32'
+  for (const f of fs.readdirSync(outDir)) {
+    const m = f.match(/^vectors(?:\.b|\.(\d+)\.[0-9a-z]+)?\.f32$/)
+    if (!m || f === named) continue
+    if (m[1] && Number(m[1]) !== process.pid && pidAlive(Number(m[1]))) continue
+    try {
+      fs.unlinkSync(path.join(outDir, f))
+    } catch {
+      /* already gone */
+    }
+  }
+}
+
+/* 🔴 A PARTIAL MAY NOT REGRESS. An aborted run commits only if it leaves at least
+ * as many filled rows as the live index, which is how a cold build still resumes
+ * across aborts (each partial holds at least what the last one did). Otherwise it
+ * throws its work away and the live index stays byte-identical: its vectors may be
+ * older, but a stale full index answers every query and a fresh hollow one does not.
+ * sweep.json records the abort either way. */
+const live = aborted ? liveIndex() : null
+const discard = Boolean(live) && filled < live.filled
+if (discard) {
+  fs.unlinkSync(path.join(outDir, vectorsFile))
+  writeSweep({ changed: false, embedded: done, chunks: live.rows, filled: live.filled, aborted })
+  console.error(`\nDISCARDED: this aborted run filled ${filled} of ${chunks.length} rows, the live index holds ${live.filled} of ${live.rows} — left it untouched`)
+} else {
+  const meta = {
+    vault: vaultKey,
+    vaultPath,
+    vaultSha,
+    builtAt: new Date().toISOString(),
+    model: MODEL_ID,
+    dtype,
+    dims: DIMS,
+    chunkerVersion: CHUNKER_VERSION,
+    vectorsFile,
+    pages,
+    reused,
+    embedded: done,
+    filled,
+    aborted,
+    tokens,
+    indexSeconds: wallS,
+    loadMs,
+    peakRssMb: peakRss,
+    rows: chunks.map((c, i) => ({ path: c.path, title: c.title, crumb: c.crumb, hash: hashes[i], start: c.start, end: c.end })),
+  }
+  // THE COMMIT POINT. Write beside, then rename — a reader either sees the whole
+  // old index or the whole new one, never a row table from one and vectors from
+  // the other. The temp name is per-run for the same reason the target is: a
+  // shared name lets one run rename another's half-written meta.json into place.
+  const metaNew = `${metaPath}.${process.pid}.new`
+  fs.writeFileSync(metaNew, JSON.stringify(meta))
+  fs.renameSync(metaNew, metaPath)
+  writeSweep({ changed: true, embedded: done, chunks: chunks.length, filled, aborted })
+  removeUnnamedVectors()
+
+  console.log(`\n${aborted ? 'PARTIAL' : 'done'}: ${reused} reused + ${done} embedded of ${chunks.length} chunks in ${(wallS / 60).toFixed(1)} min · peak RSS ${peakRss.toFixed(0)} MB`)
+  console.log(`wrote ${outDir}/${vectorsFile} + meta.json  (vault ${vaultSha ? vaultSha.slice(0, 7) : 'not a git repo'})`)
+}
 if (STATS_FILE) {
   try {
     fs.unlinkSync(STATS_FILE)

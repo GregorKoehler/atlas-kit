@@ -202,7 +202,7 @@ reclaiming the disk.
 | `GET /api/search` | a `legs[]` entry — `{ key: 'semantic', label, available, items[], reason?, index?, ms }`. `items` (BM25F) is untouched. |
 | MCP `query_vault` | the same, since the tool reads that route. `query_vault`'s description gains a paragraph naming the leg, only when it is installed. |
 | SearchBar | a labelled "Semantic (vector)" block under the full-text hits, with each row's section breadcrumb and cosine. An unavailable leg shows one amber line with the reason. |
-| Scorecard | a **Semantic index** group — last swept, re-embedded today, chunks indexed. Renders **nothing** until a sweep has actually run. |
+| Scorecard | a **Semantic index** group — last swept, re-embedded today, chunks indexed as **filled of total** (red below full), and a red **Last run: aborted** tile when the last run stopped early. Renders **nothing** until a sweep has run or aborted. |
 | spawn evidence | an optional dense leg, **off by default** — see below. |
 
 ### The spawn-evidence leg is OFF by default — read this before enabling it
@@ -272,19 +272,26 @@ result, where the consuming agent picks **after** seeing the content.
 ## The index
 
 Lives in the vault's own gitignored `data/atlas-index/`. **Vectors never go into
-`Wiki/` or `Tasks/`.** Three files:
+`Wiki/` or `Tasks/`.** Four files:
 
 - `meta.json` — provenance (model, dtype, dims, chunker version, `builtAt`) plus
   one row per chunk: path, title, heading breadcrumb, content hash, and the
   **char range** into the page. Bodies are *not* stored; a snippet is sliced live
   out of the page at that range.
-- `vectors.f32` / `vectors.b.f32` — float32, in row order. ⚠️ The indexer
-  **ping-pongs** between the two names so that renaming `meta.json` is the only
-  commit point, and readers take the name from `meta.json`. A reader that
-  hard-codes one name works after an even number of rebuilds and fails after an
-  odd one.
+- `vectors.<pid>.<stamp>.f32` — float32, in row order. ⚠️ Every run writes its
+  **own** file, so renaming `meta.json` is the only commit point, and readers take
+  the name from `meta.json`. After the rename the run deletes every vector file
+  `meta.json` no longer names, except another live run's target. (Indexes built
+  before this ping-ponged `vectors.f32` / `vectors.b.f32`; those are read as-is
+  and retire on the next commit.)
+- `sweep.lock` — the single-flight lock (`flock -n`, a kernel lock the kernel
+  drops when its holder dies, even by SIGKILL). A run that finds it held exits 0
+  and touches nothing, so a sweep that takes an hour after a bulk commit cannot be
+  joined by the next five-minute ticks.
 - `sweep.json` — ~150 bytes: when a sweep last *confirmed* the index matches the
-  vault, and today's churn counter. Separate from `meta.json` because a no-op
+  vault, how many of its rows hold a vector (`filled` of `chunks`), whether the
+  last run aborted, and today's churn counter. An aborted run never moves
+  `sweptAt`. Separate from `meta.json` because a no-op
   sweep must not rewrite 35 MB to move a timestamp — and separate from
   `data/scorecard.json` because that file has one writer and a second producer on
   it is a silent clobber.
@@ -293,6 +300,14 @@ Re-indexing is **incremental by content hash over the exact prompted string**, s
 an edit session re-embeds tens of chunks out of eleven thousand. The row table is
 regenerated rather than patched, so deletions, moves and reordering are correct
 by construction.
+
+🔴 **A partial may not regress.** A run that aborts (memory floor, a failed load)
+commits only if it fills at least as many rows as the live index — which is how a
+cold build resumes across aborts — and otherwise throws its work away and leaves
+the live index byte-identical. And a live index the indexer **cannot read**
+(missing or truncated vector file, corrupt `meta.json`) is **not** a first build:
+the run stops with exit 4 and a `Last run: aborted` tile instead of re-embedding
+the whole vault unattended. Heal it on purpose with `--full`.
 
 ```bash
 node addons/semantic-search/scripts/index.mjs               # incremental

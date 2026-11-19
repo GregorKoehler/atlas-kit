@@ -46,6 +46,28 @@ export function readSweep(dir) {
 }
 
 /**
+ * How many of a vector file's rows hold a vector. A written vector is L2-normalised
+ * and can never be all-zero; an unwritten slot always is, and the first two floats
+ * decide it, the same test `loadIndex` uses. For an index with no `meta.filled` (one
+ * built before the field existed), so it reads 8 bytes per row rather than the whole
+ * file: this can run on the API's main thread, once per index change. Throws.
+ */
+export function countFilled(file, rows, dims) {
+  const fd = fs.openSync(file, 'r')
+  try {
+    const b = Buffer.alloc(8)
+    let n = 0
+    for (let i = 0; i < rows; i++) {
+      if (fs.readSync(fd, b, 0, 8, i * dims * 4) < 8) break
+      if (b.readFloatLE(0) !== 0 || b.readFloatLE(4) !== 0) n++
+    }
+    return n
+  } finally {
+    fs.closeSync(fd)
+  }
+}
+
+/**
  * The next `sweep.json`, given the previous one and what this run did. Pure.
  *
  * The daily counter accumulates while `day` matches and RESETS the moment it
@@ -53,16 +75,28 @@ export function readSweep(dir) {
  * before the counters existed), which is the same case as "a new day" and needs
  * no migration. A corrupt or non-numeric carry-over resets rather than poisoning
  * the tally with NaN, which would render as a broken tile forever.
+ *
+ * ⚠️ AN ABORTED RUN DOES NOT STAMP `sweptAt` or `vaultSha`. `sweptAt` means "a sweep
+ * confirmed the index matches the vault", and an aborted run confirmed nothing: a
+ * scorecard saying "last swept 21 min" over an index 18 % full is the reading this
+ * prevents. Its embeds still count in `embeddedToday`, because that tile is the
+ * work spent, kept or not. `aborted` is the LAST run's state, cleared by the next
+ * run that finishes.
  */
 export function rollSweep(prev, next) {
-  const carry = prev?.day === next.day && Number.isFinite(prev?.embeddedToday) ? prev.embeddedToday : 0
+  const sameDay = prev?.day === next.day
+  const carry = sameDay && Number.isFinite(prev?.embeddedToday) ? prev.embeddedToday : 0
+  const abortCarry = sameDay && Number.isFinite(prev?.abortedToday) ? prev.abortedToday : 0
   return {
-    sweptAt: next.sweptAt,
-    vaultSha: next.vaultSha,
+    sweptAt: next.aborted ? prev?.sweptAt : next.sweptAt,
+    vaultSha: next.aborted ? prev?.vaultSha : next.vaultSha,
     chunks: next.chunks,
+    filled: next.filled,
     changed: next.changed,
     day: next.day,
     embeddedToday: carry + (Number.isFinite(next.embedded) ? next.embedded : 0),
+    abortedToday: abortCarry + (next.aborted ? 1 : 0),
+    aborted: next.aborted ? { at: next.sweptAt, reason: String(next.aborted).slice(0, 160) } : null,
   }
 }
 
@@ -90,15 +124,23 @@ const fmtAge = (min) => {
  * stale, today's churn is UNKNOWN rather than zero, so it renders `—`: a
  * stopped sweep re-embeds nothing, and reporting that as a quiet `0` is exactly
  * the reading that would hide the outage.
+ *
+ * ⚠️ `Chunks indexed` IS FILLED OF TOTAL, red below full. Rows alone is what read
+ * "every chunk indexed" over an index 18 % full. A sweep.json from before the
+ * field says `—`: unknown, never the total. And `Last run` appears only when it
+ * aborted, so an index that aborted before any sweep finished still shows up.
  */
 export function sweepStats(sweep, now = Date.now()) {
   const swept = Date.parse(sweep?.sweptAt ?? '')
-  if (!Number.isFinite(swept)) return []
-  const ageMin = Math.max(0, Math.round((now - swept) / 60000))
-  const stale = ageMin > STALE_MINUTES
+  const everSwept = Number.isFinite(swept)
+  if (!everSwept && !sweep?.aborted) return []
+  const ageMin = everSwept ? Math.max(0, Math.round((now - swept) / 60000)) : null
+  const stale = !everSwept || ageMin > STALE_MINUTES
   const group = 'Semantic index'
+  const total = Number.isFinite(sweep.chunks) ? sweep.chunks : null
+  const filled = Number.isFinite(sweep.filled) ? sweep.filled : null
   return [
-    { label: 'Last swept', value: fmtAge(ageMin), trend: stale ? 'down' : 'neutral', group },
+    { label: 'Last swept', value: everSwept ? fmtAge(ageMin) : 'never', trend: stale ? 'down' : 'neutral', group },
     {
       label: 'Re-embedded today',
       value: stale ? '—' : (sweep.day === dayKey(new Date(now)) ? (sweep.embeddedToday ?? 0) : 0).toLocaleString('en-US'),
@@ -107,9 +149,10 @@ export function sweepStats(sweep, now = Date.now()) {
     },
     {
       label: 'Chunks indexed',
-      value: Number.isFinite(sweep.chunks) ? sweep.chunks.toLocaleString('en-US') : '—',
-      trend: 'neutral',
+      value: total === null ? '—' : `${filled === null ? '—' : filled.toLocaleString('en-US')} of ${total.toLocaleString('en-US')}`,
+      trend: filled !== null && total !== null && filled < total ? 'down' : 'neutral',
       group,
     },
+    ...(sweep.aborted ? [{ label: 'Last run', value: 'aborted', trend: 'down', group }] : []),
   ]
 }
