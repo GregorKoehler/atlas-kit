@@ -35,6 +35,7 @@
  * actually happened.
  */
 import { inputBoxBounds } from './pane-busy.mjs'
+import { parsePanel, PANEL_SAFE_KEYS } from './pane-panel.mjs'
 
 /* ── The read-back gate's own regression (this file's second half) ──
  * The gate shipped head-anchored against the WHOLE pane, and that was wrong
@@ -300,6 +301,8 @@ export function deliveryLanded(pane, payload) {
  *  - the box shows text that `C-u` does not change (`fixpoint:true`). Ctrl-U
  *    always removes a row of real content, so an unmovable row is chrome we
  *    don't recognise (a placeholder rendered without SGR 2, say), not text.
+ * ⚠️ So `ok: true` is "nothing more to do", NOT "the box is empty" — reporting
+ * it as `emptied` is exactly the lie typeAndSubmit used to tell (boxEmptied).
  */
 export async function clearInputBox({ readPane, pressClear, settle = defaultSettle, max = TUI_CLEAR_MAX_PRESSES }) {
   let prev = null
@@ -331,6 +334,42 @@ async function settled(readPane, ok, sleep) {
   }
 }
 
+/* ── Look BEFORE typing ──────────────────────────────────────────────────────
+ * The feedback-draft incident (pane-panel.mjs carries it): a panel sat over
+ * an Atlas chat for five hours, and every delivery that failed its read-back
+ * left its text in the box — `clearInputBox` fails OPEN on a box it cannot see,
+ * and `emptied: post.ok` reported that as emptied. The next attempt (queue
+ * flush, the client's one retry) typed onto it; ~10 copies of the operator's
+ * question and several fleet notes went in as one turn when the panel closed.
+ *
+ * So the box is no longer cleared on the way IN — the only text that can be in
+ * it is somebody's (an operator typing in the terminal, Claude Code holding a
+ * send) or a previous failure of ours, and in neither case is typing on top of
+ * it, or silently wiping it, the right answer. Instead, before a key is typed:
+ *   • a PANEL above the box (pane-panel.mjs)  → stage 'panel'
+ *   • no input box on the capture             → stage 'no-box'
+ *   • a box that already holds text           → stage 'box-not-empty'
+ * Each refuses with NOTHING typed (TUI_HOLD_STAGES): the caller answers 409
+ * with the reason, and the queue PARKS instead of climbing the backoff ladder.
+ * `clearDraft` is the one way past the third — an operator's explicit "clear
+ * the input & send", and the lifecycle prompts (ship, close/recap, the ingest
+ * hand-off) that always cleared first and would otherwise wedge on a draft.
+ *
+ * And on the way OUT, `emptied` now means what it says: the box was SEEN, and
+ * seen empty (boxEmptied). A box we could not see is reported `emptied: false`
+ * — and the next attempt then refuses at 'no-box'/'box-not-empty' rather than
+ * stacking a second copy. That is the whole no-stacking guarantee: the box is
+ * verified empty before every keystroke, so text can never be appended to.
+ */
+export const TUI_HOLD_STAGES = new Set(['panel', 'no-box', 'box-not-empty'])
+const boxEmptied = (c) => c.ok && c.seen && !c.fixpoint
+
+// The 409 both executors answer a held delivery with: `error` is the stage
+// (the client keys its wording and its buttons on it), `panel` what is open.
+export function holdResponse(d) {
+  return { status: 409, ok: false, error: d.stage, detail: d.error, ...(d.panel ? { panel: d.panel } : {}), ...(d.residue ? { boxChars: d.residue } : {}) }
+}
+
 /**
  * Type `payload` at the agent and submit it — the one delivery both executors
  * run (agent-local.mjs and agent-bridge/server.mjs differ only in HOW they
@@ -339,38 +378,40 @@ async function settled(readPane, ok, sleep) {
  *   typeText(text)  → `send-keys -l text`, resolving { ok, stderr }
  *   pressKey(key)   → `send-keys key`
  *
- * Sanitise → verified-empty box → type → read back (the whole text up to
- * TUI_VERIFY_MAX_CHARS, "something arrived" past it) → Enter → verify it
- * SUBMITTED. Returns { ok: true, stripped, cleared }, or
- * { ok: false, stage, error, … } where every stage but 'type' has left the box
- * EMPTY and submitted nothing — which is what the callers' `notDelivered` 502
- * promises the client, and what makes its one automatic retry safe.
+ * Sanitise → no panel, a box on screen, the box EMPTY (see above) → type →
+ * read back (the whole text up to TUI_VERIFY_MAX_CHARS, "something arrived"
+ * past it) → Enter → verify it SUBMITTED. Returns { ok: true, stripped,
+ * cleared }, or { ok: false, stage, error, … }: a TUI_HOLD_STAGES stage typed
+ * nothing; 'mangled'/'unsubmitted' typed and then cleared, and say whether the
+ * box was really left empty (`emptied`); 'box-stuck' is a `clearDraft` that
+ * could not empty the box. No stage but 'type' submitted anything — which is
+ * what the callers' `notDelivered` 502 promises the client.
  *
- * The submit check is new, and it is the silent-loss fix: the pre-Enter
- * read-back only runs on payloads that fit the capture, so a long paste whose
- * Enter was eaten (Claude Code's invisible-character guard — see INVISIBLE
- * above) was logged `ok: true` with the text still sitting in the box, and the next send's pre-clear quietly threw it away
- * (`cleared: 1`). Submitting empties the box at once — 60-190 ms on a live
- * pane, a busy agent included (the message queues) — so a box that still holds
- * text after the backoff was NOT submitted, at any length. Fails open like the
- * rest of the gate: no box on the capture, or a box showing chrome Ctrl-U
- * cannot move (the pre-clear's `fixpoint`), and the check cannot read anything,
- * so the Enter is trusted as before.
+ * The submit check is the silent-loss fix: the pre-Enter read-back only runs
+ * on payloads that fit the capture, so a long paste whose Enter was eaten
+ * (Claude Code's invisible-character guard — see INVISIBLE above) was logged
+ * `ok: true` with the text still sitting in the box. Submitting empties the
+ * box at once — 60-190 ms on a live pane, a busy agent included (the message
+ * queues) — so a box that still holds text after the backoff was NOT
+ * submitted, at any length.
  */
-export async function typeAndSubmit(payload, { readPane, typeText, pressKey, sleep = sleepMs }) {
+export async function typeAndSubmit(payload, { readPane, typeText, pressKey, sleep = sleepMs, clearDraft = false }) {
   const safe = sanitizeForTyping(payload)
   const stripped = payload.length - safe.length
-  // ⚠️ NEVER type into a non-empty box. Whatever is in there — our own residue
-  // from a refusal, a half-delivered prompt from a crash — the typed text
-  // concatenates onto it and the next Enter submits the pair. Clearing is
-  // VERIFIED, not counted (clearInputBox).
   const io = { readPane, pressClear: () => pressKey(TUI_CLEAR_KEY), settle: () => sleep(TUI_VERIFY_SETTLE_MS) }
-  let cleared = 0, readable = true
+  let cleared = 0
   if (TUI_VERIFY) {
-    const pre = await clearInputBox(io)
-    if (!pre.ok) return { ok: false, stage: 'box-stuck', stripped, presses: pre.presses, residue: pre.residue, error: 'input box is not empty and could not be cleared (nothing typed)' }
-    cleared = pre.presses
-    readable = pre.seen && !pre.fixpoint
+    const pre = await readPane()
+    const panel = parsePanel(pre)
+    if (panel) return { ok: false, stage: 'panel', stripped, panel, error: `a Claude Code panel is open in the session (${panel.kind}) — nothing was typed` }
+    const box = inputBoxText(pre)
+    if (box === null) return { ok: false, stage: 'no-box', stripped, error: "the session's input box is not on screen — nothing was typed" }
+    if (box && !clearDraft) return { ok: false, stage: 'box-not-empty', stripped, residue: box.length, error: 'the input box already holds unsent text — nothing was typed' }
+    if (box) {
+      const c = await clearInputBox(io)
+      if (!boxEmptied(c)) return { ok: false, stage: 'box-stuck', stripped, presses: c.presses, residue: c.residue, error: 'input box is not empty and could not be cleared (nothing typed)' }
+      cleared = c.presses
+    }
   }
   const t = await typeText(safe)
   if (!t.ok) return { ok: false, stage: 'type', stripped, error: String(t.stderr || '').slice(0, 500) || 'send-keys failed' }
@@ -383,24 +424,68 @@ export async function typeAndSubmit(payload, { readPane, typeText, pressKey, sle
   const landed = safe.length <= TUI_VERIFY_MAX_CHARS ? (p) => deliveryLanded(p, safe) : (p) => inputBoxText(p) !== ''
   // Both refusals SETTLE once before clearing. The clear's first look is
   // immediate, and text that arrives late (the read-back gave up on a lagging
-  // pane) then reads as an empty box: `presses: 0`, and the NEXT send's
-  // pre-clear finds the residue — the single misses seen in the field have
-  // exactly that shape (`presses: 0`, then `cleared: 1-11` on the retry).
+  // pane) then reads as an empty box: `presses: 0`, and the text stays behind
+  // — the single misses seen in the field have exactly that shape.
   if (TUI_VERIFY && !(await settled(readPane, landed, sleep))) {
     await sleep(TUI_VERIFY_SETTLE_MS)
     const post = await clearInputBox(io)
     // `boxSeen: false` = no input box on screen at all — a dialog owns the pane
-    // (e.g. a session parked in `/login`).
-    return { ok: false, stage: 'mangled', stripped, presses: post.presses, emptied: post.ok, boxSeen: post.seen, error: 'input did not land in the session (not submitted)' }
+    // (e.g. a session parked in `/login`) — and then nobody can say the box
+    // was emptied.
+    return { ok: false, stage: 'mangled', stripped, presses: post.presses, emptied: boxEmptied(post), boxSeen: post.seen, error: 'input did not land in the session (not submitted)' }
   }
   await pressKey('Enter')
-  if (TUI_VERIFY && readable && !(await settled(readPane, (p) => !inputBoxText(p), sleep))) {
+  if (TUI_VERIFY && !(await settled(readPane, (p) => !inputBoxText(p), sleep))) {
     const residue = (inputBoxText(await readPane()) || '').length
     await sleep(TUI_VERIFY_SETTLE_MS)
     const post = await clearInputBox(io)
-    return { ok: false, stage: 'unsubmitted', stripped, residue, presses: post.presses, emptied: post.ok, error: 'the session did not accept the message (Enter did not submit it; nothing was sent)' }
+    return { ok: false, stage: 'unsubmitted', stripped, residue, presses: post.presses, emptied: boxEmptied(post), boxSeen: post.seen, error: 'the session did not accept the message (Enter did not submit it; nothing was sent)' }
   }
   return { ok: true, stripped, cleared }
+}
+
+/**
+ * Answer a Claude Code panel with one of ITS OWN safe keys — the card's
+ * Dismiss / Review / Close buttons. `actionId` must be one the panel offers
+ * right now (re-parsed here, never taken from the client), so a key the panel
+ * does not advertise, and `2` (send to Anthropic) in particular, cannot be
+ * pressed from the dashboard at all (pane-panel.mjs SAFE_KEYS).
+ *
+ * A digit only works on an EMPTY box (Claude Code's hook fires when the input
+ * becomes exactly that digit), so a non-empty box refuses; a digit the panel
+ * did not take is then plain text in a box that was empty, and is cleared
+ * again. Dismissing can raise "Turn off Claude-drafted feedback? 0 to turn off
+ * · Esc to keep" — answered with Esc: switching the feature off is the
+ * operator's setting, not this button's. Same injected IO as typeAndSubmit.
+ * Returns { ok, panel } — `panel` is whatever is open afterwards (null = none).
+ */
+export async function pressPanelAction(actionId, { readPane, typeText, pressKey, sleep = sleepMs }) {
+  const pane = await readPane()
+  const panel = parsePanel(pane)
+  if (!panel) return { ok: false, panel: null, error: 'no Claude Code panel is open' }
+  const a = panel.actions.find((x) => x.id === actionId)
+  if (!a || !PANEL_SAFE_KEYS.has(a.key)) return { ok: false, panel, error: `this panel does not offer "${actionId}"` }
+  const same = (p) => JSON.stringify(p) === JSON.stringify(panel)
+  if (a.key === 'Escape') await pressKey('Escape')
+  else {
+    if (inputBoxText(pane) !== '') return { ok: false, panel, error: "the input box isn't empty — the panel's keys only work on an empty box" }
+    const t = await typeText(a.key)
+    if (!t.ok) return { ok: false, panel, error: String(t.stderr || '').slice(0, 500) || 'send-keys failed' }
+  }
+  await settled(readPane, (p) => !same(parsePanel(p)), sleep)
+  let after = await readPane()
+  if (a.key !== 'Escape' && inputBoxText(after) === a.key) {
+    await clearInputBox({ readPane, pressClear: () => pressKey(TUI_CLEAR_KEY), settle: () => sleep(TUI_VERIFY_SETTLE_MS) })
+    after = await readPane()
+  }
+  let left = parsePanel(after)
+  if (actionId === 'dismiss' && left?.kind === 'feedback-off-prompt' && left.actions.some((x) => x.id === 'keep')) {
+    await pressKey('Escape')
+    await settled(readPane, (p) => parsePanel(p)?.kind !== 'feedback-off-prompt', sleep)
+    left = parsePanel(await readPane())
+  }
+  if (same(left)) return { ok: false, panel: left, error: 'the panel did not respond to the key' }
+  return { ok: true, panel: left }
 }
 
 // What a failed payload LOOKED like, without its content: length, lines, and

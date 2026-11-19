@@ -16,6 +16,7 @@ import {
   unshipAgent,
   sendQueuedNowAgent,
   sendAgentKeys,
+  panelAgent,
   selectAgentOption,
   killAgent,
   cleanupAgent,
@@ -28,6 +29,9 @@ import {
   fetchAgentHistory,
   isTypedVault,
   type AgentAttachment,
+  type AgentPanel,
+  type AgentPanelAction,
+  type DeliverHoldReason,
   type AgentHistory,
   type AgentHistoryMessage,
   type AgentHistoryTool,
@@ -340,6 +344,48 @@ function PendingAskMsg({ p }: { p: PendingAsk }) {
       <div className="agent__answered-pick">{linkNodes(p.text)}</div>
     </div>
   )
+}
+
+// A Claude Code panel parked over the session's input box (the feedback-draft
+// card after an agent's SendFeedback call — api/src/pane-panel.mjs). Nothing is
+// typed into the session while it is up, so the card says so and offers the
+// panel's own SAFE keys. "Send" (its `2`) is never a button: sending feedback
+// to Anthropic is the operator's call, made in the terminal.
+const PANEL_WHAT: Record<AgentPanel['kind'], string> = {
+  'feedback-draft': 'a feedback draft',
+  'feedback-off-prompt': 'the "turn off drafted feedback?" prompt',
+  'feedback-review': 'the feedback-drafts list',
+  survey: 'the session survey',
+  panel: 'a Claude Code panel',
+}
+const PANEL_ACTION: Record<AgentPanelAction, string> = {
+  dismiss: 'Dismiss',
+  review: 'Review (opens the drafts list in the terminal)',
+  close: 'Close',
+  keep: 'Keep drafted feedback on',
+  back: 'Back',
+}
+function PanelBlock({ panel, busy, onAction }: { panel: AgentPanel; busy: boolean; onAction: (a: AgentPanelAction) => void }) {
+  return (
+    <div className="agent__history-menu" role="alert">
+      <div className="agent__history-menu-title hud-label">
+        ⛔ blocked by {PANEL_WHAT[panel.kind] ?? PANEL_WHAT.panel} — nothing is sent to the session while it is open
+      </div>
+      {panel.text ? <div className="agent__history-menu-q">{panel.text}</div> : null}
+      {panel.actions.map((a) => (
+        <button key={a.id} type="button" className="agent__history-opt" disabled={busy} onClick={() => onAction(a.id)}>
+          {PANEL_ACTION[a.id] ?? a.id}
+        </button>
+      ))}
+      <div className="agent__history-note">sending feedback to Anthropic is only offered in the terminal view (&gt;_ above)</div>
+    </div>
+  )
+}
+// Why a queue is held (deliverHold), on its first chip.
+const HOLD_WHY: Record<DeliverHoldReason, string> = {
+  panel: 'held: a Claude Code panel is open',
+  'no-box': 'held: input box not on screen',
+  'box-not-empty': 'held: unsent text in the input box',
 }
 
 // The parked-prompts queue as a list, tolerant of a bridge that predates the
@@ -1140,6 +1186,10 @@ export function AgentRow({
   // the send is held back (it would be swallowed as an "accept the preselect")
   // and the card asks them to pick an option or explicitly dismiss & send.
   const [menuWarn, setMenuWarn] = useState(false)
+  // Set when a send came back 409 `box-not-empty`: the session's input box
+  // already holds text nobody sent. Nothing was typed; the card offers an
+  // explicit "clear it & send" instead of appending or wiping it silently.
+  const [boxWarn, setBoxWarn] = useState(false)
   const [expanded, setExpanded] = useState(startFullscreen)
   const [fullscreen, setFullscreen] = useState(startFullscreen)
   // Show the live-app pane beside the transcript in full-screen (toggleable). On
@@ -1517,8 +1567,44 @@ export function AgentRow({
       setMenuWarn(true)
       if (!expanded) setExpanded(true)
     } else {
+      // A hold (panel / box-not-empty / no-box): nothing was typed. Refresh so a
+      // panel the poll hadn't caught yet shows up with its buttons.
+      if (r.error === 'box-not-empty' && mode === 'send') setBoxWarn(true)
+      if (r.error === 'panel') onChanged()
       setSendErr(sendErrorText(r, mode))
     }
+  }
+
+  // The box-not-empty warning's escape hatch: empty the session's input box
+  // (server-side, verified) and send the typed text — the operator's explicit
+  // choice, never a silent wipe of someone's draft.
+  const clearBoxAndSend = async () => {
+    const t = text.trim()
+    if (busy || reading || (!t && !images.length)) return
+    setBusy(true)
+    setSendErr('')
+    const r = await promptAgent({ id: s.id, text: t, images: images.length ? images : undefined, clearBox: true })
+    setBusy(false)
+    if (r.ok) {
+      setText('')
+      clearImages()
+      setBoxWarn(false)
+      onChanged()
+    } else {
+      setSendErr(sendErrorText(r))
+    }
+  }
+
+  // A panel button (Dismiss / Review / Close…): the server re-reads the panel
+  // and presses that action's own key — the queue then delivers on its own.
+  const answerPanel = async (action: AgentPanelAction) => {
+    if (busy) return
+    setBusy(true)
+    setSendErr('')
+    const r = await panelAgent(s.id, action)
+    setBusy(false)
+    if (!r.ok) setSendErr(r.error || 'panel action failed')
+    onChanged()
   }
 
   // Enter / the form's submit picks the safe default for the current state:
@@ -2410,10 +2496,12 @@ export function AgentRow({
           ))}
         </div>
       ) : null}
+      {s.panel ? <PanelBlock panel={s.panel} busy={busy} onAction={answerPanel} /> : null}
       {queuedList(s.queued).map((q, i, all) => (
         <div className="agent__queued" role="status" key={i}>
           <span className="agent__queued-label hud-label">
             ⏱ queued{all.length > 1 ? ` ${i + 1}/${all.length}` : ''}
+            {i === 0 && s.deliverHold ? ` · ${HOLD_WHY[s.deliverHold.reason] ?? 'held'}` : ''}
           </span>
           <span className="agent__queued-text" title={q.kind === 'atlas-brief' ? q.summary : undefined}>
             {q.kind === 'atlas-brief' ? (
@@ -2466,6 +2554,26 @@ export function AgentRow({
       ))}
       {dict.error ? <div className="agents__err">✗ {dict.error}</div> : null}
       {sendErr ? <div className="agents__err">✗ {sendErr}</div> : null}
+      {boxWarn ? (
+        <div className="agent__menu-warn" role="alert">
+          <span className="agent__menu-warn-text">
+            ⚠ The session&apos;s input box already holds text nobody sent — a draft typed in the terminal, or a
+            message Claude Code held back. Sending now would have been appended to it.
+          </span>
+          <button
+            type="button"
+            className="agent__menu-warn-send"
+            onClick={clearBoxAndSend}
+            disabled={busy || !!reading || (!text.trim() && !images.length)}
+            title="empty the session's input box, then send your text"
+          >
+            Clear it &amp; send
+          </button>
+          <button type="button" className="agent__menu-warn-x" onClick={() => setBoxWarn(false)} title="dismiss this warning">
+            ✕
+          </button>
+        </div>
+      ) : null}
       {menuWarn && s.menuKind === 'choice' ? (
         <div className="agent__menu-warn" role="alert">
           <span className="agent__menu-warn-text">

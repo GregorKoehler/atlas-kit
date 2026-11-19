@@ -198,6 +198,11 @@ test('sendErrorText names the failure class instead of a bare "502"', () => {
   assert.match(sendErrorText({ ok: false, unreachable: true, status: 502, cfRay: '8c1d-FRA', error: 'HTTP 502' }), /not reachable \(HTTP 502 from the edge, ray 8c1d-FRA\).*may not have arrived/)
   assert.match(sendErrorText({ ok: false, unreachable: true, error: 'TypeError: Failed to fetch' }), /not reachable \(network error\)/)
   assert.match(sendErrorText({ ok: false, error: 'menu', status: 409 }), /choice menu/)
+  // The holds: each says nothing was typed, and a draft the operator may own
+  // is said to be left alone.
+  assert.match(sendErrorText({ ok: false, error: 'panel', status: 409 }), /panel is open.*nothing was typed.*Dismiss/)
+  assert.match(sendErrorText({ ok: false, error: 'box-not-empty', status: 409, boxChars: 694 }), /already holds unsent text \(694 characters\).*left alone/)
+  assert.match(sendErrorText({ ok: false, error: 'no-box', status: 409 }), /not on screen.*nothing was typed/)
   assert.equal(sendErrorText({ ok: false, status: 404, error: 'no such session' }), 'no such session')
   assert.equal(sendErrorText({ ok: false }, 'queue'), 'queue failed')
 })

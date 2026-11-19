@@ -82,7 +82,10 @@ import { promptFileBody, promptFileCommand } from '../api/src/prompt-file-launch
 // executor gates delivery on the same verdict, and a bridge-local copy would
 // drift (same reason decideDelivery is shared).
 import { isBusy } from '../api/src/pane-busy.mjs'
-import { typeAndSubmit, payloadFingerprint } from '../api/src/tui-input.mjs'
+import { typeAndSubmit, payloadFingerprint, pressPanelAction, holdResponse, TUI_HOLD_STAGES } from '../api/src/tui-input.mjs'
+// Claude Code's panels over the input box (the feedback-draft card) — the box's
+// detector, imported not copied: delivery holds under one, the card offers its keys.
+import { parsePanel } from '../api/src/pane-panel.mjs'
 // The `agent-msg` / `atlas-query` wrapper sources — ONE copy, written into each
 // container here and onto the box's PATH by agent-local.mjs, so the command an
 // agent runs is identical wherever it runs.
@@ -916,7 +919,11 @@ function publicView(s, status, lastOutput, menuKind, appUp, stats, menuChoice, d
     // order (the card shows each as a cancellable chip). Only text + image count
     // are surfaced.
     ...(Array.isArray(s.queued) && s.queued.length
-      ? { queued: s.queued.map((q) => ({ text: q.text || '', images: (q.paths || []).length })) }
+      ? {
+          queued: s.queued.map((q) => ({ text: q.text || '', images: (q.paths || []).length })),
+          // Why the queue is not going out (a panel, a draft in the box…).
+          ...(s.deliverHold ? { deliverHold: s.deliverHold } : {}),
+        }
       : {}),
     // Live-app slot: the per-session path the dashboard embeds this agent's app
     // at, the session's allocated container port (so the card can tell the
@@ -1045,7 +1052,12 @@ async function listSessions() {
     // fill (sticky logs persisted on the session). Only while alive — a dead
     // session has nothing new, and its transcript may be gone with the container.
     if (alive && mergeTranscript(s, await readContainerTranscript(s))) changed = true
-    return publicView(s, status, tail || s.lastSeen || '', menuKind, await appUpFor(s.id), stats, menuChoice, downloads)
+    // A Claude Code panel over the input box (pane-panel.mjs, shared with the box).
+    const panel = alive ? parsePanel(pane) : null
+    return {
+      ...publicView(s, status, tail || s.lastSeen || '', menuKind, await appUpFor(s.id), stats, menuChoice, downloads),
+      ...(panel ? { panel } : {}),
+    }
   })
   if (changed) persist()
   // newest first
@@ -1444,13 +1456,18 @@ async function prepare(id, text, images) {
 // swallows the words around it (see api/src/tui-input.mjs for the measurement).
 // One implementation, both executors: a second copy would drift and only one
 // would get maintained.
-async function deliver(s, payload) {
+//
+// It also looks BEFORE typing — a panel, no box, a box holding text each hold
+// with nothing typed (TUI_HOLD_STAGES; audited by the callers, once). Mirrors
+// agent-local.mjs, `clearDraft` included (the card's "clear the input & send").
+async function deliver(s, payload, { clearDraft = false } = {}) {
   const d = await typeAndSubmit(payload, {
     readPane: () => captureTail(s, TAIL_LINES, true),
     typeText: (text) => dockerExec(s.container, ['tmux', 'send-keys', '-t', s.tmux, '-l', text]),
     pressKey: (key) => dockerExec(s.container, ['tmux', 'send-keys', '-t', s.tmux, key]),
+    clearDraft,
   })
-  if (!d.ok && d.stage !== 'type') auditDeliverFail(s, payload, d)
+  if (!d.ok && d.stage !== 'type' && !TUI_HOLD_STAGES.has(d.stage)) auditDeliverFail(s, payload, d)
   return d
 }
 
@@ -1484,7 +1501,7 @@ function recordSteer(s, text, steeredBy, source) {
   return true
 }
 
-async function prompt({ id, text, images, force, steeredBy }) {
+async function prompt({ id, text, images, force, steeredBy, clearBox }) {
   const p = await prepare(id, text, images)
   if (p.err) return p.err
   // Refuse to type into a pending CHOICE menu (plan/permission/AskUserQuestion):
@@ -1496,13 +1513,18 @@ async function prompt({ id, text, images, force, steeredBy }) {
     const pane = await captureTail(p.s, TAIL_LINES)
     if (menuKindOf(pane) === 'choice') return { status: 409, ok: false, error: 'menu', menuKind: 'choice' }
   }
-  const d = await deliver(p.s, p.payload)
+  const d = await deliver(p.s, p.payload, { clearDraft: !!clearBox })
+  // Held before a key was typed (a panel, no box, a box holding text) → 409
+  // with the reason. Mirrors agent-local.mjs.
+  if (!d.ok && TUI_HOLD_STAGES.has(d.stage)) {
+    audit({ action: 'prompt-held', id, repo: p.s.repo, stage: d.stage, ...(d.panel ? { panel: d.panel.kind } : {}), len: p.payload.length, ok: false })
+    return holdResponse(d)
+  }
   // 502 here is a CONTRACT, not "the server is down": deliver() either typed
-  // AND submitted, or it submitted NOTHING and cleared the box (typeAndSubmit
-  // in tui-input.mjs). `notDelivered` says exactly that, machine-readably — it
-  // is what lets the client retry this 502 once and only this one: a
-  // *transport* 502 ("bridge unreachable") carries no such proof, and retrying
-  // that could double-send.
+  // AND submitted, or it submitted NOTHING (typeAndSubmit in tui-input.mjs).
+  // `notDelivered` says exactly that, machine-readably — it is what lets the
+  // client retry this 502 once and only this one: a *transport* 502 ("bridge
+  // unreachable") carries no such proof, and retrying that could double-send.
   if (!d.ok) return { status: 502, ok: false, error: d.error, notDelivered: true }
   if (recordSteer(p.s, p.text, steeredBy)) persist()
   audit({ action: 'prompt', id, repo: p.s.repo, len: p.payload.length, images: p.paths.length, ...(steeredBy ? { steeredBy } : {}), ok: true })
@@ -1519,7 +1541,7 @@ async function interrupt({ id, text, images, steeredBy }) {
   await dockerExec(p.s.container, ['tmux', 'send-keys', '-t', p.s.tmux, 'Escape'])
   await sleep(INTERRUPT_SETTLE_MS)
   const d = await deliver(p.s, p.payload)
-  if (!d.ok) return { status: 502, ok: false, error: d.error, notDelivered: true }
+  if (!d.ok) return TUI_HOLD_STAGES.has(d.stage) ? holdResponse(d) : { status: 502, ok: false, error: d.error, notDelivered: true }
   if (recordSteer(p.s, p.text, steeredBy)) persist()
   audit({ action: 'interrupt', id, repo: p.s.repo, len: p.payload.length, images: p.paths.length, ...(steeredBy ? { steeredBy } : {}), ok: true })
   return { status: 200, ok: true }
@@ -1587,7 +1609,7 @@ async function sendNow({ id }) {
   if (!d.ok) {
     s.queued = [q, ...(s.queued || [])]
     persist()
-    return { status: 502, ok: false, error: d.error }
+    return TUI_HOLD_STAGES.has(d.stage) ? holdResponse(d) : { status: 502, ok: false, error: d.error }
   }
   audit({ action: 'queue-send-now', id, repo: s.repo, len: payload.length, images: (q.paths || []).length, ...(d.stripped ? { stripped: d.stripped } : {}), ...(d.cleared ? { cleared: d.cleared } : {}), ok: true })
   return { status: 200, ok: true }
@@ -1596,6 +1618,19 @@ async function sendNow({ id }) {
 // Deliver any queued prompts whose session has gone idle. Runs on a timer so a
 // queued prompt fires even with the dashboard closed. Skips sessions still working
 // (busy marker) or parked on a menu. Re-entrancy-guarded; failed sends retry next tick.
+// A held queue: the reason rides the session to the card (`deliverHold`), and
+// only a CHANGE of reason is logged — never a line per 3 s tick. Mirrors
+// agent-local.mjs.
+function holdQueue(s, hold) {
+  if ((s.deliverHold?.reason || null) === (hold?.reason || null) && (s.deliverHold?.kind || null) === (hold?.kind || null)) return
+  if (hold) {
+    s.deliverHold = { ...hold, at: nowIso() }
+    console.log(`[bridge] queue for ${s.id} held — ${hold.reason}${hold.kind ? ` (${hold.kind})` : ''}; the messages stay queued`)
+  } else delete s.deliverHold
+  audit({ action: hold ? 'queue-held' : 'queue-unheld', id: s.id, repo: s.repo, ...(hold || {}), ok: true })
+  persist()
+}
+
 let flushing = false
 async function flushQueued() {
   if (flushing) return
@@ -1625,11 +1660,22 @@ async function flushQueued() {
         sinceBoundaryMs: s.boundaryAt ? Date.now() - s.boundaryAt : null,
       })
       if (!sel.pick) continue
+      // A panel over the box PARKS the queue — no typing, no backoff ladder —
+      // until it is gone. Mirrors agent-local.mjs.
+      const panel = parsePanel(pane)
+      if (panel) {
+        holdQueue(s, { reason: 'panel', kind: panel.kind })
+        continue
+      }
       const picked = new Set(sel.pick.entries)
       const q = sel.pick.entries[0]
       const dec = { via: sel.pick.via }
       const payload = withImages(deliveryText(sel.pick.entries, Date.now()), sel.pick.entries.flatMap((e) => e.paths || []))
       const d = await deliver(s, payload)
+      if (!d.ok && TUI_HOLD_STAGES.has(d.stage)) {
+        holdQueue(s, { reason: d.stage, ...(d.panel ? { kind: d.panel.kind } : {}) })
+        continue
+      }
       if (!d.ok) {
         s.deliverFailures = (s.deliverFailures || 0) + 1
         const backoffMs = deliveryBackoffMs(s.deliverFailures)
@@ -1643,6 +1689,7 @@ async function flushQueued() {
       }
       delete s.deliverFailures
       delete s.deliverRetryAt
+      holdQueue(s, null)
       // Stamp the mid-turn delivery so the next one is paced (BOUNDARY_MIN_GAP_MS)
       // rather than following on the next 3 s tick — at idle the pacing came free
       // (delivery made the agent busy), mid-turn nothing paces it.
@@ -1681,10 +1728,31 @@ async function keys({ id, keys: ks }) {
   for (const k of ks)
     if (!ALLOWED_KEYS.has(k)) return { status: 400, ok: false, error: `key not allowed: ${k}` }
   if (!(await sessionAlive(s))) return { status: 409, ok: false, error: 'session not running' }
+  // Raw keys never reach a Claude Code PANEL (its `2`, twice, sends feedback to
+  // Anthropic); its safe keys go through panelAction. Mirrors agent-local.mjs.
+  const panel = parsePanel(await captureTail(s, TAIL_LINES))
+  if (panel) return { status: 409, ok: false, error: 'panel', panel }
   const r = await dockerExec(s.container, ['tmux', 'send-keys', '-t', s.tmux, ...ks])
   if (!r.ok) return { status: 502, ok: false, error: r.stderr.slice(0, 500) || 'send-keys failed' }
   audit({ action: 'keys', id, repo: s.repo, keys: ks, ok: true })
   return { status: 200, ok: true }
+}
+
+// Answer the panel blocking a session with one of ITS safe keys (the card's
+// Dismiss / Review / Close) — tui-input.mjs pressPanelAction, shared with the
+// box; `2` is never one. Mirrors agent-local.mjs's panelAction.
+async function panelAction({ id, action }) {
+  const s = registry.sessions[id]
+  if (!s) return { status: 404, ok: false, error: 'no such session' }
+  if (typeof action !== 'string' || !action) return { status: 400, ok: false, error: 'action required' }
+  if (!(await sessionAlive(s))) return { status: 409, ok: false, error: 'session not running' }
+  const r = await pressPanelAction(action, {
+    readPane: () => captureTail(s, TAIL_LINES, true),
+    typeText: (text) => dockerExec(s.container, ['tmux', 'send-keys', '-t', s.tmux, '-l', text]),
+    pressKey: (key) => dockerExec(s.container, ['tmux', 'send-keys', '-t', s.tmux, key]),
+  })
+  audit({ action: 'panel-action', id, repo: s.repo, panelAction: action, ...(r.panel ? { left: r.panel.kind } : {}), ...(r.ok ? {} : { error: r.error }), ok: r.ok })
+  return r.ok ? { status: 200, ok: true, panel: r.panel } : { status: 409, ok: false, error: r.error, panel: r.panel }
 }
 
 // Verified selection of a pending choice-menu option — mirrors the box-local
@@ -1989,7 +2057,7 @@ const server = http.createServer(async (req, res) => {
       const r = redeployStatus()
       return send(res, r.status, r)
     }
-    const POST_ROUTES = { '/spawn': spawn, '/prompt': prompt, '/interrupt': interrupt, '/queue': queuePrompt, '/unqueue': unqueue, '/send-now': sendNow, '/kill': kill, '/cleanup': cleanup, '/keys': keys, '/select': selectChoice, '/redeploy': redeploy, '/outbox': takeOutbox }
+    const POST_ROUTES = { '/spawn': spawn, '/prompt': prompt, '/interrupt': interrupt, '/queue': queuePrompt, '/unqueue': unqueue, '/send-now': sendNow, '/kill': kill, '/cleanup': cleanup, '/keys': keys, '/panel': panelAction, '/select': selectChoice, '/redeploy': redeploy, '/outbox': takeOutbox }
     if (req.method === 'POST' && POST_ROUTES[p]) {
       // spawn/prompt/interrupt/queue may carry base64 image attachments → a roomier
       // cap. /outbox joins them: an Atlas-query verdict carries the ANSWER, and a

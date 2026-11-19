@@ -1,0 +1,60 @@
+
+[38;5;174m ▐[48;5;16m▛███▛█[39m[49m   [1mClaude Code[0m [38;5;246mv2.1.300[39m
+[38;5;174m▝▜[48;5;16m█████[49m█▀[39m  [38;5;246mOpus 5.5 · Claude Max[39m
+[38;5;174m ▝▝   ▝▝ [39m  [38;5;246m/…/00000000-0000-4000-8000-000000000000/scratchpad/probe-cwd[39m
+
+
+[38;5;246m[48;5;237m❯ [38;5;231mThis is a harness test. Please call your SendFeedback tool exactly once to [39m
+  [38;5;231mdraft a harmless test report: type idea, title 'Panel probe test draft, [39m
+  [38;5;231mplease ignore', details '- [1mWhat happened:[0m[38;5;231m[48;5;237m harness test of the feedback draft [39m
+  [38;5;231mpanel, nothing to report.'. Do not do anything else and do not send anything.[39m
+
+[38;5;114m[49m●[39m [1mSendFeedback[0m(Panel probe test draft, please ignore)
+
+[38;5;231m●[39m I drafted the test report and nothing was sent. It's queued locally, and you
+  can review or send it with [38;5;153m/feedback[39m.
+
+[38;5;246m✻[39m [38;5;246mWorked for 4s · done 5:20 PM[39m
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+╭──────────────────────────────────────────────────────────────────────────╮
+│ [38;5;174m✻ [39mProduct feedback drafted: [1mPanel probe test draft, please ignore[0m        │
+│ [2m│[0m - [1mWhat happened:[0m harness test of the feedback draft panel, nothing to  │
+│ [2m│[0m report.                                                                │
+│ [38;5;246m1 to review · 2 to send · 0 to dismiss[39m                                   │
+╰──────────────────────────────────────────────────────────────────────────╯
+
+
+[38;5;244m────────────────────────────────────────────────────────────────────────────────
+[39m❯ say hi back, nothing else
+[38;5;244m────────────────────────────────────────────────────────────────────────────────
+[39m  [38;5;220m⏵⏵ auto mode on[38;5;246m (shift+tab to cycle) · 1 feedback draft[39m

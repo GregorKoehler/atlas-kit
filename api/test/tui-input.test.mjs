@@ -270,9 +270,9 @@ test('the gate is one env var away from the unconditional-Enter behaviour; sanit
   const src = fs.readFileSync(path.join(root, 'api', 'src', 'tui-input.mjs'), 'utf8')
   const fn = src.slice(src.indexOf('export async function typeAndSubmit('))
   assert.match(fn, /const safe = sanitizeForTyping\(payload\)/)
-  assert.match(fn, /if \(TUI_VERIFY\) \{/, 'pre-type clear is behind the switch')
+  assert.match(fn, /if \(TUI_VERIFY\) \{\n\s+const pre = await readPane\(\)/, 'the pre-type look is behind the switch')
   assert.match(fn, /if \(TUI_VERIFY && !\(await settled\(readPane, landed, sleep\)\)\)/, 'so is the read-back')
-  assert.match(fn, /if \(TUI_VERIFY && readable && /, 'so is the submit check')
+  assert.match(fn, /if \(TUI_VERIFY && !\(await settled\(readPane, \(p\) => !inputBoxText\(p\), sleep\)\)\)/, 'so is the submit check')
 })
 
 test('the clear loop SETTLES between press and look, or lag reads as a fixpoint', async () => {
@@ -338,7 +338,10 @@ for (const [name, src] of Object.entries(executors)) {
   })
 
   test(`${name}: a refused prompt or interrupt is a notDelivered 502 — the client's one safe retry`, () => {
-    assert.equal((src.match(/if \(!d\.ok\) return \{ status: 502, ok: false, error: d\.error, notDelivered: true \}/g) || []).length, 2)
+    assert.equal((src.match(/\{ status: 502, ok: false, error: d\.error, notDelivered: true \}/g) || []).length, 2)
+    // …and a HOLD (nothing typed: a panel, no box, a draft in the box) is a 409
+    // with its reason, never the 502 the client would retry.
+    assert.match(src, /TUI_HOLD_STAGES\.has\(d\.stage\)\) \{\n\s+audit\(\{ action: 'prompt-held'/)
   })
 
   test(`${name}: a refused head backs off instead of retrying every tick`, () => {
@@ -535,22 +538,71 @@ test('typeAndSubmit: a long paste must SHOW UP before Enter — the stale empty 
   assert.equal(shownAtEnter, 2000, 'Enter only after the paste was on screen')
 })
 
-test('typeAndSubmit: a box that will not clear stops BEFORE typing', async () => {
+test('typeAndSubmit: text already in the box is neither typed onto NOR wiped — nothing is pressed', async () => {
+  // The old pre-type clear made "whatever is in the box" ours to
+  // delete, and failing open on an unseen box let the next copy stack on it.
+  // Now a non-empty box is a refusal: it is an operator's draft, Claude Code
+  // holding a send, or a failure of ours that could not be cleaned up.
+  const tui = new FakeTui()
+  tui.set('my own half-written thought')
+  const r = await typeAndSubmit('a queued fleet note', tui.io())
+  assert.equal(r.stage, 'box-not-empty')
+  assert.equal(r.residue, 'myownhalf-writtenthought'.length)
+  assert.deepEqual(tui.keys, [], 'no C-u, no Enter')
+  assert.equal(tui.content, 'my own half-written thought', 'the draft is untouched')
+})
+
+test('typeAndSubmit: clearDraft (an explicit "clear & send") empties the box, verified, then delivers', async () => {
+  const tui = new FakeTui()
+  tui.set('x'.repeat(300))
+  const r = await typeAndSubmit('ship it', { ...tui.io(), clearDraft: true })
+  assert.equal(r.ok, true)
+  assert.ok(r.cleared >= 4, 'C-u until the box was SEEN empty')
+  assert.deepEqual(tui.submitted, ['ship it'])
+})
+
+test('typeAndSubmit: clearDraft on a box that will not clear stops BEFORE typing', async () => {
   const churn = { n: 0 }
   const io = {
     readPane: async () => ['─'.repeat(80), '❯ residue ' + churn.n, '─'.repeat(80)].join('\n'),
     typeText: async () => { throw new Error('must not type') },
     pressKey: async () => { churn.n++ },
     sleep: async () => {},
+    clearDraft: true,
   }
   const r = await typeAndSubmit('hello', io)
   assert.equal(r.stage, 'box-stuck')
 })
 
-test('typeAndSubmit: no box on the pane (a dialog owns it) is refused with boxSeen:false', async () => {
-  // A session parked in `/login` has no input box on screen.
-  const io = { readPane: async () => 'Select login method:\n ❯ 1. Claude account', typeText: async () => ({ ok: true }), pressKey: async () => {}, sleep: async () => {} }
+test('typeAndSubmit: no box on the pane (a dialog owns it) is refused BEFORE typing', async () => {
+  // E.g. a session parked in `/login`. That used to be typed blind and then refused as 'mangled' with `emptied: true`.
+  const io = { readPane: async () => 'Select login method:\n ❯ 1. Claude account', typeText: async () => { throw new Error('must not type') }, pressKey: async () => { throw new Error('must not press') }, sleep: async () => {} }
   const r = await typeAndSubmit('did the login work?', io)
-  assert.equal(r.stage, 'mangled')
-  assert.equal(r.boxSeen, false)
+  assert.equal(r.stage, 'no-box')
+})
+
+test('typeAndSubmit: `emptied` is only claimed for a box SEEN empty — and the retry cannot stack', async () => {
+  // The feedback-panel incident's shape (pane-panel.mjs): the text lands, the read-back can neither confirm it nor
+  // find the box afterwards. It used to report `emptied: true` (clearInputBox
+  // fails OPEN on an unseen box), the text stayed, and every retry appended
+  // another copy — ~10 of them went in as one turn.
+  const tui = new FakeTui()
+  const render = tui.render.bind(tui)
+  tui.render = () => (tui.content ? 'the box is not on this capture\n  ⏵⏵ bypass permissions on' : render())
+  const first = await typeAndSubmit('can you unlock the whole domain?', tui.io())
+  assert.equal(first.stage, 'mangled')
+  assert.equal(first.boxSeen, false)
+  assert.equal(first.emptied, false, 'an unseen box is not an emptied box')
+  for (let retry = 0; retry < 10; retry++) {
+    const r = await typeAndSubmit('can you unlock the whole domain?', tui.io())
+    assert.equal(r.stage, 'no-box')
+  }
+  assert.equal(tui.content, 'can you unlock the whole domain?', 'ONE copy, never a stack')
+  assert.deepEqual(tui.submitted, [])
+})
+
+test('the faint "Press up to edit queued messages" hint is an EMPTY box (real capture, 2.1.296)', () => {
+  // A busy agent with a message parked in Claude Code's own queue. Since the
+  // box is no longer cleared on the way in, this hint must not read as a draft.
+  assert.equal(inputBoxText(pane('box-queued-hint-faint-ansi')), '')
 })

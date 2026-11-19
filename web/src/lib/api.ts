@@ -1076,6 +1076,17 @@ export interface AgentSession {
     kind?: 'atlas-brief' | 'agent-msg' | 'fleet-note' | 'reply-receipt' | 'turn-end' | 'steer' | 'operator'
     summary?: string
   }>
+  /** Why the queue above is NOT going out (only sent while something is
+   * queued): a Claude Code panel over the input box, no box on screen, or a
+   * box already holding text. Held, not failing — it retries every tick and
+   * delivers the moment the reason is gone. Absent from an older bridge. */
+  deliverHold?: { reason: DeliverHoldReason; kind?: string; at?: string }
+  /** A Claude Code panel parked over the input box (the feedback-draft card
+   * "1 to review · 2 to send · 0 to dismiss", the session survey) — read off
+   * the pane (api/src/pane-panel.mjs). Nothing is typed into the session while
+   * it is up; `actions` are the panel's own SAFE keys (never "send"), driven by
+   * `panelAgent`. Absent while none is open, and from an older bridge. */
+  panel?: AgentPanel
   /** Approx context-window fill from the agent's latest turn — `contextTokens`
    * of `contextWindow` tokens. Box-local agents only (the box can read their
    * transcripts); omitted when no transcript is readable, so the bar is optional. */
@@ -1296,6 +1307,15 @@ export interface ScheduledAction {
   targetId?: string
 }
 
+export type DeliverHoldReason = 'panel' | 'no-box' | 'box-not-empty'
+export type AgentPanelAction = 'dismiss' | 'review' | 'close' | 'keep' | 'back'
+export interface AgentPanel {
+  kind: 'feedback-draft' | 'feedback-off-prompt' | 'feedback-review' | 'survey' | 'panel'
+  /** What the panel says, minus its key hints (the actions are those keys). */
+  text: string
+  actions: { id: AgentPanelAction; key: string }[]
+}
+
 export interface AgentActionResult {
   ok: boolean
   error?: string
@@ -1314,6 +1334,11 @@ export interface AgentActionResult {
   unreachable?: boolean
   /** Cloudflare's ray id for an `unreachable` answer, when the edge sent one. */
   cfRay?: string
+  /** A 409 hold (`error` ∈ DeliverHoldReason): the panel that blocks the
+   * session — and, on a panel action, the panel open afterwards (null: none). */
+  panel?: AgentPanel | null
+  /** A 409 `box-not-empty`: how many characters already sit in the box. */
+  boxChars?: number
 }
 
 /** Bundled view of the workstation's agent sessions (GET /api/agents). */
@@ -1502,6 +1527,9 @@ function flushSendFailures() {
  * the text in every case — callers clear it only on success. */
 export function sendErrorText(r: AgentActionResult, what = 'send'): string {
   if (r.error === 'menu') return 'A choice menu is open in the session — answer it, or dismiss it (Esc) and send again.'
+  if (r.error === 'panel') return 'A Claude Code panel is open in the session (see above) — nothing was typed. Dismiss it, then send again.'
+  if (r.error === 'box-not-empty') return `The session's input box already holds unsent text${r.boxChars ? ` (${r.boxChars} characters)` : ''} — nothing was typed, and it was left alone.`
+  if (r.error === 'no-box') return "The session's input box is not on screen (a dialog is open?) — nothing was typed. Check the terminal view (>_)."
   if (r.notDelivered) return 'Message not delivered — the session did not take it, nothing was sent. Your text is still here: press send again.'
   if (r.unreachable) {
     const via = r.status ? ` (HTTP ${r.status} from the edge${r.cfRay ? `, ray ${r.cfRay}` : ''})` : ' (network error)'
@@ -1569,6 +1597,9 @@ export async function promptAgent(body: {
   text: string
   images?: AgentAttachment[]
   force?: boolean
+  /** Empty the session's input box first (verified) — only the card's
+   * explicit "clear the input & send" after a 409 `box-not-empty`. */
+  clearBox?: boolean
 }): Promise<AgentActionResult> {
   const first = await agentPost('prompt', body)
   if (first.ok || first.status !== 502 || !first.notDelivered) return first
@@ -1620,6 +1651,12 @@ export function unshipAgent(id: string): Promise<AgentActionResult> {
  * parked prompt immediately, instead of waiting for the turn to finish. */
 export function sendQueuedNowAgent(id: string): Promise<AgentActionResult> {
   return agentPost('send-now', { id })
+}
+/** Answer the Claude Code panel blocking a session with one of its own safe
+ * keys (`action` from `panel.actions`) — re-read off the live pane server-side;
+ * "send" is never an action. The result's `panel` is what is open afterwards. */
+export function panelAgent(id: string, action: AgentPanelAction): Promise<AgentActionResult> {
+  return agentPost('panel', { id, action })
 }
 /** Send navigation/confirm keys to a session's TUI (select a menu option or accept). */
 export function sendAgentKeys(body: { id: string; keys: string[] }): Promise<AgentActionResult> {

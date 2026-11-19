@@ -1,0 +1,15 @@
+[38;5;246m✻[39m [38;5;246mCogitated for 1m 51s · done 5:18 PM[39m
+
+╭──────────────────────────────────────────────────────────────────────────────╮
+│ [38;5;174m✻ [39mBug report drafted: [1mModel mislabelled a warning as an error in a log summ…[0m │
+│ [2m│[0m - [1mWhat happened:[0m Asked to summarise a build log, the model labelled the    │
+│ [2m│[0m first deprecation warning as a fatal error and stopped reading. The        │
+│ [2m│[0m build went o…                                                              │
+│ [38;5;246m1 to review · 2 to send · 0 to dismiss[39m                                       │
+╰──────────────────────────────────────────────────────────────────────────────╯
+
+                                                         [38;5;246m7% until auto-compact[39m
+[38;5;244m────────────────────────────────────────────────────────────────────────────────
+[39m❯ 
+[38;5;244m────────────────────────────────────────────────────────────────────────────────
+[39m  [38;5;211m⏵⏵ bypass permissions on[38;5;246m (shift+tab to cycle) · ← for agents · 1 feedback d…[39m

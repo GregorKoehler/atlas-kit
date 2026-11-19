@@ -1,0 +1,15 @@
+✻ Cogitated for 1m 51s · done 5:18 PM
+
+╭──────────────────────────────────────────────────────────────────────────────╮
+│ ✻ Bug report drafted: Model mislabelled a warning as an error in a log summ… │
+│ │ - What happened: Asked to summarise a build log, the model labelled the    │
+│ │ first deprecation warning as a fatal error and stopped reading. The        │
+│ │ build went o…                                                              │
+│ 1 to review · 2 to send · 0 to dismiss                                       │
+╰──────────────────────────────────────────────────────────────────────────────╯
+
+                                                         7% until auto-compact
+────────────────────────────────────────────────────────────────────────────────
+❯ 
+────────────────────────────────────────────────────────────────────────────────
+  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents · 1 feedback d…

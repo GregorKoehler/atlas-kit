@@ -61,9 +61,18 @@ tick ([§1b](#1b-an-observation-is-only-true-when-it-was-made)):
   forwarding — an unstamped entry would silently read as observational.
 
 A pending **menu** holds every kind (typing into a menu is a selection, not text), as does
-being the active ship-train head. A delivery the executor refuses (a box it can't clear, a
-buffer that won't read back) backs the session off with `deliveryBackoffMs` instead of
-retrying every 3 s; the message stays queued. `AGENT_BOUNDARY_DELIVERY=0` /
+being the active ship-train head. So does a **hold**: delivery looks at the pane before it
+types a key (`typeAndSubmit`, `tui-input.mjs`), and a Claude Code **panel** above the box (the
+feedback-draft card, the session survey — `pane-panel.mjs`), no input box on screen, or a box
+that already holds text each refuse with *nothing typed*. The queue parks on its reason
+(`deliverHold`, shown on the first queued chip; `queue-held`/`queue-unheld` audited once per
+change, no backoff ladder) and delivers the moment it is gone; a direct prompt answers `409`
+with the reason. Text already in the box is never typed onto and never wiped — only the card's
+explicit "Clear it & send" and the lifecycle prompts (ship, close/recap, ingest hand-off) clear
+it first, verified. The card answers a panel through `POST /api/agents/panel` with the panel's
+own safe keys (dismiss `0`, review `1`, Esc) — never its `2`, which sends feedback to Anthropic.
+A delivery the executor refuses after typing (a buffer that won't read back) backs the session
+off with `deliveryBackoffMs` instead of retrying every 3 s; the message stays queued. `AGENT_BOUNDARY_DELIVERY=0` /
 `BRIDGE_BOUNDARY_DELIVERY=0` restore idle-only delivery, independently per executor.
 
 ---

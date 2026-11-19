@@ -2278,6 +2278,9 @@ export function agentRouter(bearerAuth) {
     // `force` bypasses the pending-choice-menu guard — set by the card's "dismiss
     // menu & send" after it has Escaped the menu (see local/bridge prompt()).
     body.force = !!(req.body && req.body.force)
+    // `clearBox` empties a box that already held text first — the card's "clear
+    // the input & send", offered only after a 409 box-not-empty.
+    if (req.body && req.body.clearBox === true) body.clearBox = true
     if (local.hasSession(body.id)) return sendLocal(res, armIfSent(body, await local.prompt(body)))
     const r = armIfSent(body, await callBridgeForId('POST', '/prompt', body, body.id, BRIDGE_EXEC_TIMEOUT_MS))
     res.status(r.status).json(r.body)
@@ -2440,6 +2443,21 @@ export function agentRouter(bearerAuth) {
     if (!Array.isArray(keys) || !keys.length) return res.status(400).json({ ok: false, error: 'missing "keys"' })
     if (local.hasSession(id)) return sendLocal(res, await local.keys({ id, keys }))
     const r = await callBridgeForId('POST', '/keys', { id, keys }, id, BRIDGE_EXEC_TIMEOUT_MS)
+    res.status(r.status).json(r.body)
+  })
+
+  // Answer a Claude Code PANEL over the input box (the feedback-draft card,
+  // the session survey) with one of its own safe keys: `action` is dismiss /
+  // review / close / keep / back, re-read off the live pane by the executor —
+  // never a key from the client, and never `2` (send feedback to Anthropic:
+  // the operator's call, in the terminal). An un-restarted bridge 404s here,
+  // which the card shows as an error; nothing is pressed.
+  router.post('/api/agents/panel', bearerAuth, async (req, res) => {
+    const { id, action } = req.body || {}
+    if (!id || typeof id !== 'string') return res.status(400).json({ ok: false, error: 'missing "id"' })
+    if (!action || typeof action !== 'string') return res.status(400).json({ ok: false, error: 'missing "action"' })
+    if (local.hasSession(id)) return sendLocal(res, await local.panelAction({ id, action }))
+    const r = await callBridgeForId('POST', '/panel', { id, action }, id, BRIDGE_EXEC_TIMEOUT_MS)
     res.status(r.status).json(r.body)
   })
 
