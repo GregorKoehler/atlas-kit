@@ -1588,7 +1588,7 @@ export function spawnAgent(body: {
    * against an Anthropic-compatible endpoint, for a dev agent or a knowledge
    * chat. Omit for the default subscription backend. */
   provider?: string
-  /** File attachments folded into the spawn prompt (dev agents only) — the same
+  /** File attachments folded into the spawn prompt (dev and knowledge) — the same
    * base64 `data:` URLs as a prompt's, capped at the API's AGENT_MAX_IMAGES. */
   images?: AgentAttachment[]
 }): Promise<AgentActionResult> {

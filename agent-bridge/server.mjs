@@ -82,6 +82,8 @@ import { promptFileBody, promptFileCommand } from '../api/src/prompt-file-launch
 // executor gates delivery on the same verdict, and a bridge-local copy would
 // drift (same reason decideDelivery is shared).
 import { isBusy } from '../api/src/pane-busy.mjs'
+// withImages: attached-file paths folded into the prompt, `[Image N]` markers in place.
+import { withImages } from '../api/src/agent-attachments.mjs'
 import { typeAndSubmit, payloadFingerprint, pressPanelAction, holdResponse, TUI_HOLD_STAGES } from '../api/src/tui-input.mjs'
 // Claude Code's panels over the input box (the feedback-draft card) — the box's
 // detector, imported not copied: delivery holds under one, the card offers its keys.
@@ -199,7 +201,8 @@ const AGENT_MEM_CHARGE_SWAP = !/^(0|false|no|off)$/i.test(process.env.BRIDGE_AGE
 // Upload limits (the /prompt path can carry attached files). The request body
 // cap is raised for /prompt to fit base64 payloads (see readBody / the router).
 // The `images` wire field is historical; it now carries any file type.
-const MAX_IMAGES = Number(process.env.BRIDGE_MAX_IMAGES || 6)
+// The COUNT cap is 20: a pasted message with several screenshots in it.
+const MAX_IMAGES = Number(process.env.BRIDGE_MAX_IMAGES || 20)
 const MAX_IMAGE_BYTES = Number(process.env.BRIDGE_MAX_IMAGE_BYTES || 8 * 1024 * 1024)
 // Live-stats file an agent publishes inside its container (see STATS_PREAMBLE in
 // the dashboard). The bridge cats it each /sessions poll and returns the raw
@@ -642,16 +645,6 @@ async function writeImages(container, id, images) {
     paths.push(file)
   }
   return paths
-}
-
-// Fold attached-file paths into a SINGLE-LINE prompt (newlines would submit
-// early in the TUI). The agent is told to Read them before responding.
-function withImages(text, paths) {
-  if (!paths.length) return text
-  const noun = paths.length > 1 ? 'files' : 'a file'
-  const them = paths.length > 1 ? 'them' : 'it'
-  const tail = `[I attached ${noun} at: ${paths.join(', ')} — use the Read tool to view ${them} before responding.]`
-  return text ? `${text} ${tail}` : tail
 }
 
 async function sessionAlive(s) {

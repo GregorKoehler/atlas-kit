@@ -52,7 +52,7 @@ import { EVIDENCE_FRAMING_BYTES } from './atlas-candidates.mjs'
 const BRIDGE_TIMEOUT_MS = Number(process.env.AGENT_BRIDGE_TIMEOUT_MS || 8000)
 const BRIDGE_EXEC_TIMEOUT_MS = Number(process.env.AGENT_BRIDGE_EXEC_TIMEOUT_MS || 30000)
 // Cap on image attachments per prompt (also enforced in each executor).
-const MAX_IMAGES = Number(process.env.AGENT_MAX_IMAGES || 6)
+const MAX_IMAGES = Number(process.env.AGENT_MAX_IMAGES || 20)
 // The prompt route opts out of the global 32kb parser (LARGE_BODY_ROUTES in
 // server.mjs) so it can carry base64 images; parse it here with a roomier limit.
 const jsonPrompt = express.json({ limit: process.env.AGENT_PROMPT_BODY_LIMIT || '24mb' })

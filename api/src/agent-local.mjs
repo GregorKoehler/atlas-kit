@@ -59,6 +59,8 @@ import { capacityVerdict, readMemStatus } from './agent-capacity.mjs'
 // the spinner line above the input box — because the footer is rendered to the
 // pane width and drops that marker mid-turn. Shared, not copied.
 import { isBusy } from './pane-busy.mjs'
+// withImages: attached-file paths folded into the prompt, `[Image N]` markers in place.
+import { withImages } from './agent-attachments.mjs'
 import { typeAndSubmit, payloadFingerprint, pressPanelAction, holdResponse, TUI_HOLD_STAGES } from './tui-input.mjs'
 import { parsePanel } from './pane-panel.mjs'
 // A launch prompt travels by FILE, never inside the tmux command — the shell
@@ -188,7 +190,8 @@ const APP_PORT = Number(process.env.AGENT_LOCAL_APP_PORT || 8701)
 const APP_PROBE_MS = Number(process.env.AGENT_LOCAL_APP_PROBE_MS || 300)
 // Upload limits (the prompt path can carry attached files — see prompt()). The
 // `images` wire field is historical; it now carries any file type.
-const MAX_IMAGES = Number(process.env.AGENT_MAX_IMAGES || 6)
+// The COUNT cap is 20: a pasted message with several screenshots in it.
+const MAX_IMAGES = Number(process.env.AGENT_MAX_IMAGES || 20)
 const MAX_IMAGE_BYTES = Number(process.env.AGENT_MAX_IMAGE_BYTES || 8 * 1024 * 1024)
 // Sanity cap on a single prompt's text, delivered as one literal tmux
 // send-keys line — not a real terminal paste, so no bracketed-paste chunking.
@@ -485,16 +488,6 @@ export function saveImages(id, images) {
     paths.push(file)
   }
   return paths
-}
-
-// Fold attached-file paths into a SINGLE-LINE prompt (newlines would submit
-// early in the TUI). The agent is told to Read them before responding.
-function withImages(text, paths) {
-  if (!paths.length) return text
-  const noun = paths.length > 1 ? 'files' : 'a file'
-  const them = paths.length > 1 ? 'them' : 'it'
-  const tail = `[I attached ${noun} at: ${paths.join(', ')} — use the Read tool to view ${them} before responding.]`
-  return text ? `${text} ${tail}` : tail
 }
 
 function readJson(file, fallback) {
@@ -2057,7 +2050,8 @@ export async function reviveAll() {
  * none the prompt must stay BYTE-IDENTICAL to what an unbriefed spawn has always
  * had. `{statsFile}`/`{downloadsDir}`/`{worktree}` are this session's own paths
  * (only the executor knows the id); attached-file paths fold into the task text
- * as a single-line tail, the same mechanism a follow-up prompt's images use. */
+ * (an appended tail, or in place at `[Image N]` markers), the same mechanism a
+ * follow-up prompt's images use. */
 export function devPrompt({ id, task, repo, preamble, context, worktree, imagePaths = [] }) {
   const taskBody = withImages(task, imagePaths)
   if (!preamble) return taskBody
@@ -2242,8 +2236,8 @@ export async function spawn({ task, repo, preamble, model, effort, context, imag
  * asked can never read as part of the briefing. `{downloadsDir}` in the preamble
  * (DOWNLOADS_PREAMBLE) becomes this chat's own download dir. */
 export function knowledgePrompt({ id, question, preamble, context, imagePaths = [] }) {
-  // Attached-file paths fold into the question text (a single-line tail) so the
-  // chat reads them on its first turn — same mechanism as a dev spawn's.
+  // Attached-file paths fold into the question text (an appended tail, or in
+  // place at `[Image N]` markers) so the chat reads them on its first turn — same mechanism as a dev spawn's.
   const body = withImages(question, imagePaths)
   return preamble
     ? `${preamble.replaceAll('{downloadsDir}', downloadsDir(id))}${context ? `\n\n${context}` : ''}\n\n---\n# Operator question\n${body}`
