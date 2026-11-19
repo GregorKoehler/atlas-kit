@@ -1,17 +1,6 @@
 import { useState } from 'preact/hooks'
 import type { WikiPage } from './api'
-
-interface ReaderEntry {
-  path: string | null
-  missing: string | null
-}
-
-// Resolve a wikilink title against the page manifest: a known title opens its
-// note; an unknown one becomes a "not yet created" placeholder.
-function resolveTarget(target: string, pages: WikiPage[] | null | undefined): ReaderEntry {
-  const hit = (pages ?? []).find((p) => p.title.toLowerCase() === target.toLowerCase())
-  return hit ? { path: hit.path, missing: null } : { path: null, missing: target }
-}
+import { resolveTarget, type ReaderEntry } from './vaultLinks'
 
 /**
  * Drives the note-reader overlay with a back-stack. Opening from outside the
@@ -21,11 +10,12 @@ function resolveTarget(target: string, pages: WikiPage[] | null | undefined): Re
 export function useNoteReader(pages: WikiPage[] | null | undefined) {
   // Visited entries; the last is the current page. Empty → reader closed.
   const [stack, setStack] = useState<ReaderEntry[]>([])
-  const current = stack[stack.length - 1] ?? { path: null, missing: null }
+  const current: ReaderEntry = stack[stack.length - 1] ?? { path: null, missing: null }
 
   return {
     path: current.path,
     missing: current.missing,
+    anchor: current.anchor,
     canGoBack: stack.length > 1,
     // Opened from outside the reader → fresh history.
     openPath: (path: string) => setStack([{ path, missing: null }]),

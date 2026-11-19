@@ -37,7 +37,8 @@ import {
 } from '../../lib/api'
 import { AgentsOverview } from './AgentsOverview'
 import { AgentDownloads } from '../AgentDownloads'
-import { Markdown } from '../../lib/markdown'
+import { ChatVault, ExtLink, Markdown, linkNodes } from '../../lib/markdown'
+import { findLinks } from '../../lib/linkify'
 import { defaultSwitcherOpen, persistSwitcherOpen } from '../../lib/switcherPref'
 import { useUsage, fmtReset } from '../../lib/useUsage'
 import { useHost, gb } from '../../lib/useHost'
@@ -126,13 +127,13 @@ function AskQuestionBlock({ q }: { q: NonNullable<AgentHistoryTool['askUserQuest
         <div key={i} className="agent__ask-q">
           <div className="agent__ask-q-title hud-label">
             ❓ {qq.header ? `${qq.header} — ` : ''}
-            {qq.question}
+            {linkNodes(qq.question)}
             {qq.multiSelect ? ' (multi-select)' : ''}
           </div>
           {qq.options.map((o, oi) => (
             <div key={oi} className="agent__ask-opt">
-              <span className="agent__ask-opt-label">{o.label}</span>
-              {o.description ? <span className="agent__ask-opt-desc"> — {o.description}</span> : null}
+              <span className="agent__ask-opt-label">{linkNodes(o.label)}</span>
+              {o.description ? <span className="agent__ask-opt-desc"> — {linkNodes(o.description)}</span> : null}
             </div>
           ))}
         </div>
@@ -159,7 +160,7 @@ function OutboundBlock({ o }: { o: NonNullable<AgentHistoryTool['outbound']> }) 
       {note ? <div className="agent__outbound-note">{note}</div> : null}
       {body ? (
         <>
-          <div className="agent__outbound-text">{open || !body.hasMore ? body.full : body.preview}</div>
+          <div className="agent__outbound-text">{linkNodes(open || !body.hasMore ? body.full : body.preview)}</div>
           {body.hasMore ? (
             <button type="button" className="briefs__toggle agent__outbound-toggle" onClick={() => setOpen(!open)}>
               <span className="briefs__caret">{open ? '▾' : '▸'}</span>
@@ -184,8 +185,8 @@ function AskAnswerMsg({ a, ts }: { a: NonNullable<AgentHistoryMessage['askUserQu
       {a.outcome === 'answered' && a.answers
         ? Object.entries(a.answers).map(([q, label]) => (
             <div key={q} className="agent__answered-pick">
-              {q ? <div className="agent__answered-q">{q}</div> : null}
-              {label}
+              {q ? <div className="agent__answered-q">{linkNodes(q)}</div> : null}
+              {linkNodes(label)}
             </div>
           ))
         : null}
@@ -220,7 +221,7 @@ function LocalCommandMsg({ c, ts }: { c: LocalCommand; ts: string | null }) {
       ) : null}
       {out ? (
         <div className="agent__cmd-out">
-          {open || !out.hasMore ? out.full : out.preview}
+          {linkNodes(open || !out.hasMore ? out.full : out.preview)}
           {out.hasMore ? (
             <button type="button" className="briefs__toggle agent__outbound-toggle" onClick={() => setOpen(!open)}>
               <span className="briefs__caret">{open ? '▾' : '▸'}</span>
@@ -285,7 +286,7 @@ const HistMsg = memo(
               <Markdown source={m.text} />
             </div>
           ) : (
-            <div className="agent__msg-text">{m.text}</div>
+            <div className="agent__msg-text">{linkNodes(m.text)}</div>
           )
         ) : null}
         {m.tools.length ? (
@@ -336,7 +337,7 @@ function PendingAskMsg({ p }: { p: PendingAsk }) {
   return (
     <div className="agent__msg agent__msg--answered agent__msg--pending-ask">
       <div className="agent__msg-from">selecting…</div>
-      <div className="agent__answered-pick">{p.text}</div>
+      <div className="agent__answered-pick">{linkNodes(p.text)}</div>
     </div>
   )
 }
@@ -437,29 +438,57 @@ export const EFFORT_LABEL: Record<string, string> = { high: 'High', xhigh: 'Very
 // pane's SGR escape codes. We strip the colours (the transcript renders plain)
 // but honour *faint* (ESC[2m … ESC[0m/22m) so Claude Code's dim input-box
 // placeholder shows muted instead of reading as a real, pending message.
+// URLs are linked over the STRIPPED text (lib/linkify.ts), so one the TUI dims
+// or hard-wraps across rows still links whole.
 const SGR = /\x1b\[([0-9;]*)m/g
 function renderTranscript(raw: string): (string | VNode)[] {
-  const nodes: (string | VNode)[] = []
-  let faint = false
+  // 1. The plain text, plus the [start, end) spans of it that were faint.
+  let text = ''
+  const faint: [number, number][] = []
+  let from = -1
   let cursor = 0
-  let key = 0
-  const push = (text: string) => {
-    // Drop any stray non-SGR escapes so they never leak as literal garbage.
-    const clean = text.replace(/\x1b\[[0-9;?]*[A-Za-z]/g, '')
-    if (!clean) return
-    nodes.push(faint ? <span className="agent__dim" key={key++}>{clean}</span> : clean)
-  }
+  // Drop any stray non-SGR escapes so they never leak as literal garbage —
+  // incl. OSC 8 hyperlinks (`ESC]8;id=…;url ESC\`, which Claude Code wraps
+  // links in and tmux 3.4 keeps), or `]8;id=…;https://…` shows as text.
+  const take = (chunk: string) =>
+    (text += chunk.replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, '').replace(/\x1b\[[0-9;?]*[A-Za-z]/g, ''))
   SGR.lastIndex = 0
   let m: RegExpExecArray | null
   while ((m = SGR.exec(raw))) {
-    push(raw.slice(cursor, m.index))
+    take(raw.slice(cursor, m.index))
     cursor = SGR.lastIndex
     for (const code of m[1].split(';')) {
-      if (code === '2') faint = true
-      else if (code === '' || code === '0' || code === '22') faint = false
+      if (code === '2' && from < 0) from = text.length
+      else if ((code === '' || code === '0' || code === '22') && from >= 0) {
+        faint.push([from, text.length])
+        from = -1
+      }
     }
   }
-  push(raw.slice(cursor))
+  take(raw.slice(cursor))
+  if (from >= 0) faint.push([from, text.length])
+  // 2. Emit it, cut at every faint and link boundary.
+  let key = 0
+  const dimmed = (a: number, b: number) => {
+    const out: (string | VNode)[] = []
+    for (const [fa, fb] of faint) {
+      if (fb <= a || fa >= b) continue
+      if (fa > a) out.push(text.slice(a, fa))
+      out.push(<span className="agent__dim" key={key++}>{text.slice(Math.max(a, fa), Math.min(b, fb))}</span>)
+      a = Math.min(b, fb)
+    }
+    if (a < b) out.push(text.slice(a, b))
+    return out
+  }
+  const nodes: (string | VNode)[] = []
+  let last = 0
+  const width = Math.max(0, ...text.split('\n').map((r) => r.length))
+  for (const l of findLinks(text, { wrapWidth: width })) {
+    nodes.push(...dimmed(last, l.start))
+    nodes.push(<ExtLink key={key++} href={l.href}>{dimmed(l.start, l.end)}</ExtLink>)
+    last = l.end
+  }
+  nodes.push(...dimmed(last, text.length))
   return nodes
 }
 
@@ -1104,6 +1133,9 @@ export function AgentRow({
   }
   const [busy, setBusy] = useState(false)
   const [sendErr, setSendErr] = useState('')
+  // Where this chat's Atlas page links ([[Page]], `Wiki/…/X.md`) open: a
+  // knowledge chat's own vault, the Atlas for a dev chat (lib/chatNotes.ts).
+  const chatVault = useMemo(() => ({ vault: knowledge ? s.vault : 'atlas' }), [knowledge, s.vault])
   // Set when the operator tries to send free text while a choice menu is open —
   // the send is held back (it would be swallowed as an "accept the preselect")
   // and the card asks them to pick an option or explicitly dismiss & send.
@@ -1848,7 +1880,7 @@ export function AgentRow({
           </div>
           {/* The prompt above the options, so it's clear WHAT is being asked —
               not just bare Yes/No buttons (parsed from the pane, menu.mjs). */}
-          {s.menuQuestion ? <div className="agent__history-menu-q">{s.menuQuestion}</div> : null}
+          {s.menuQuestion ? <div className="agent__history-menu-q">{linkNodes(s.menuQuestion)}</div> : null}
           {s.menuUnsupported ? (
             <div className="agent__history-note">
               {s.menuUnsupportedReason === 'multi-select'
@@ -2285,7 +2317,7 @@ export function AgentRow({
           transcriptPane
         )
       ) : (
-        <div className="agent__output">{s.lastOutput}</div>
+        <div className="agent__output">{linkNodes(s.lastOutput)}</div>
       )}
       {s.status === 'idle' ? (
         <div className="agent__keys" role="group" aria-label="respond to agent">
@@ -2388,7 +2420,7 @@ export function AgentRow({
               `📚 Atlas briefing${q.summary ? ` — ${q.summary}` : ''}`
             ) : (
               <>
-                {q.text || (q.images ? `${q.images} file${q.images > 1 ? 's' : ''}` : '')}
+                {q.text ? linkNodes(q.text) : q.images ? `${q.images} file${q.images > 1 ? 's' : ''}` : ''}
                 {q.text && q.images ? ` (+${q.images} file${q.images > 1 ? 's' : ''})` : ''}
               </>
             )}
@@ -2570,7 +2602,7 @@ export function AgentRow({
   // identical body renders either way, so head, transcript, respond toolbar and
   // prompt all keep working — only the container (and its CSS) changes.
   return (
-    <>
+    <ChatVault.Provider value={chatVault}>
       {fullscreen ? (
         createPortal(
           <div className={cls} role="dialog" aria-modal="true" ref={fullscreenRef}>
@@ -2611,6 +2643,6 @@ export function AgentRow({
         <li className={cls}>{body}</li>
       )}
       {appOverlay}
-    </>
+    </ChatVault.Provider>
   )
 }

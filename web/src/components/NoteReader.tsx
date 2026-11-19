@@ -1,10 +1,16 @@
-import { useEffect, useState } from 'preact/hooks'
+import { useEffect, useRef, useState } from 'preact/hooks'
 import { NoteInline } from './NoteInline'
 import { lockBodyScroll } from '../lib/scrollLock'
+import { headingMatches } from '../lib/vaultLinks'
 
 interface Props {
   path: string | null
   missing: string | null
+  /** A `[[Page#Heading]]` link's heading: scrolled to once the page renders. */
+  anchor?: string
+  /** 'compact' (a chat's page links): a panel over the chat, which stays
+   *  visible beside it — not a full-screen takeover. A sheet on a phone. */
+  variant?: 'full' | 'compact'
   /** Which vault the path lives in (default → work). */
   vault?: string
   /** True once a wikilink has been followed, so Back can return. */
@@ -23,10 +29,11 @@ interface Props {
 
 /** Full-screen overlay reader for any vault note / wiki page (read-only, except
  *  the Atlas TaskView's project/area picker). */
-export function NoteReader({ path, missing, vault, canGoBack, onBack, onClose, onWikiLink, onTaskChanged, onChat }: Props) {
+export function NoteReader({ path, missing, anchor, variant = 'full', vault, canGoBack, onBack, onClose, onWikiLink, onTaskChanged, onChat }: Props) {
   const isOpen = !!path || !!missing
   const [chatBusy, setChatBusy] = useState(false)
   const [chatErr, setChatErr] = useState('')
+  const bodyRef = useRef<HTMLDivElement>(null)
 
   // Reset the chat button's state whenever a different page is opened.
   useEffect(() => {
@@ -34,18 +41,43 @@ export function NoteReader({ path, missing, vault, canGoBack, onBack, onClose, o
     setChatErr('')
   }, [path])
 
+  // Esc closes the reader ONLY — caught on the way down and stopped, so the
+  // full-screen chat underneath (its own document-level Esc) stays open.
   useEffect(() => {
     if (!isOpen) return
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') onClose()
+      if (e.key !== 'Escape') return
+      e.stopPropagation()
+      onClose()
     }
-    document.addEventListener('keydown', onKey)
+    window.addEventListener('keydown', onKey, true)
     const unlock = lockBodyScroll()
     return () => {
-      document.removeEventListener('keydown', onKey)
+      window.removeEventListener('keydown', onKey, true)
       unlock()
     }
   }, [isOpen, onClose])
+
+  // Scroll to the anchored heading once the note has loaded and rendered
+  // (NoteInline fetches on its own); give up quietly after a few seconds.
+  useEffect(() => {
+    const body = bodyRef.current
+    if (!path || !anchor || !body) return
+    const find = () => {
+      const h = [...body.querySelectorAll('h1, h2, h3, h4, h5, h6')].find((el) => headingMatches(el.textContent ?? '', anchor))
+      if (h) h.scrollIntoView({ block: 'start' })
+      return !!h
+    }
+    if (find()) return
+    const mo = new MutationObserver(() => find() && stop())
+    const t = setTimeout(() => stop(), 5000)
+    const stop = () => {
+      mo.disconnect()
+      clearTimeout(t)
+    }
+    mo.observe(body, { childList: true, subtree: true })
+    return stop
+  }, [path, anchor])
 
   if (!isOpen) return null
 
@@ -65,7 +97,7 @@ export function NoteReader({ path, missing, vault, canGoBack, onBack, onClose, o
   }
 
   return (
-    <div className="reader" onClick={onClose}>
+    <div className={variant === 'compact' ? 'reader reader--compact' : 'reader'} onClick={onClose}>
       <div className="reader__panel glass" onClick={(e) => e.stopPropagation()}>
         <header className="reader__head">
           <div className="reader__head-left">
@@ -96,7 +128,7 @@ export function NoteReader({ path, missing, vault, canGoBack, onBack, onClose, o
             </button>
           </div>
         </header>
-        <div className="reader__body">
+        <div className="reader__body" ref={bodyRef}>
           {path ? (
             <NoteInline path={path} vault={vault} options={{ onWikiLink, onTaskChanged }} />
           ) : (

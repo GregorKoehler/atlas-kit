@@ -1,13 +1,17 @@
 /* ------------------------------------------------------------------ *
  * Minimal, dependency-free markdown renderer (no CDN, no innerHTML).
  * Renders the subset the wiki uses: headings, paragraphs, bold/italic,
- * inline code, links, [[wikilinks]], blockquotes, ordered/unordered
- * lists, hr, code blocks, and the recipes vault's `{timer: 20m}` step
- * convention (rendered as a live countdown chip).
+ * inline code, links (and bare URLs — lib/linkify.ts), [[wikilinks]] and
+ * bare `Wiki/…/X.md` vault paths (lib/vaultLinks.ts),
+ * blockquotes, ordered/unordered lists, hr, code blocks, and the recipes
+ * vault's `{timer: 20m}` step convention (rendered as a live countdown chip).
  * Output is Preact VNodes, so it is XSS-safe by construction.
  * ------------------------------------------------------------------ */
-import type { ComponentChildren, JSX } from 'preact'
-import { useEffect, useState } from 'preact/hooks'
+import { createContext, type ComponentChildren, type JSX } from 'preact'
+import { useContext, useEffect, useState } from 'preact/hooks'
+import { URL_SOURCE, readCandidate, safeHref } from './linkify'
+import { VAULT_PATH_SOURCE, knownPath, parseWikiLink, relativeNotePath, splitRefs, vaultPathOf } from './vaultLinks'
+import { openChatNote, useChatPages } from './chatNotes'
 
 export interface MdOptions {
   onWikiLink?: (target: string) => void
@@ -234,8 +238,83 @@ function renderBlocks(md: string, opts: MdOptions): JSX.Element[] {
   return out
 }
 
-const INLINE =
-  /(!\[[^\]]*\]\([^)]+\))|(`[^`]+`)|(\*\*[^*]+\*\*)|(\[\[[^\]]+\]\])|(\[[^\]]+\]\([^)]+\))|(\*[^*\s][^*]*\*)|(_[^_\s][^_]*_)|(\{timer:\s*[^}]+\})/g
+// Group 9 is a URL (lib/linkify.ts), group 10 a bare vault path
+// (lib/vaultLinks.ts): alternatives of the same tokenizer, so they are only
+// ever claimed from PLAIN text — never inside `code`, a [text](url), an image
+// or a [[wikilink]], which start earlier and win. `_x_` italics need a
+// non-word char on both sides (CommonMark's intraword rule), or the `_`s of
+// https://x.y/a_b_c would split the URL.
+const INLINE = new RegExp(
+  /(!\[[^\]]*\]\([^)]+\))|(`[^`]+`)|(\*\*[^*]+\*\*)|(\[\[[^\]]+\]\])|(\[[^\]]+\]\([^)]+\))|(\*[^*\s][^*]*\*)|((?<!\w)_[^_\s][^_]*_(?!\w))|(\{timer:\s*[^}]+\})/
+    .source + `|(${URL_SOURCE})|(${VAULT_PATH_SOURCE})`,
+  'g',
+)
+
+/** Set by a chat row (AgentRow): the vault its Atlas page links open in —
+ * a knowledge chat's own vault, `atlas` for a dev chat. Outside any chat it is
+ * null and links stay as they were: a reader passes its own `onWikiLink`, and
+ * everything else renders a wikilink static. */
+export const ChatVault = createContext<{ vault?: string } | null>(null)
+
+/** A [[wikilink]]: the reader's own handler when it passes one (follow →
+ * back stack), else the chat overlay of the surrounding chat's vault, else a
+ * static span. The click never reaches the bubble/menu handler around it. */
+function WikiRef({ target, label, onWikiLink }: { target: string; label: ComponentChildren; onWikiLink?: (t: string) => void }) {
+  const chat = useContext(ChatVault)
+  const go = onWikiLink ?? (chat ? (t: string) => openChatNote(chat.vault, t) : null)
+  if (!go) return <span className="wikilink wikilink--static">{label}</span>
+  return (
+    <button
+      type="button"
+      className="wikilink"
+      onClick={(e) => {
+        e.stopPropagation()
+        go(target)
+      }}
+    >
+      {label}
+    </button>
+  )
+}
+
+/** A `Wiki/…/X.md` / `Tasks/x.md` path inside a chat: a link only when the
+ * chat's vault really has that page (its page list, loaded once per vault on
+ * the first path that asks — never per render); otherwise exactly the text. */
+function VaultPathRef({ path, onWikiLink, children }: { path: string; onWikiLink?: (t: string) => void; children: ComponentChildren }) {
+  const chat = useContext(ChatVault)
+  const hit = knownPath(useChatPages(chat?.vault, !!chat), path)
+  if (!chat || !hit) return <>{children}</>
+  return <WikiRef target={hit} label={children} onWikiLink={onWikiLink} />
+}
+
+// A link out of the page: new tab, no opener, and a click that never reaches
+// the bubble/menu handler around it.
+export function ExtLink({ href, children }: { href: string; children: ComponentChildren }) {
+  return (
+    <a className="prose__a" href={href} target="_blank" rel="noopener noreferrer" onClick={(e) => e.stopPropagation()}>
+      {children}
+    </a>
+  )
+}
+
+/** Plain (non-markdown) text with every URL, [[wikilink]] and vault path in
+ * it a link — the operator's own bubbles, question blocks, outbound briefs.
+ * Text stays byte-identical (a wikilink shows its label, as in markdown). */
+export function linkNodes(text: string, opts: MdOptions = {}): ComponentChildren {
+  const parts = splitRefs(text)
+  if (parts.length === 1 && typeof parts[0] === 'string') return text
+  return parts.map((p, i) =>
+    typeof p === 'string' ? (
+      p
+    ) : p.kind === 'url' ? (
+      <ExtLink key={i} href={p.href}>{p.text}</ExtLink>
+    ) : p.kind === 'wiki' ? (
+      <WikiRef key={i} target={p.target} label={p.label} onWikiLink={opts.onWikiLink} />
+    ) : (
+      <VaultPathRef key={i} path={p.path} onWikiLink={opts.onWikiLink}>{p.text}</VaultPathRef>
+    ),
+  )
+}
 
 export function renderInline(text: string, opts: MdOptions): ComponentChildren {
   const nodes: ComponentChildren[] = []
@@ -264,46 +343,48 @@ export function renderInline(text: string, opts: MdOptions): ComponentChildren {
         nodes.push(token)
       }
     } else if (m[2]) {
-      nodes.push(<code key={key++} className="prose__code">{token.slice(1, -1)}</code>)
+      // A code span holding exactly a vault path links (in a chat, when the
+      // page exists); anything else in code — a [[wikilink]] included — is code.
+      const code = token.slice(1, -1)
+      const vp = vaultPathOf(code)
+      const el = <code key={key++} className="prose__code">{code}</code>
+      nodes.push(vp ? <VaultPathRef key={key++} path={vp} onWikiLink={opts.onWikiLink}>{el}</VaultPathRef> : el)
     } else if (m[3]) {
-      nodes.push(<strong key={key++}>{token.slice(2, -2)}</strong>)
+      nodes.push(<strong key={key++}>{linkNodes(token.slice(2, -2), opts)}</strong>)
     } else if (m[4]) {
-      const inner = token.slice(2, -2)
-      const [target, alias] = inner.split('|')
-      const label = (alias ?? target).trim()
-      const tgt = target.trim()
-      if (opts.onWikiLink) {
-        nodes.push(
-          <button
-            key={key++}
-            type="button"
-            className="wikilink"
-            onClick={() => opts.onWikiLink?.(tgt)}
-          >
-            {label}
-          </button>,
-        )
-      } else {
-        nodes.push(<span key={key++} className="wikilink wikilink--static">{label}</span>)
-      }
+      const { target, label } = parseWikiLink(token.slice(2, -2))
+      nodes.push(<WikiRef key={key++} target={target} label={label} onWikiLink={opts.onWikiLink} />)
     } else if (m[5]) {
       const lm = token.match(/^\[([^\]]+)\]\(([^)]+)\)$/)
-      if (lm) {
-        nodes.push(
-          <a key={key++} className="prose__a" href={lm[2]} target="_blank" rel="noopener noreferrer">
-            {lm[1]}
-          </a>,
-        )
+      // Only an http(s)/mailto target becomes an href — `[x](javascript:…)`
+      // stays visible as the text it is. In a reader, a relative link to
+      // another note of the vault (`../Concepts/X.md`) follows like a wikilink.
+      const href = lm ? safeHref(lm[2]) : null
+      const note = lm && !href && opts.onWikiLink ? relativeNotePath(opts.basePath, lm[2]) : null
+      if (lm && href) {
+        nodes.push(<ExtLink key={key++} href={href}>{lm[1]}</ExtLink>)
+      } else if (lm && note) {
+        nodes.push(<WikiRef key={key++} target={note} label={lm[1]} onWikiLink={opts.onWikiLink} />)
       } else {
         nodes.push(token)
       }
     } else if (m[6]) {
-      nodes.push(<em key={key++}>{token.slice(1, -1)}</em>)
+      nodes.push(<em key={key++}>{linkNodes(token.slice(1, -1), opts)}</em>)
     } else if (m[7]) {
-      nodes.push(<em key={key++}>{token.slice(1, -1)}</em>)
+      nodes.push(<em key={key++}>{linkNodes(token.slice(1, -1), opts)}</em>)
     } else if (m[8]) {
       const spec = token.replace(/^\{timer:\s*/, '').replace(/\}$/, '').trim()
       nodes.push(<TimerChip key={key++} spec={spec} />)
+    } else if (m[9]) {
+      // The candidate over-matches trailing punctuation; resume right after
+      // the part that is the URL so the rest tokenizes as ordinary text.
+      const c = readCandidate(token)
+      nodes.push(c.href ? <ExtLink key={key++} href={c.href}>{c.text}</ExtLink> : token.slice(0, c.length))
+      last = m.index + c.length
+      INLINE.lastIndex = last
+      continue
+    } else if (m[10]) {
+      nodes.push(<VaultPathRef key={key++} path={token} onWikiLink={opts.onWikiLink}>{token}</VaultPathRef>)
     }
 
     last = m.index + token.length
