@@ -67,6 +67,8 @@ import { promptFileBody, promptFileCommand } from './prompt-file-launch.mjs'
 import { buildCandidates, evidencePrompt } from './atlas-candidates.mjs'
 // The bus log — where a note dropped as stale stays visible (delivered: false).
 import { appendMessage } from './agent-messages.mjs'
+// Where a new worktree starts: a freshly fetched origin default branch.
+import { addAgentWorktree } from './worktree-base.mjs'
 
 const HERE = path.dirname(new URL(import.meta.url).pathname)
 const REPOS_FILE = process.env.AGENT_LOCAL_REPOS || path.join(HERE, 'agent-local-repos.json')
@@ -2160,13 +2162,17 @@ export async function spawn({ task, repo, preamble, model, effort, context, imag
   }
 
   await run(['mkdir', '-p', worktreeBase])
-  const wt = await run(['git', '-C', repoPath, 'worktree', 'add', '-b', branch, worktree])
+  // Start from a freshly fetched origin default branch, not repoPath's HEAD
+  // (worktree-base.mjs); the base it used rides the session and the audit line.
+  const wt = await addAgentWorktree({ repo: repoPath, branch, worktree, baseRef: target.baseRef, exec: run })
+  const wtBase = { baseRef: wt.baseRef, baseSha: wt.baseSha, baseFetched: wt.baseFetched }
+  Object.assign(session, wtBase)
   if (!wt.ok) {
     session.status = 'error'
     session.error = (wt.stderr || 'git worktree add failed').slice(0, 500)
     registry.sessions[id] = session
     persist()
-    audit({ action: 'spawn', id, repo, ok: false, error: session.error })
+    audit({ action: 'spawn', id, repo, ...wtBase, ok: false, error: session.error })
     return { status: 502, ok: false, error: session.error }
   }
 
@@ -2205,7 +2211,7 @@ export async function spawn({ task, repo, preamble, model, effort, context, imag
 
   registry.sessions[id] = session
   persist()
-  audit({ action: 'spawn', id, repo, branch, model: model || DEFAULT_MODEL, effort: effort || DEFAULT_EFFORT, ...(provider ? { provider } : {}), images: imagePaths.length, ok: true })
+  audit({ action: 'spawn', id, repo, branch, ...wtBase, ...(wt.fetchError ? { fetchError: wt.fetchError } : {}), model: model || DEFAULT_MODEL, effort: effort || DEFAULT_EFFORT, ...(provider ? { provider } : {}), images: imagePaths.length, ok: true })
   return { status: 200, ok: true, id }
 }
 
