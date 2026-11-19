@@ -93,6 +93,7 @@ import { ATLAS_QUERY_WRAPPER_SRC } from '../api/src/atlas-query-wrapper.mjs'
 // must refuse for exactly the same arithmetic (see agent-capacity.mjs).
 import { capacityVerdict, capacityMessage, readMemStatus } from '../api/src/agent-capacity.mjs'
 import { addAgentWorktree } from '../api/src/worktree-base.mjs'
+import { withNativeMsgPolicy } from '../api/src/native-msg-policy.mjs'
 import { buildRedeploySystemdRunArgs, isUnitCollisionError } from './redeploy.mjs'
 
 const PORT = Number(process.env.BRIDGE_PORT || 7878)
@@ -118,9 +119,14 @@ const AUDIT_LOG = process.env.BRIDGE_AUDIT_LOG || path.join(HERE, 'audit.log')
 // INSIDE the dev container via `docker exec` — the bridge host's filesystem, and
 // therefore any path it resolved, does not apply. The container's own PATH is the
 // only correct lookup. Set AGENT_LAUNCH_CMD to pin a path inside the container.
-const LAUNCH_CMD =
+// A bridge only ever runs DEV sessions (knowledge/Atlas chats are box-local), so
+// the launch carries the dev half of the native-messaging policy: refuse inbound
+// cross-session mail AND deny both native messaging tools — the SHARED decision
+// in api/src/native-msg-policy.mjs, never a copy, so box and bridge can't drift.
+// Turn it off on THIS machine alone with ATLAS_NATIVE_MSG_POLICY=off.
+const LAUNCH_CMD = withNativeMsgPolicy(
   process.env.AGENT_LAUNCH_CMD ||
-  'IS_SANDBOX=1 claude --model {model} --effort {effort} --dangerously-skip-permissions {task}'
+  'IS_SANDBOX=1 claude --model {model} --effort {effort} --dangerously-skip-permissions {task}', 'dev')
 // Where a session's launch prompt is materialized INSIDE its container. The
 // prompt is NOT interpolated into the tmux command (see prompt-file-launch.mjs):
 // tmux rejects a `new-session … sh -lc <cmd>` over ~16 KB with `command too

@@ -69,6 +69,8 @@ import { buildCandidates, evidencePrompt } from './atlas-candidates.mjs'
 import { appendMessage } from './agent-messages.mjs'
 // Where a new worktree starts: a freshly fetched origin default branch.
 import { addAgentWorktree } from './worktree-base.mjs'
+// Closes Claude Code's own cross-session channel on every launch (--settings).
+import { withNativeMsgPolicy } from './native-msg-policy.mjs'
 
 const HERE = path.dirname(new URL(import.meta.url).pathname)
 const REPOS_FILE = process.env.AGENT_LOCAL_REPOS || path.join(HERE, 'agent-local-repos.json')
@@ -104,17 +106,22 @@ const DEV_MCP_CONFIG = `${WORKSPACE}/api/src/mcp/dev.mcp.json`
 // ENOENT while an interactive `serve.sh restart` worked. A custom
 // AGENT_*_LAUNCH_CMD is left exactly as the operator wrote it.
 const CLAUDE = claudeShellWord()
-export const LAUNCH_CMD =
+// Every template below is folded through withNativeMsgPolicy, which adds the
+// `--settings` closing Claude Code's own cross-session messaging (see
+// native-msg-policy.mjs) — dev sessions refuse inbound AND lose both native
+// messaging tools, knowledge sessions only refuse inbound. It wraps the env
+// override too: a custom template must not reopen the channel.
+export const LAUNCH_CMD = withNativeMsgPolicy(
   process.env.AGENT_LOCAL_LAUNCH_CMD ||
-  `IS_SANDBOX=1 env {claudeEnv}${CLAUDE} --model {model} --effort {effort} --mcp-config ${DEV_MCP_CONFIG} --strict-mcp-config --dangerously-skip-permissions {task}`
+  `IS_SANDBOX=1 env {claudeEnv}${CLAUDE} --model {model} --effort {effort} --mcp-config ${DEV_MCP_CONFIG} --strict-mcp-config --dangerously-skip-permissions {task}`, 'dev')
 // Knowledge agents (vault chats) additionally pin `--session-id {sid}`: they all
 // share the vault as cwd, so without a pinned id the transcript reader's
 // newest-file heuristic would cross-read between concurrent chats.
 // Same `{claudeEnv}` slot as a dev agent's: a knowledge chat can take a PROVIDER
 // PROFILE too, and with none the slot is the same `-u ANTHROPIC_API_KEY ` literal.
-export const KNOWLEDGE_LAUNCH_CMD =
+export const KNOWLEDGE_LAUNCH_CMD = withNativeMsgPolicy(
   process.env.AGENT_KNOWLEDGE_LAUNCH_CMD ||
-  `IS_SANDBOX=1 env {claudeEnv}${CLAUDE} --model {model} --effort {effort} --session-id {sid} --dangerously-skip-permissions {task}`
+  `IS_SANDBOX=1 env {claudeEnv}${CLAUDE} --model {model} --effort {effort} --session-id {sid} --dangerously-skip-permissions {task}`, 'knowledge')
 // The Atlas ORCHESTRATOR (the vault:'atlas' chat) is a knowledge agent that can
 // ALSO spawn/monitor/steer other agents. It loads the Atlas Kit MCP server via
 // control.mcp.json, which sets ATLAS_AGENT_CONTROL=1 in the MCP child's env —
@@ -125,9 +132,9 @@ const CONTROL_MCP_CONFIG = `${WORKSPACE}/api/src/mcp/control.mcp.json`
 // `ATLAS_SESSION={atlasSession}` exports this chat's session id into the
 // claude process — and so into its MCP child, which reads it in spawn_agent to
 // stamp every agent it spawns with `parent`, drawing the lineage constellation.
-export const ATLAS_CONTROL_LAUNCH_CMD =
+export const ATLAS_CONTROL_LAUNCH_CMD = withNativeMsgPolicy(
   process.env.AGENT_ATLAS_LAUNCH_CMD ||
-  `IS_SANDBOX=1 ATLAS_SESSION={atlasSession} env {claudeEnv}${CLAUDE} --model {model} --effort {effort} --session-id {sid} --mcp-config ${CONTROL_MCP_CONFIG} --strict-mcp-config --dangerously-skip-permissions {task}`
+  `IS_SANDBOX=1 ATLAS_SESSION={atlasSession} env {claudeEnv}${CLAUDE} --model {model} --effort {effort} --session-id {sid} --mcp-config ${CONTROL_MCP_CONFIG} --strict-mcp-config --dangerously-skip-permissions {task}`, 'knowledge')
 // The PAIRED ATLAS WORKER is a restricted, dashboard-driven session — the same
 // knowledge-only READ profile a dev agent gets (worker.mcp.json), and never the
 // orchestrator's control tools. It writes the Atlas through its own worktree, not
@@ -137,9 +144,9 @@ export const ATLAS_CONTROL_LAUNCH_CMD =
 // operator, and it takes no `provider` from anywhere — so it stays on the
 // subscription backend whatever backend the agent it is paired to runs on.
 const WORKER_MCP_CONFIG = `${WORKSPACE}/api/src/mcp/worker.mcp.json`
-export const ATLAS_WORKER_LAUNCH_CMD =
+export const ATLAS_WORKER_LAUNCH_CMD = withNativeMsgPolicy(
   process.env.AGENT_ATLAS_WORKER_LAUNCH_CMD ||
-  `IS_SANDBOX=1 env -u ANTHROPIC_API_KEY ${CLAUDE} --model {model} --effort {effort} --session-id {sid} --mcp-config ${WORKER_MCP_CONFIG} --strict-mcp-config --dangerously-skip-permissions {task}`
+  `IS_SANDBOX=1 env -u ANTHROPIC_API_KEY ${CLAUDE} --model {model} --effort {effort} --session-id {sid} --mcp-config ${WORKER_MCP_CONFIG} --strict-mcp-config --dangerously-skip-permissions {task}`, 'knowledge')
 // Extended (1M) context is the DEFAULT and applies to EVERY model — the
 // subscription serves the 1M window without usage credits — so the fallback model
 // + the meter's window default to it. AGENT_EXTENDED_CONTEXT=0 (or false/no/off)
@@ -261,17 +268,17 @@ const REVIVE_MEM_PER_AGENT_MB = Number(process.env.AGENT_LOCAL_REVIVE_MEM_PER_AG
 const REVIVE_STAGGER_MS = Number(process.env.AGENT_LOCAL_REVIVE_STAGGER_MS || RECONCILE_STAGGER_MS)
 // Resume launch: like LAUNCH_CMD but `--resume {sid}` restores the full session
 // (the task/preamble is already in the transcript), so none is re-supplied.
-export const RESUME_CMD =
+export const RESUME_CMD = withNativeMsgPolicy(
   process.env.AGENT_LOCAL_RESUME_CMD ||
-  `IS_SANDBOX=1 env {claudeEnv}${CLAUDE} --model {model} --effort {effort} --mcp-config ${DEV_MCP_CONFIG} --strict-mcp-config --dangerously-skip-permissions --resume {sid}`
+  `IS_SANDBOX=1 env {claudeEnv}${CLAUDE} --model {model} --effort {effort} --mcp-config ${DEV_MCP_CONFIG} --strict-mcp-config --dangerously-skip-permissions --resume {sid}`, 'dev')
 // Resume launch for the Atlas ORCHESTRATOR (the vault:'atlas' chat): like RESUME_CMD
 // but re-attaches the agent-control MCP config + ATLAS_SESSION, so a revived
 // orchestrator gets its spawn/prompt/kill tools back — a plain resume would bring the
 // chat back DE-FANGED. Mirrors ATLAS_CONTROL_LAUNCH_CMD with `--resume` in place of
 // `--session-id {sid} {task}` (the conversation is already in the transcript).
-export const ATLAS_CONTROL_RESUME_CMD =
+export const ATLAS_CONTROL_RESUME_CMD = withNativeMsgPolicy(
   process.env.AGENT_ATLAS_RESUME_CMD ||
-  `IS_SANDBOX=1 ATLAS_SESSION={atlasSession} env {claudeEnv}${CLAUDE} --model {model} --effort {effort} --mcp-config ${CONTROL_MCP_CONFIG} --strict-mcp-config --dangerously-skip-permissions --resume {sid}`
+  `IS_SANDBOX=1 ATLAS_SESSION={atlasSession} env {claudeEnv}${CLAUDE} --model {model} --effort {effort} --mcp-config ${CONTROL_MCP_CONFIG} --strict-mcp-config --dangerously-skip-permissions --resume {sid}`, 'knowledge')
 // Serial ship train backstop: a member that goes busy and never prints
 // ATLAS:SHIPPED is detected as stopped the moment it returns to idle (see
 // pumpShipTrain); this only bounds a member that stays wedged-busy forever, so
